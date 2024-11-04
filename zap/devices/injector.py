@@ -1,7 +1,7 @@
 import numpy as np
 import scipy.sparse as sp
 import torch
-from attrs import define, field
+from attrs import define, field, Factory
 
 from typing import Optional
 from numpy.typing import NDArray
@@ -16,9 +16,12 @@ class AbstractInjector(AbstractDevice):
 
     num_nodes: int
     terminal: NDArray
+    nominal_capacity: NDArray = field(
+        default=Factory(lambda self: np.ones(self.num_devices), takes_self=True),
+        converter=make_dynamic,
+    )
 
     # These properties should be implemented by subclasses
-    nominal_capacity: NDArray = field(init=False)
     min_power: NDArray = field(init=False)
     max_power: NDArray = field(init=False)
     linear_cost: NDArray = field(init=False)
@@ -166,59 +169,29 @@ class AbstractInjector(AbstractDevice):
 class Injector(AbstractInjector):
     """A single-node device that may deposit or withdraw power from the network."""
 
-    min_power: NDArray
-    max_power: NDArray
-    linear_cost: NDArray
-    quadratic_cost: Optional[NDArray] = None
-    nominal_capacity: Optional[NDArray] = None
-    capital_cost: Optional[NDArray] = None
-    emission_rates: Optional[NDArray] = None
+    min_power: NDArray = field(converter=make_dynamic)
+    max_power: NDArray = field(converter=make_dynamic)
+    linear_cost: NDArray = field(converter=make_dynamic)
+    quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    capital_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    emission_rates: Optional[NDArray] = field(default=None, converter=make_dynamic)
 
-    def __attrs_post_init__(self):
-        if self.nominal_capacity is None:
-            self.nominal_capacity = np.ones(self.num_devices)
-
-        # Reshape arrays
-        self.min_power = make_dynamic(self.min_power)
-        self.max_power = make_dynamic(self.max_power)
-        self.linear_cost = make_dynamic(self.linear_cost)
-        self.quadratic_cost = make_dynamic(self.quadratic_cost)
-        self.nominal_capacity = make_dynamic(self.nominal_capacity)
-        self.capital_cost = make_dynamic(self.capital_cost)
-        self.emission_rates = make_dynamic(self.emission_rates)
-
-        # TODO - Add dimension checks
-        pass
+    # TODO - Add dimension checks
 
 
 @define(kw_only=True, slots=False)
 class Generator(AbstractInjector):
     """An Injector that can only deposit power."""
 
-    nominal_capacity: Optional[NDArray] = None
-    dynamic_capacity: NDArray
-    linear_cost: NDArray
-    quadratic_cost: Optional[NDArray] = None
-    capital_cost: Optional[NDArray] = None
-    emission_rates: Optional[NDArray] = None
-    min_nominal_capacity: Optional[NDArray] = None
-    max_nominal_capacity: Optional[NDArray] = None
+    dynamic_capacity: NDArray = field(converter=make_dynamic)
+    linear_cost: NDArray = field(converter=make_dynamic)
+    quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    capital_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    emission_rates: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    min_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    max_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
 
-    def __attrs_post_init__(self):
-        if self.nominal_capacity is None:
-            self.nominal_capacity = np.ones(self.num_devices)
-
-        self.dynamic_capacity = make_dynamic(self.dynamic_capacity)
-        self.nominal_capacity = make_dynamic(self.nominal_capacity)
-        self.linear_cost = make_dynamic(self.linear_cost)
-        self.quadratic_cost = make_dynamic(self.quadratic_cost)
-        self.capital_cost = make_dynamic(self.capital_cost)
-        self.emission_rates = make_dynamic(self.emission_rates)
-        self.min_nominal_capacity = make_dynamic(self.min_nominal_capacity)
-        self.max_nominal_capacity = make_dynamic(self.max_nominal_capacity)
-
-        # TODO - Add dimension checks
-        pass
+    # TODO - Add dimension checks
 
     @property
     def min_power(self):
@@ -267,18 +240,9 @@ class Generator(AbstractInjector):
 class Load(AbstractInjector):
     """An Injector that can only withdraw power."""
 
-    nominal_capacity: Optional[NDArray] = None
-    load: NDArray
-    linear_cost: NDArray
-    quadratic_cost: Optional[NDArray] = None
-
-    def __attrs_post_init__(self):
-        if self.nominal_capacity is None:
-            self.nominal_capacity = make_dynamic(np.ones(self.num_devices))
-
-        self.load = make_dynamic(self.load)
-        self.linear_cost = make_dynamic(self.linear_cost)
-        self.quadratic_cost = make_dynamic(self.quadratic_cost)
+    load: NDArray = field(converter=make_dynamic)
+    linear_cost: NDArray = field(converter=make_dynamic)
+    quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
 
     @property
     def min_power(self):
