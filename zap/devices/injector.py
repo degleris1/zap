@@ -12,7 +12,7 @@ from .abstract import AbstractDevice, get_time_horizon, make_dynamic
 @define(kw_only=True, slots=False)
 class AbstractInjector(AbstractDevice):
     """A single-node device that may deposit or withdraw power from the network. Abstract type that
-    should not be instantiated."""
+    should not be instantiated but contains shared behavior among all subclasses."""
 
     num_nodes: int
     terminal: NDArray
@@ -28,10 +28,6 @@ class AbstractInjector(AbstractDevice):
     quadratic_cost: Optional[NDArray] = field(init=False)
     capital_cost: Optional[NDArray] = field(init=False)
     emission_rates: Optional[NDArray] = field(init=False)
-
-    # ====
-    # SHARED BEHAVIOR
-    # ====
 
     @property
     def terminals(self):
