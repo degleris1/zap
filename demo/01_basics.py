@@ -294,6 +294,12 @@ def __(ADMMSolver, admm_devices, dtype, machine, net, time_horizon):
 
 @app.cell
 def __(solution_admm):
+    solution_admm.power
+    return
+
+
+@app.cell
+def __(solution_admm):
     # ADMM solutions need to be cast to a standard DispatchOutcome
     outcome_admm = solution_admm.as_outcome()
 
