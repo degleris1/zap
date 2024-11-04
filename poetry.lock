@@ -3591,4 +3591,4 @@ pypsa = ["pypsa"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.13"
-content-hash = "1922ad23681d3be3b25bd285377f1eefd6ce196b39ce79bc36e000ce162011c1"
+content-hash = "5d363012bfd1d4c91eb5a6bf1dfe9058fc6ba7c01f35bfb4f89723f0a3cc08da"
