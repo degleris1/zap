@@ -89,16 +89,18 @@ class ADMMState:
         )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass()
 class ADMMSolver:
     """Stores ADMM solver parameters and exposes a solve function."""
 
-    num_iterations: int
-    rho_power: float
-    rho_angle: Optional[float] = None
+    machine: str = None
+    dtype: object = torch.float32
+    num_iterations: int = 10000
+    rho_power: float = 1.0
+    rho_angle: Optional[float] = 1.0
     alpha: float = 1.0
-    atol: float = 0.0
-    rtol: float = 0.0
+    atol: float = 1e-5
+    rtol: float = 1e-5
     rtol_primal: Optional[float] = None
     rtol_dual: Optional[float] = None
     dual_bias: float = 1.0
@@ -106,20 +108,17 @@ class ADMMSolver:
     resid_norm: int = 2
     safe_mode: bool = False
     track_objective: bool = True
-    machine: str = None
-    dtype: object = torch.float64
     battery_window: Optional[int] = None
     battery_inner_weight: float = 1.0
     battery_inner_over_relaxation: float = 1.8
     battery_inner_iterations: int = 10
     minimum_iterations: int = 10
     relative_rho_angle: bool = False
-    adaptive_rho: bool = False
+    adaptive_rho: bool = True
     tau: float = 1.1
     adaptation_tolerance: float = 2.0
-    adaptation_frequency: int = 10
+    adaptation_frequency: int = 50
     verbose: int = 1
-
     scale_dual_residuals: bool = None  # Deprecated
 
     def __post_init__(self):

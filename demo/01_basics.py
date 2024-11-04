@@ -268,7 +268,7 @@ def __():
 
 @app.cell
 def __(torch):
-    machine = "cpu"  # Pick "cuda" for a Nvidia GPU machine
+    machine = "cpu"  # Pick "cuda" for a machine with an Nvidia GPU
     dtype = torch.float32
     return dtype, machine
 
@@ -284,13 +284,8 @@ def __(ADMMSolver, admm_devices, dtype, machine, net, time_horizon):
     admm = ADMMSolver(
         machine=machine,
         dtype=dtype,
-        num_iterations=10000,
-        rho_power=1.0,
-        rho_angle=1.0,
         atol=1e-6,
         rtol=1e-6,
-        adaptive_rho=True,
-        adaptation_frequency=50,
     )
 
     solution_admm, history_admm = admm.solve(net, admm_devices, time_horizon)
