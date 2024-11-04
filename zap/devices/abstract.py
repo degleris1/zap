@@ -1,4 +1,5 @@
 import torch
+import warnings
 import cvxpy as cp
 import numpy as np
 import scipy.sparse as sp
@@ -257,6 +258,9 @@ class AbstractDevice:
 
         if machine == "cuda":
             print(f"Warning: moving data to GPU for device {type(self)}")
+
+        if hasattr(new_device, "__slots__"):
+            warnings.warn("torchify does not support __slots__ for device classes. ")
 
         for k, v in new_device.__dict__.items():
             if isinstance(v, np.ndarray) and np.issubdtype(v.dtype, np.number):
