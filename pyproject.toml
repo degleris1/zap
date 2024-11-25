@@ -37,6 +37,10 @@ optional = true
 wandb = "^0.18.5"
 mosek = "^10.2.6"
 
+
+[tool.poetry.group.docs.dependencies]
+sphinx = "^8.1.3"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
