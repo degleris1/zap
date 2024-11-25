@@ -3,15 +3,25 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
+.. Add your content using ``reStructuredText`` syntax. See the
+   `reStructuredText <https://www.sphinx-doc.org/en/master/usage/restructuredtext/index.html>`_
+   documentation for details.
+
 zap documentation
 =================
 
-Add your content using ``reStructuredText`` syntax. See the
-`reStructuredText <https://www.sphinx-doc.org/en/master/usage/restructuredtext/index.html>`_
-documentation for details.
+**Zap**  is a Python library for for differentiable electricity system modeling.
+It provides a modular, component-based approach to building electricity models.
+Models can be solved using a GPU-accelerated ADMM solver, integrated into PyTorch-based deep learning models, or iteratively planned using gradient algorithms.
+
+.. note::
+
+   This project is under active development.
 
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Contents:
+   :hidden:
+   :maxdepth: 1
 
+   Home<self>
+   Quick Start<quickstart>
