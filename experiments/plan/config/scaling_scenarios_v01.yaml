@@ -6,7 +6,7 @@ tags: []
 
 system:
   threads: 128
-  runtime: 150
+  runtime: 120
   memory: auto
 
 data:
@@ -17,7 +17,7 @@ data:
   num_nodes: 500
   use_extra_components: true
   start_hour: peak_hybrid_day
-  num_hours: 6144
+  num_hours: [expand, 24, 48, 96, 192, 384, 768, 1536]
   battery_cost_scale: 1.0
   generator_cost_scale:
     hydro: 1.0
@@ -40,8 +40,11 @@ problem:
   hours_per_scenario: 24
   cost_weight: 1.0
   emissions_weight: 200.0  # $ / ton CO2
-  regularize: 1.0e-6  # Jacobian regularization
   parameters: [generator, dc_line, ac_line, battery]
+
+layer:
+  linear_solver: mkl
+  regularize: 1.0e-6  # Jacobian regularization
 
 optimizer:
   name: gradient_descent
@@ -51,7 +54,7 @@ optimizer:
   log_wandb_every: 1
   checkpoint_every: 1
   parallel: true
-  batch_size: [expand, 1, 2, 4, 8, 16, 32, 64, 128]
+  batch_size: 0  # Full gradient descent
   num_parallel_workers: 0  # One per scenario
   track_full_loss_every: 1000
   args:

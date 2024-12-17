@@ -771,9 +771,8 @@ class PowerNetwork:
 
             grad_back = sparse_qr_solve_mkl(jac_t.tocsr(), grad)
 
-        elif linear_solver == "scipy":  # Use scipy
-            lu_factors = sp.linalg.splu(jac_t)
-            grad_back = lu_factors.solve(grad)
+        elif linear_solver == "scipy":  # Use scipy, with umfpack if available
+            grad_back = sp.linalg.spsolve(jac_t, grad, use_umfpack=True)
 
         else:
             raise ValueError(f"Unknown linear solver: {linear_solver}")

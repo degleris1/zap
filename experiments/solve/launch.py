@@ -42,6 +42,7 @@ for i, config in enumerate(config_list):
 {gpu_line}
 #SBATCH --time={system["runtime"]}
 
+module load PrgEnv-intel
 poetry shell
 srun time python -u experiments/solve/runner.py {config_path} {i}
 """

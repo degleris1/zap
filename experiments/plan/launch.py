@@ -42,8 +42,8 @@ for i, config in enumerate(config_list):
 {gpu_line}
 #SBATCH --time={system["runtime"]}
 
-module load conda
-conda activate $ZAP_ENV
+module load PrgEnv-intel
+poetry shell
 srun python -u experiments/plan/runner.py {config_path} {i}
 """
 

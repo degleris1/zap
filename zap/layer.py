@@ -1,5 +1,6 @@
 import torch
 import cvxpy as cp
+import time
 from typing import Any
 from copy import deepcopy
 
@@ -22,6 +23,7 @@ class DispatchLayer:
         num_contingencies=0,
         contingency_device=None,
         contingency_mask=None,
+        linear_solver="scipy",
     ):
         self.network = network
         self.devices = devices
@@ -33,6 +35,7 @@ class DispatchLayer:
         self.num_contingencies = num_contingencies
         self.contingency_device = contingency_device
         self.contingency_mask = contingency_mask
+        self.linear_solver = linear_solver
 
         # TODO - check that parameters match devices
         # TODO - check that parameters are unique?
@@ -55,7 +58,8 @@ class DispatchLayer:
     def forward(self, **kwargs) -> DispatchOutcome:
         parameters = self.setup_parameters(**kwargs)
 
-        return self.network.dispatch(
+        start = time.time()
+        result = self.network.dispatch(
             self.devices,
             time_horizon=self.time_horizon,
             parameters=parameters,
@@ -66,6 +70,8 @@ class DispatchLayer:
             contingency_device=self.contingency_device,
             contingency_mask=self.contingency_mask,
         )
+        print("Dispatch: ", time.time() - start)
+        return result
 
     def backward(self, z: DispatchOutcome, dz: DispatchOutcome, regularize=1e-8, **kwargs):
         parameters = self.setup_parameters(**kwargs)
@@ -74,7 +80,13 @@ class DispatchLayer:
         # dz_bar = inv(JK_z.T) @ dz
         # start = time.time()
         dz_bar = self.network.kkt_vjp_variables(
-            dz, self.devices, z, parameters=parameters, regularize=regularize, vectorize=False
+            dz,
+            self.devices,
+            z,
+            parameters=parameters,
+            regularize=regularize,
+            vectorize=False,
+            linear_solver=self.linear_solver,
         )
         # print("J_var.T @ x: ", time.time() - start)
 
