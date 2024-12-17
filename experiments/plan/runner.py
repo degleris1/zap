@@ -204,7 +204,9 @@ def load_dataset(
                 # This is an absolute quantity
                 d.reconductoring_cost = reconductoring_cost * d.capital_cost
                 # This is a relative quantity
-                d.reconductoring_threshold = reconductoring_threshold * np.ones_like(d.capital_cost)
+                d.reconductoring_threshold = reconductoring_threshold * np.ones_like(
+                    d.capital_cost
+                )
 
     return {
         "net": net,
@@ -261,7 +263,9 @@ def setup_pypysa_dataset(
 
     else:  # Rule 3 - Specify explicit date
         start_hour = dt.datetime.combine(start_hour, dt.time(hour=UTC_TIME_SHIFT))
-        hours = pd.date_range(start_hour, periods=num_hours, freq="1h", inclusive="left")
+        hours = pd.date_range(
+            start_hour, periods=num_hours, freq="1h", inclusive="left"
+        )
 
     # Build zap network
     if not isinstance(hours, pd.DatetimeIndex):
@@ -285,7 +289,13 @@ def setup_pypysa_dataset(
 
 
 def layer_function(
-    net, parameter_names, use_admm, adapt_rho, adapt_rho_rate, torch_dtype, admm_args: dict
+    net,
+    parameter_names,
+    use_admm,
+    adapt_rho,
+    adapt_rho_rate,
+    torch_dtype,
+    admm_args: dict,
 ):
     if use_admm:
         print("Using ADMM layer.")
@@ -342,7 +352,9 @@ def setup_problem(
         devices = [d for d in devices if type(d) is not zap.Battery]
 
     if use_admm:
-        devices = [d.torchify(machine=args["machine"], dtype=torch_dtype) for d in devices]
+        devices = [
+            d.torchify(machine=args["machine"], dtype=torch_dtype) for d in devices
+        ]
 
     # Setup parameters
     parameter_names = {}
@@ -388,14 +400,20 @@ def setup_problem(
         assert time_horizon % hours_per_scenario == 0
 
         scenarios = [
-            range(i, i + hours_per_scenario) for i in range(0, time_horizon, hours_per_scenario)
+            range(i, i + hours_per_scenario)
+            for i in range(0, time_horizon, hours_per_scenario)
         ]
-        sub_devices = [[d.sample_time(s, time_horizon) for d in devices] for s in scenarios]
-        sub_layers = [layer_map(d, hours_per_scenario) for d in sub_devices for d in sub_devices]
+        sub_devices = [
+            [d.sample_time(s, time_horizon) for d in devices] for s in scenarios
+        ]
+        sub_layers = [
+            layer_map(d, hours_per_scenario) for d in sub_devices for d in sub_devices
+        ]
 
         sub_op_objectives = [make_objective(d) for d in sub_devices]
         sub_inv_objectives = [
-            zap.planning.InvestmentObjective(d, lay) for d, lay in zip(sub_devices, sub_layers)
+            zap.planning.InvestmentObjective(d, lay)
+            for d, lay in zip(sub_devices, sub_layers)
         ]
 
         sub_problems = [
@@ -422,7 +440,9 @@ def setup_problem(
     }
 
 
-def solve_relaxed_problem(problem, *, should_solve=True, price_bound=50.0, inf_value=50.0):
+def solve_relaxed_problem(
+    problem, *, should_solve=True, price_bound=50.0, inf_value=50.0
+):
     if problem["stochastic_problem"] is not None:
         problem = problem["stochastic_problem"]
     else:
@@ -451,7 +471,9 @@ def solve_relaxed_problem(problem, *, should_solve=True, price_bound=50.0, inf_v
         )
 
         relaxed_parameters, data = relaxation.solve()
-        print(f"Solved relaxation in {data['problem'].solver_stats.solve_time / 60:.2f} minutes.")
+        print(
+            f"Solved relaxation in {data['problem'].solver_stats.solve_time / 60:.2f} minutes."
+        )
         print("Lower bound: ", data["problem"].value)
 
         return {
@@ -485,10 +507,12 @@ def solve_problem(
     problem: zap.planning.PlanningProblem = problem_data["problem"]
     if problem_data["stochastic_problem"] is not None:
         print("Solving stochastic problem.")
-        problem: zap.planning.StochasticPlanningProblem = problem_data["stochastic_problem"]
+        problem: zap.planning.StochasticPlanningProblem = problem_data[
+            "stochastic_problem"
+        ]
 
         if parallel:
-            if num_parallel_workers < 0:
+            if num_parallel_workers <= 0:
                 num_parallel_workers = len(problem.subproblems)
 
             problem.initialize_workers(num_parallel_workers)
@@ -532,7 +556,9 @@ def solve_problem(
         }
 
     # Convert to torch if needed
-    if initial_state is not None and isinstance(problem_data["problem"].layer, ADMMLayer):
+    if initial_state is not None and isinstance(
+        problem_data["problem"].layer, ADMMLayer
+    ):
         print("Converting initial state to torch.")
         initial_state = {
             k: torch.tensor(v, dtype=ref_init[k].dtype, device=ref_init[k].device)
@@ -575,7 +601,9 @@ def save_results(relaxation, results, config):
 
     # Save relaxation parameters
     if relaxation is not None:
-        relax_params = {k: v.ravel().tolist() for k, v in relaxation["relaxed_parameters"].items()}
+        relax_params = {
+            k: v.ravel().tolist() for k, v in relaxation["relaxed_parameters"].items()
+        }
         with open(results_path / "relaxed.json", "w") as f:
             json.dump(relax_params, f)
 
@@ -628,10 +656,14 @@ def get_wandb_trackers(problem_data, relaxation, config: dict):
     # TODO - Generalize for multi-objective problems
     if is_stochastic:
         carbon_objective = [zap.planning.EmissionsObjective(d) for d in sub_devices]
-        cost_objective = [zap.planning.DispatchCostObjective(layer.network, d) for d in sub_devices]
+        cost_objective = [
+            zap.planning.DispatchCostObjective(layer.network, d) for d in sub_devices
+        ]
     else:
         carbon_objective = zap.planning.EmissionsObjective(layer.devices)
-        cost_objective = zap.planning.DispatchCostObjective(layer.network, layer.devices)
+        cost_objective = zap.planning.DispatchCostObjective(
+            layer.network, layer.devices
+        )
 
     if is_stochastic:
 
@@ -657,23 +689,33 @@ def get_wandb_trackers(problem_data, relaxation, config: dict):
     else:
 
         def emissions_tracker(J, grad, state, last_state, problem):
-            return carbon_objective(problem.state, parameters=layer.setup_parameters(**state))
+            return carbon_objective(
+                problem.state, parameters=layer.setup_parameters(**state)
+            )
 
         def cost_tracker(J, grad, state, last_state, problem):
-            return cost_objective(problem.state, parameters=layer.setup_parameters(**state))
+            return cost_objective(
+                problem.state, parameters=layer.setup_parameters(**state)
+            )
 
     lower_bound = relaxation["lower_bound"] if relaxation is not None else 1.0
     true_relax_cost = (
-        problem(**relaxation["relaxed_parameters"]) if relaxation is not None else np.inf
+        problem(**relaxation["relaxed_parameters"])
+        if relaxation is not None
+        else np.inf
     )
     relax_solve_time = (
-        relaxation["data"]["problem"].solver_stats.solve_time if relaxation is not None else 0.0
+        relaxation["data"]["problem"].solver_stats.solve_time
+        if relaxation is not None
+        else 0.0
     )
 
     if is_stochastic:
 
         def all_op_costs(J, grad, params, last_state, problem):
-            return wandb.Histogram(np.array([p.op_cost.item() for p in problem.subproblems]))
+            return wandb.Histogram(
+                np.array([p.op_cost.item() for p in problem.subproblems])
+            )
     else:
 
         def all_op_costs(J, grad, params, last_state, problem):
@@ -683,7 +725,11 @@ def get_wandb_trackers(problem_data, relaxation, config: dict):
     trackers = {
         "emissions": emissions_tracker,
         "fuel_costs": cost_tracker,
-        "inv_cost": lambda J, grad, params, last_state, problem: problem.inv_cost.item(),
+        "inv_cost": lambda J,
+        grad,
+        params,
+        last_state,
+        problem: problem.inv_cost.item(),
         "op_cost": lambda J, grad, params, last_state, problem: problem.op_cost.item(),
         "all_op_costs": all_op_costs,
         "batch": lambda J, grad, params, last_state, problem: problem.batch[0],
@@ -710,7 +756,9 @@ def get_wandb_trackers(problem_data, relaxation, config: dict):
             iteration = _stoch_prob.iteration
 
             if iteration % track_full_loss_every == 0:
-                print(f"Updating full problem loss on iteration {iteration}...  ", end="")
+                print(
+                    f"Updating full problem loss on iteration {iteration}...  ", end=""
+                )
                 problem.full_loss = _stoch_prob(**params)
                 print("Done!")
                 return problem.full_loss
@@ -755,12 +803,16 @@ def get_total_load_curve(devices, every=1, reducer=np.sum):
     ]
 
 
-def get_total_renewable_curve(devices, every=1, reducer=np.sum, renewables=["solar", "onwind"]):
+def get_total_renewable_curve(
+    devices, every=1, reducer=np.sum, renewables=["solar", "onwind"]
+):
     devs = [d for d in devices if isinstance(d, zap.Generator)]
 
     # Filter out non-renewable generators
     is_renewable = [np.isin(d.fuel_type, renewables).reshape(-1, 1) for d in devs]
-    capacities = [(d.nominal_capacity * is_renewable) * d.dynamic_capacity for d in devs]
+    capacities = [
+        (d.nominal_capacity * is_renewable) * d.dynamic_capacity for d in devs
+    ]
 
     total_hourly_renewable = sum([c for c in capacities])[0, :, :]
 
@@ -778,9 +830,13 @@ def get_total_renewable_curve(devices, every=1, reducer=np.sum, renewables=["sol
 # start_hour = PYPSA_START_DAY + dt.timedelta(hours=peak_day * 24)
 
 
-def sort_hours_by_peak(pn: pypsa.Network, pn_args, by="load", period=24, reducer=np.max):
+def sort_hours_by_peak(
+    pn: pypsa.Network, pn_args, by="load", period=24, reducer=np.max
+):
     # Load network
-    all_dates = pd.date_range(start=PYPSA_START_DAY, periods=TOTAL_PYPSA_HOUR, freq="1h")
+    all_dates = pd.date_range(
+        start=PYPSA_START_DAY, periods=TOTAL_PYPSA_HOUR, freq="1h"
+    )
     _, year_devices = zap.importers.load_pypsa_network(pn, all_dates, **pn_args)
 
     # Get peak load
@@ -788,7 +844,9 @@ def sort_hours_by_peak(pn: pypsa.Network, pn_args, by="load", period=24, reducer
         daily_peak = get_total_load_curve(year_devices, every=period, reducer=reducer)
 
     elif by == "renewable":
-        daily_peak = get_total_renewable_curve(year_devices, every=period, reducer=reducer)
+        daily_peak = get_total_renewable_curve(
+            year_devices, every=period, reducer=reducer
+        )
 
     elif by == "hybrid":
         lc = get_total_load_curve(year_devices, every=period, reducer=reducer)

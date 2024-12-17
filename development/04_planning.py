@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.4.2"
+__generated_with = "0.9.14"
 app = marimo.App()
 
 
@@ -20,7 +20,7 @@ def __():
 
 @app.cell
 def __(mo):
-    mo.md("## Setup Base Network")
+    mo.md("""## Setup Base Network""")
     return
 
 
@@ -36,9 +36,27 @@ def __(zap):
     return devices, net, num_nodes, time_horizon
 
 
+@app.cell
+def __(net):
+    net
+    return
+
+
+@app.cell
+def __(devices):
+    devices[2].nominal_capacity
+    return
+
+
 @app.cell(hide_code=True)
 def __(mo):
-    mo.md("## Construct Layer")
+    mo.md("""## Construct Layer""")
+    return
+
+
+@app.cell
+def __(devices):
+    devices[2].nominal_capacity.size
     return
 
 
@@ -55,8 +73,8 @@ def __(DispatchLayer, cp, deepcopy, devices, net, time_horizon):
         devices,
         parameter_names=parameter_names,
         time_horizon=time_horizon,
-        solver=cp.MOSEK,
-        solver_kwargs={"verbose": False, "accept_unknown": True},
+        solver=cp.CLARABEL,
+        # solver_kwargs={"verbose": False, "accept_unknown": True},
     )
 
     initial_parameters = {}
@@ -69,9 +87,15 @@ def __(DispatchLayer, cp, deepcopy, devices, net, time_horizon):
 
 
 @app.cell
+def __(layer, np):
+    _out = layer(line_capacity=100 * np.ones(15))
+    return
+
+
+@app.cell
 def __(initial_parameters, layer):
     y0 = layer(**initial_parameters)
-    return y0,
+    return (y0,)
 
 
 @app.cell
@@ -95,13 +119,13 @@ def __(initial_parameters, y0):
 
 @app.cell(hide_code=True)
 def __(mo):
-    mo.md("## Construct Planning Problem")
+    mo.md("""## Construct Planning Problem""")
     return
 
 
 @app.cell(hide_code=True)
 def __(mo):
-    mo.md("### Objective")
+    mo.md("""### Objective""")
     return
 
 
@@ -121,7 +145,7 @@ def __(devices, initial_parameters, layer, y0, zap):
     carbon_objective = zap.planning.EmissionsObjective(devices)
 
     carbon_objective(y0, layer.setup_parameters(**initial_parameters))
-    return carbon_objective,
+    return (carbon_objective,)
 
 
 @app.cell
@@ -135,33 +159,33 @@ def __(devices, initial_parameters, zap):
         return 0.0  # capital_cost.T @ kwargs["generator_capacity"]
 
     simple_inv_objective(**initial_parameters)
-    return simple_inv_objective,
+    return (simple_inv_objective,)
 
 
 @app.cell
 def __(devices, layer, other_params, zap):
     inv_objective = zap.planning.InvestmentObjective(devices, layer)
     inv_objective(**other_params)
-    return inv_objective,
+    return (inv_objective,)
 
 
 @app.cell
 def __(deepcopy, initial_parameters):
     other_params = deepcopy(initial_parameters)
     # other_params["generator_capacity"][1] += 10.0
-    return other_params,
+    return (other_params,)
 
 
 @app.cell(hide_code=True)
 def __(mo):
-    mo.md("### Problem")
+    mo.md("""### Problem""")
     return
 
 
 @app.cell
 def __():
     max_expansion = 10.0
-    return max_expansion,
+    return (max_expansion,)
 
 
 @app.cell
@@ -191,7 +215,13 @@ def __(
         upper_bounds=upper_bounds,
         regularize=1e-6
     )
-    return problem,
+    return (problem,)
+
+
+@app.cell
+def __(initial_parameters):
+    initial_parameters
+    return
 
 
 @app.cell
@@ -202,7 +232,7 @@ def __(initial_parameters, problem):
 
 @app.cell(hide_code=True)
 def __(mo):
-    mo.md("## Compute Gradients")
+    mo.md("""## Compute Gradients""")
     return
 
 
@@ -219,14 +249,14 @@ def __(initial_parameters, problem):
 
 @app.cell(hide_code=True)
 def __(mo):
-    mo.md("### Gradient Update")
+    mo.md("""### Gradient Update""")
     return
 
 
 @app.cell
 def __(zap):
     line_type = zap.ACLine
-    return line_type,
+    return (line_type,)
 
 
 @app.cell
@@ -253,14 +283,14 @@ def __(J0, deepcopy, grad, initial_parameters, problem):
 
 @app.cell
 def __(mo):
-    mo.md("## Gradient Descent Loop")
+    mo.md("""## Gradient Descent Loop""")
     return
 
 
 @app.cell
 def __():
     import zap.planning.trackers as tr
-    return tr,
+    return (tr,)
 
 
 @app.cell
@@ -313,12 +343,12 @@ def __(layer, np, state):
 
     print(np.sum(yf.power[1]), np.sum(yf.power[0]))
     print(layer(**state).power[0])
-    return yf,
+    return (yf,)
 
 
 @app.cell(hide_code=True)
 def __(mo):
-    mo.md("## Debugging")
+    mo.md("""## Debugging""")
     return
 
 
@@ -398,7 +428,7 @@ def __():
 @app.cell
 def __():
     import yaml
-    return yaml,
+    return (yaml,)
 
 
 @app.cell
@@ -411,7 +441,7 @@ def __(yaml):
 @app.cell
 def __():
     import importlib
-    return importlib,
+    return (importlib,)
 
 
 @app.cell
@@ -419,31 +449,31 @@ def __(importlib, zap):
     from experiments import runner
     importlib.reload(runner)
     importlib.reload(zap)
-    return runner,
+    return (runner,)
 
 
 @app.cell
 def __(config, runner):
     dataset = runner.load_dataset(config)
-    return dataset,
+    return (dataset,)
 
 
 @app.cell
 def __(config, dataset, runner):
     test_problem = runner.setup_problem(dataset, config)
-    return test_problem,
+    return (test_problem,)
 
 
 @app.cell
 def __(config, runner, test_problem):
     test_relax = runner.solve_relaxed_problem(test_problem, config)
-    return test_relax,
+    return (test_relax,)
 
 
 @app.cell
 def __(config, runner, test_problem, test_relax):
     test_result = runner.solve_problem(test_problem, test_relax, config)
-    return test_result,
+    return (test_result,)
 
 
 @app.cell
