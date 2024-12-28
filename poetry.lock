@@ -1515,13 +1515,13 @@ files = [
 
 [[package]]
 name = "marimo"
-version = "0.9.14"
+version = "0.10.7"
 description = "A library for making reactive notebooks and apps"
 optional = false
 python-versions = ">=3.9"
 files = [
-    {file = "marimo-0.9.14-py3-none-any.whl", hash = "sha256:d5bf861f85df9bb2f884b8420540dbdad9c969ac046e9a56cdc5650ef468b44b"},
-    {file = "marimo-0.9.14.tar.gz", hash = "sha256:43776746e012f01e1c5af174e061a0e4e399b660093ca6b67c7c27a0ed835c3b"},
+    {file = "marimo-0.10.7-py3-none-any.whl", hash = "sha256:7109023f80d5be5153dd725b58b20e37b7a64df301d69a08dc2190f01386ec97"},
+    {file = "marimo-0.10.7.tar.gz", hash = "sha256:8377c529c9e3545b04593d695d733a02789956de9c6189a903748f6e40d76d4e"},
 ]
 
 [package.dependencies]
@@ -1530,22 +1530,23 @@ docutils = ">=0.16.0"
 itsdangerous = ">=2.0.0"
 jedi = ">=0.18.0"
 markdown = ">=3.4,<4"
-narwhals = ">=1.9.0"
+narwhals = ">=1.12.0"
 packaging = "*"
 psutil = ">=5.0"
 pygments = ">=2.13,<3"
-pymdown-extensions = ">=9.0,<11"
+pymdown-extensions = ">=10,<11"
 pyyaml = ">=6.0"
 ruff = "*"
 starlette = ">=0.26.1,<0.36.0 || >0.36.0"
 tomlkit = ">=0.12.0"
 uvicorn = ">=0.22.0"
-websockets = ">=10.0.0,<13.0.0"
+websockets = ">=10.0.0"
 
 [package.extras]
 dev = ["black (>=23.12.1,<23.13.0)", "click (<8.1.4)", "duckdb (>=1.0.0)", "openai (>=1.41.1,<1.42.0)", "opentelemetry-api (>=1.26.0,<1.27.0)", "opentelemetry-sdk (>=1.26.0,<1.27.0)", "ruff (>=0.6.1,<0.7.0)"]
-docs = ["autoclasstoc (>=1.6.0,<1.7.0)", "furo (==2024.8.6)", "myst-parser (>=3.0.1,<3.1.0)", "pypandoc (>=1.13,<2.0)", "sphinx (>=7.0.1,<7.1.0)", "sphinx-autobuild (>=2024.10.3,<2024.11.0)", "sphinx-copybutton (>=0.5.2,<0.6.0)", "sphinx-design (>=0.5.0,<0.6.0)", "sphinx-new-tab-link (>=0.5.3,<0.6.0)", "sphinx-sitemap (>=2.6.0,<2.7.0)"]
-sql = ["duckdb (>=1.0.0)"]
+docs = ["cairosvg (>=2.7.1)", "mdx-include (>=1.4.2)", "mike (>=2.0.0)", "mkdocs (>=1.6.1)", "mkdocs-autorefs (>=1.0.1)", "mkdocs-click (>=0.8.1)", "mkdocs-git-revision-date-localized-plugin (>=1.2.4)", "mkdocs-glightbox (>=0.3.7)", "mkdocs-macros-plugin (>=1.3.0)", "mkdocs-material (>=9.5.49)", "mkdocs-material-extensions (>=1.3.1)", "mkdocs-minify-plugin (>=0.8.0)", "mkdocs-redirects (>=1.0.0)", "mkdocstrings[python] (>=0.27.0)", "pillow (>=10.2.0)", "pymdown-extensions (>=10.7)"]
+recommended = ["altair (>=5.4.0)", "duckdb (>=1.1.0)", "nbformat (>=5.7.0)", "openai (>=1.41.1)", "polars (>=1.9.0)", "ruff"]
+sql = ["duckdb (>=1.0.0)", "polars (>=1.9.0)"]
 
 [[package]]
 name = "markdown"
@@ -1882,6 +1883,21 @@ files = [
 ]
 
 [[package]]
+name = "munch"
+version = "4.0.0"
+description = "A dot-accessible dictionary (a la JavaScript objects)"
+optional = false
+python-versions = ">=3.6"
+files = [
+    {file = "munch-4.0.0-py2.py3-none-any.whl", hash = "sha256:71033c45db9fb677a0b7eb517a4ce70ae09258490e419b0e7f00d1e386ecb1b4"},
+    {file = "munch-4.0.0.tar.gz", hash = "sha256:542cb151461263216a4e37c3fd9afc425feeaf38aaa3025cd2a981fadb422235"},
+]
+
+[package.extras]
+testing = ["astroid (>=2.0)", "coverage", "pylint (>=2.3.1,<2.4.0)", "pytest"]
+yaml = ["PyYAML (>=5.1.0)"]
+
+[[package]]
 name = "myst-parser"
 version = "4.0.0"
 description = "An extended [CommonMark](https://spec.commonmark.org/) compliant parser,"
@@ -1909,22 +1925,25 @@ testing-docutils = ["pygments", "pytest (>=8,<9)", "pytest-param-files (>=0.6.0,
 
 [[package]]
 name = "narwhals"
-version = "1.10.0"
+version = "1.19.1"
 description = "Extremely lightweight compatibility layer between dataframe libraries"
 optional = false
 python-versions = ">=3.8"
 files = [
-    {file = "narwhals-1.10.0-py3-none-any.whl", hash = "sha256:c83a378960651c391e5f3d68af3a821eda74c9713073518fe0c39aefc5ad8f8e"},
-    {file = "narwhals-1.10.0.tar.gz", hash = "sha256:a380e64110c3169c4b0b592c5b64ae6dc4cce76e9d3c56edc608a8ae5994cfc1"},
+    {file = "narwhals-1.19.1-py3-none-any.whl", hash = "sha256:72476dcc95f1d3f2c0c1f047cdd4879346b2871fe13d1223025466d8a3dcaea4"},
+    {file = "narwhals-1.19.1.tar.gz", hash = "sha256:e597e7ed9da42ffb2c80b21e174817b27592a8570edea8c46c90a726e3b796af"},
 ]
 
 [package.extras]
-cudf = ["cudf (>=23.08.00)"]
+cudf = ["cudf (>=24.12.0)"]
 dask = ["dask[dataframe] (>=2024.7)"]
+dev = ["covdefaults", "dask[dataframe]", "duckdb", "hypothesis", "hypothesis[numpy]", "pandas", "polars", "pyarrow", "pyarrow-stubs", "pyspark", "pytest", "pytest-cov", "pytest-env", "pytest-randomly", "scikit-learn", "tqdm", "typing-extensions"]
+docs = ["black", "duckdb", "jinja2", "markdown-exec[ansi]", "mkdocs", "mkdocs-autorefs", "mkdocs-material", "mkdocstrings[python]", "pandas", "polars (>=1.0.0)", "pyarrow"]
 modin = ["modin"]
 pandas = ["pandas (>=0.25.3)"]
 polars = ["polars (>=0.20.3)"]
 pyarrow = ["pyarrow (>=11.0.0)"]
+pyspark = ["pyspark (>=3.3.0)"]
 
 [[package]]
 name = "nbclient"
@@ -2557,6 +2576,36 @@ files = [
 ]
 
 [[package]]
+name = "pao"
+version = "1.0.2"
+description = "PAO: Python Adversarial Optimization"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "pao-1.0.2.tar.gz", hash = "sha256:a35c7ab54dcb566811f6dab6793b089f585617b1c93f60a51dd3971bef727427"},
+]
+
+[package.dependencies]
+munch = "*"
+parameterized = "*"
+Pyomo = "*"
+scipy = "*"
+
+[[package]]
+name = "parameterized"
+version = "0.9.0"
+description = "Parameterized testing with any Python test framework"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "parameterized-0.9.0-py2.py3-none-any.whl", hash = "sha256:4e0758e3d41bea3bbd05ec14fc2c24736723f243b28d702081aef438c9372b1b"},
+    {file = "parameterized-0.9.0.tar.gz", hash = "sha256:7fc905272cefa4f364c1a3429cbbe9c0f98b793988efb5bf90aac80f08db09b1"},
+]
+
+[package.extras]
+dev = ["jinja2"]
+
+[[package]]
 name = "parso"
 version = "0.8.4"
 description = "A Python Parser"
@@ -2715,7 +2764,7 @@ type = ["mypy (>=1.11.2)"]
 name = "ply"
 version = "3.11"
 description = "Python Lex & Yacc"
-optional = true
+optional = false
 python-versions = "*"
 files = [
     {file = "ply-3.11-py2.py3-none-any.whl", hash = "sha256:096f9b8350b65ebd2fd1346b12452efe5b9607f7482813ffca50c22722a807ce"},
@@ -2961,7 +3010,7 @@ test = ["pytest", "pytest-cov"]
 name = "pyomo"
 version = "6.6.1"
 description = "Pyomo: Python Optimization Modeling Objects"
-optional = true
+optional = false
 python-versions = ">=3.7"
 files = [
     {file = "Pyomo-6.6.1-cp310-cp310-macosx_11_0_x86_64.whl", hash = "sha256:ca93f624c536bd043cfa9dad7426cc8e317b95eb854d1f9796a4629fa8c37830"},
@@ -4617,4 +4666,4 @@ pypsa = ["pypsa"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.13"
-content-hash = "1e347b3456df3f0c6d771f8786a31f946082fe714bf5d282ced438103475c1a4"
+content-hash = "3796329048c589904c08f6d987fd7ca786905887a54bceced03636485afc73b5"
