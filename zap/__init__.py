@@ -13,6 +13,8 @@ from zap import planning
 from zap import dual
 from zap import pyomo
 
+from zap import network
+from zap import layer
 
 # Get the version from the metadata
 from importlib import metadata
