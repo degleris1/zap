@@ -11,6 +11,7 @@ from zap.devices.ground import Ground
 from zap import importers
 from zap import planning
 from zap import dual
+from zap import pyomo
 
 
 # Get the version from the metadata
