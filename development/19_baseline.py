@@ -161,7 +161,13 @@ def _():
 
 @app.cell
 def _(test_medium):
-    _ = test_medium(drop_battery=False)
+    quick_toy_model = test_medium(drop_battery=False)
+    return (quick_toy_model,)
+
+
+@app.cell
+def _(pyo, quick_toy_model):
+    pyo.value(quick_toy_model.device[0].emissions)
     return
 
 
@@ -179,7 +185,7 @@ def _():
 
 @app.cell
 def _(get_pypsa_net):
-    net, devices, time_horizon = get_pypsa_net(drop_battery=False, time_horizon=4)
+    net, devices, time_horizon = get_pypsa_net(drop_battery=True, time_horizon=2)
     return devices, net, time_horizon
 
 

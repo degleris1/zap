@@ -75,6 +75,21 @@ class PyoInjector(PyoDevice):
 
         return block
 
+    def model_emissions(self, block: pyo.Block):
+        if hasattr(self.x, "emission_rates") and self.x.emission_rates is not None:
+            emissions = self.x.emission_rates.reshape(-1).tolist()
+            block.emissions = pyo.Expression(
+                expr=sum(
+                    emissions[k] * block.terminal[0].power[k, t]
+                    for k in block.dev_index
+                    for t in block.model().time_index
+                )
+            )
+        else:
+            block.emissions = pyo.Expression(expr=0.0)
+
+        return block
+
 
 class PyoGround(PyoDevice):
     def __init__(self, parent: Ground):
