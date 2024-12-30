@@ -125,7 +125,7 @@ def _(dt, np, pd, pn, zap):
         net, devices = zap.importers.load_pypsa_network(
             pn,
             dates,
-            scale_load=0.7,
+            scale_load=1.0,
             power_unit=1000.0,
             cost_unit=100.0,
             load_cost_perturbation=10.0,
@@ -208,7 +208,7 @@ def _(
 ):
     planner_objective = MultiObjective(
         objectives=[DispatchCostObjective(net, devices), EmissionsObjective(devices)],
-        weights=[1.0, 0.1],
+        weights=[1.0, 10.0],
     )
     return (planner_objective,)
 
@@ -233,20 +233,32 @@ def _(
 
 
 @app.cell
-def _():
-    # help(pao.Solver("pao.pyomo.FA").solve)
-    return
-
-
-@app.cell
 def _(bilevel_model, devices, np, parse_output):
     sum(np.round(parse_output(devices, bilevel_model.dispatch)[0][0][0], decimals=2))
     return
 
 
 @app.cell
-def _(bilevel_model, devices):
-    sum([bilevel_model.param_blocks[0].param[k].value for k in range(devices[0].num_devices)])
+def _(bilevel_model, pyo):
+    pyo.value(bilevel_model.param_blocks[0].investment_cost)
+    return
+
+
+@app.cell
+def _(bilevel_model, pyo):
+    pyo.value(bilevel_model.dispatch.device[0].emissions)
+    return
+
+
+@app.cell
+def _(bilevel_model, devices, np):
+    np.sum(np.array([bilevel_model.param_blocks[0].param[k].value for k in range(devices[0].num_devices)]))
+    return
+
+
+@app.cell
+def _():
+    # help(pao.Solver("pao.pyomo.FA").solve)
     return
 
 

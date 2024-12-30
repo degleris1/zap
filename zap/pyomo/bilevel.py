@@ -45,14 +45,13 @@ def solve_bilevel_model(
 
     # Create top level objective
     planner_objective = convert_to_pyo_objective(planner_objective)
-    M.objective = pyo.Objective(
+    M.planner_objective = pyo.Expression(
         expr=planner_objective.get_objective(M.dispatch),
+    )
+    M.objective = pyo.Objective(
+        expr=(M.planner_objective + sum(M.param_blocks[p].investment_cost for p in param_devices)),
         sense=pyo.minimize,
     )
-    # M.objective = pyo.Objective(
-    #     expr=(M.dispatch.objective + sum(M.param_blocks[p].investment_cost for p in param_devices)),
-    #     sense=pyo.minimize,
-    # )
 
     # Solve bilevel problem
     mip = pao.Solver(mip_solver)
