@@ -113,12 +113,8 @@ def _(pypsa):
 
 
 @app.cell
-def _(check_pyomo_dispatch, dt, np, pd, pn, zap):
-    def test_medium(drop_battery=True):
-        
-        # Test 42-bus pypsa network
-        time_horizon = 12
-        
+def _(dt, np, pd, pn, zap):
+    def get_pypsa_net(drop_battery=True, time_horizon=12):    
         start_date = dt.datetime(2019, 8, 9, 7)
         dates = pd.date_range(
             start_date,
@@ -129,7 +125,7 @@ def _(check_pyomo_dispatch, dt, np, pd, pn, zap):
         net, devices = zap.importers.load_pypsa_network(
             pn,
             dates,
-            scale_load=0.5,
+            scale_load=0.7,
             power_unit=1000.0,
             cost_unit=100.0,
             load_cost_perturbation=10.0,
@@ -140,26 +136,145 @@ def _(check_pyomo_dispatch, dt, np, pd, pn, zap):
 
         if drop_battery:
             devices = [d for d in devices if not isinstance(d, zap.Battery)]
-        
+
         # Tweak AC line costs
         devices[3].linear_cost += 0.01 * np.random.rand(*devices[3].linear_cost.shape)
 
+        return net, devices, time_horizon
+    return (get_pypsa_net,)
+
+
+@app.cell
+def _(check_pyomo_dispatch, get_pypsa_net):
+    def test_medium(drop_battery=True):
+        net, devices, time_horizon = get_pypsa_net(drop_battery=drop_battery)
         model, result = check_pyomo_dispatch(net, devices, time_horizon)
         return model
     return (test_medium,)
 
 
 @app.cell
-def _(test_medium):
-    model = test_medium()
-    model.time_index
-    return (model,)
+def _():
+    # _ = test_medium()
+    return
 
 
 @app.cell
-def _(test_medium):
-    devs = test_medium(drop_battery=False)
-    return (devs,)
+def _():
+    # _ = test_medium(drop_battery=False)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""## Bilevel Model""")
+    return
+
+
+@app.cell
+def _():
+    import pao
+    return (pao,)
+
+
+@app.cell
+def _(get_pypsa_net):
+    net, devices, time_horizon = get_pypsa_net(drop_battery=False, time_horizon=4)
+    return devices, net, time_horizon
+
+
+@app.cell
+def _(devices):
+    devices
+    return
+
+
+@app.cell
+def _(devices, net, pao, pyo, setup_pyomo_model, time_horizon, zap):
+    # Settings
+    param_device_types = [zap.Generator, zap.DCLine, zap.Battery]
+    param_devices = [i for i in range(len(devices)) if type(devices[i]) in param_device_types]
+    print(param_devices)
+
+    # Build model
+    pyo_devices = [zap.pyomo.devices.convert_to_pyo(d) for d in devices]
+
+    M = pyo.ConcreteModel()
+    M.time_horizon = time_horizon
+    M.time_index = pyo.RangeSet(0, time_horizon - 1)
+    M.node_index = pyo.RangeSet(0, net.num_nodes - 1)
+
+    # Create parameters
+    params = []
+    M.param_blocks = pyo.Block(param_devices)
+    for p in param_devices:
+        par = pyo_devices[p].make_parameteric(M.param_blocks[p])
+        pyo_devices[p].add_investment_cost(M.param_blocks[p])
+
+        params += [par]
+
+    # Build dispatch problem
+    M.dispatch = pao.pyomo.SubModel(fixed=params)
+    setup_pyomo_model(net, devices, time_horizon, model=M.dispatch, pyo_devices=pyo_devices)
+
+    # Create top level objective
+    M.objective = pyo.Objective(
+        expr=(M.dispatch.objective + sum(M.param_blocks[p].investment_cost for p in param_devices)),
+        sense=pyo.minimize,
+    )
+
+    # Solve bilevel problem
+    mip = pao.Solver("gurobi")
+    solver = pao.Solver("pao.pyomo.FA", mip_solver=mip)  #, linearize_bigm=100.0)
+
+    result = solver.solve(M, tee=True)
+    return (
+        M,
+        mip,
+        p,
+        par,
+        param_device_types,
+        param_devices,
+        params,
+        pyo_devices,
+        result,
+        solver,
+    )
+
+
+@app.cell
+def _(result):
+    result
+    return
+
+
+@app.cell
+def _():
+    # pao_model = pao.pyomo.convert.convert_pyomo2MultilevelProblem(M)[0]
+
+    # _opt = pao.Solver("gurobi")
+
+    # _opt.solve(pao_model)
+    return
+
+
+@app.cell
+def _():
+    # FA, MIBS, PCCG, REG
+    # help(pao.Solver("pao.pyomo.REG").solve)
+    return
+
+
+@app.cell
+def _(M, devices, np, parse_output):
+    sum(np.round(parse_output(devices, M.dispatch)[0][0][0], decimals=2))
+    return
+
+
+@app.cell
+def _(M, devices):
+    sum([M.param_blocks[0].param[k].value for k in range(devices[0].num_devices)])
+    return
 
 
 if __name__ == "__main__":

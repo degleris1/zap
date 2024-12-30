@@ -11,11 +11,13 @@ def setup_pyomo_model(
     devices: list[AbstractDevice],
     time_horizon: int,
     model: pyo.ConcreteModel = None,
+    pyo_devices=None,
 ):
     if model is None:
         model = pyo.ConcreteModel()
 
-    pyo_devices = [convert_to_pyo(d) for d in devices]
+    if pyo_devices is None:
+        pyo_devices = [convert_to_pyo(d) for d in devices]
 
     # Indices
     num_devices = len(devices)
@@ -24,7 +26,6 @@ def setup_pyomo_model(
     group_map = [get_node_groups(d) for d in devices]
 
     # Model setup
-    model = pyo.ConcreteModel()
     model.time_horizon = time_horizon
     model.device = pyo.Block(range(num_devices))
     model.time_index = time_index
@@ -86,13 +87,15 @@ def initialize_terminal_model(device: AbstractDevice, block: pyo.Block, nodes, t
     """
     Initialize a Pyomo model for a single terminal of a device.
     """
-    time_index = block.model().time_index
-    node_index = block.model().node_index
+
+    top = block.parent_block().parent_block()
+    time_index = top.time_index
+    node_index = top.node_index
     dev_index = block.parent_block().dev_index
 
     # dt_model = dev_model.terminal[tau]
 
-    block.power = pyo.Var(dev_index, block.model().time_index)
+    block.power = pyo.Var(dev_index, top.time_index)
     block.net_power = pyo.Expression(
         node_index,
         time_index,
@@ -104,7 +107,7 @@ def initialize_terminal_model(device: AbstractDevice, block: pyo.Block, nodes, t
         block.phase_consistency = pyo.Constraint(
             dev_index,
             time_index,
-            rule=lambda block, k, t: block.model().global_angle[nodes[k], t] == block.angle[k, t],
+            rule=lambda block, k, t: top.global_angle[nodes[k], t] == block.angle[k, t],
         )
     else:
         block.angle = None

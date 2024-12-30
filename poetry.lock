@@ -2185,6 +2185,18 @@ extra = ["lxml (>=4.6)", "pydot (>=3.0.1)", "pygraphviz (>=1.14)", "sympy (>=1.1
 test = ["pytest (>=7.2)", "pytest-cov (>=4.0)"]
 
 [[package]]
+name = "nose"
+version = "1.3.7"
+description = "nose extends unittest to make testing easier"
+optional = false
+python-versions = "*"
+files = [
+    {file = "nose-1.3.7-py2-none-any.whl", hash = "sha256:dadcddc0aefbf99eea214e0f1232b94f2fa9bd98fa8353711dacb112bfcbbb2a"},
+    {file = "nose-1.3.7-py3-none-any.whl", hash = "sha256:9ff7c6cc443f8c51994b34a667bbcf45afd6d945be7477b52e97516fd17c53ac"},
+    {file = "nose-1.3.7.tar.gz", hash = "sha256:f1bffef9cbc82628f6e7d7b40d7e255aefaa1adb6a1b1d26c69a8b79e6208a98"},
+]
+
+[[package]]
 name = "numexpr"
 version = "2.10.1"
 description = "Fast numerical expression evaluator for NumPy"
@@ -3146,6 +3158,21 @@ files = [
     {file = "pytz-2024.2-py2.py3-none-any.whl", hash = "sha256:31c7c1817eb7fae7ca4b8c7ee50c72f93aa2dd863de768e1ef4245d426aa0725"},
     {file = "pytz-2024.2.tar.gz", hash = "sha256:2aa355083c50a0f93fa581709deac0c9ad65cca8a9e9beac660adcbd493c798a"},
 ]
+
+[[package]]
+name = "pyutilib"
+version = "6.0.0"
+description = "PyUtilib: A collection of Python utilities"
+optional = false
+python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
+files = [
+    {file = "PyUtilib-6.0.0-py2.py3-none-any.whl", hash = "sha256:f1f82d05ad8c42baeef915c8d3d97c0a3cbed6c506c857ab0ab7694dea50ebd8"},
+    {file = "PyUtilib-6.0.0.tar.gz", hash = "sha256:d3c14f8ed9028a831b2bf51b8ab7776eba87e66cfc58a06b99c359aaa640f040"},
+]
+
+[package.dependencies]
+nose = "*"
+six = "*"
 
 [[package]]
 name = "pywin32"
@@ -4666,4 +4693,4 @@ pypsa = ["pypsa"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.13"
-content-hash = "3796329048c589904c08f6d987fd7ca786905887a54bceced03636485afc73b5"
+content-hash = "31aa82ff561429033e74eddc5bcf2f4d0bfea474a0a3518d5f0ee6167cc94975"
