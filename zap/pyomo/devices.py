@@ -5,19 +5,35 @@ from zap.devices import AbstractDevice, Injector
 from zap.devices import Generator, Load, Ground, ACLine, DCLine, Battery
 
 
-class PyoInjector(Injector):
-    def __init__(self, parent: Injector):
+class PyoDevice:
+    def __init__(self, parent: AbstractDevice):
         self.x = parent
         self.has_parameter = False
+        self.param_name = "nominal_capacity"
+
+    def make_parameteric(self, block: pyo.Block):
+        return _add_simple_parameter(block, self, attr_name=self.param_name)
+
+    def add_investment_cost(self, block: pyo.Block):
+        return _add_simple_investment_cost(block, self, attr_name=self.param_name)
 
     def add_local_variables(self, block: pyo.Block):
         return block
 
-    def make_parameteric(self, block: pyo.Block):
-        return _add_simple_parameter(block, self)
+    def add_local_constraints(self, block: pyo.Block):
+        raise NotImplementedError
 
-    def add_investment_cost(self, block: pyo.Block):
-        return _add_simple_investment_cost(block, self)
+    def add_objective(self, block: pyo.Block):
+        raise NotImplementedError
+
+    def model_emissions(self, block: pyo.Block):
+        block.emissions = pyo.Expression(expr=0.0)
+        return block
+
+
+class PyoInjector(PyoDevice):
+    def __init__(self, parent: Injector):
+        super().__init__(parent)
 
     def get_nominal_capacity(self):
         if self.has_parameter:
@@ -60,12 +76,9 @@ class PyoInjector(Injector):
         return block
 
 
-class PyoGround(Ground):
+class PyoGround(PyoDevice):
     def __init__(self, parent: Ground):
-        self.x = parent
-
-    def add_local_variables(self, block: pyo.Block):
-        return block
+        super().__init__(parent)
 
     def add_local_constraints(self, block: pyo.Block):
         voltage = self.x.voltage.tolist()
@@ -85,25 +98,15 @@ class PyoGround(Ground):
         return block
 
 
-class PyoDCLine(DCLine):
-    def __init__(self, parent: DCLine):
-        self.x = parent
-        self.has_parameter = False
-
-    def make_parameteric(self, block: pyo.Block):
-        return _add_simple_parameter(block, self)
-
-    def add_investment_cost(self, block: pyo.Block):
-        return _add_simple_investment_cost(block, self)
+class PyoDCLine(PyoDevice):
+    def __init__(self, parent: Ground):
+        super().__init__(parent)
 
     def get_nominal_capacity(self):
         if self.has_parameter:
             return self.param
         else:
             return self.x.nominal_capacity.reshape(-1).tolist()
-
-    def add_local_variables(self, block: pyo.Block):
-        return block
 
     def add_local_constraints(self, block: pyo.Block):
         _add_dc_line_constraints(block, self)
@@ -114,25 +117,15 @@ class PyoDCLine(DCLine):
         return block
 
 
-class PyoACLine(ACLine):
-    def __init__(self, parent: ACLine):
-        self.x = parent
-        self.has_parameter = False
-
-    def make_parameteric(self, block: pyo.Block):
-        return _add_simple_parameter(block, self)
-
-    def add_investment_cost(self, block: pyo.Block):
-        return _add_simple_investment_cost(block, self)
+class PyoACLine(PyoDevice):
+    def __init__(self, parent: Ground):
+        super().__init__(parent)
 
     def get_nominal_capacity(self):
         if self.has_parameter:
             return self.param
         else:
             return self.x.nominal_capacity.reshape(-1).tolist()
-
-    def add_local_variables(self, block: pyo.Block):
-        return block
 
     def add_local_constraints(self, block: pyo.Block):
         _add_dc_line_constraints(block, self)
@@ -156,16 +149,10 @@ class PyoACLine(ACLine):
         return block
 
 
-class PyoBattery(Battery):
+class PyoBattery(PyoDevice):
     def __init__(self, parent: Battery):
-        self.x = parent
-        self.has_parameter = False
-
-    def make_parameteric(self, block: pyo.Block):
-        return _add_simple_parameter(block, self, attr_name="power_capacity")
-
-    def add_investment_cost(self, block: pyo.Block):
-        return _add_simple_investment_cost(block, self, attr_name="power_capacity")
+        super().__init__(parent)
+        self.param_name = "power_capacity"
 
     def get_power_capacity(self):
         if self.has_parameter:
@@ -255,7 +242,7 @@ class PyoBattery(Battery):
 # ========
 
 
-def convert_to_pyo(device: AbstractDevice):
+def convert_to_pyo(device: AbstractDevice) -> PyoDevice:
     if isinstance(device, Generator) or isinstance(device, Load):
         return PyoInjector(device)
     elif isinstance(device, Ground):

@@ -62,7 +62,7 @@ def _(mo):
 
 @app.cell
 def _():
-    from zap.pyomo.model import setup_pyomo_model, parse_output
+    from zap.pyomo.dispatch import setup_pyomo_model, parse_output
     from zap.admm.util import nested_subtract
     return nested_subtract, parse_output, setup_pyomo_model
 
@@ -160,8 +160,8 @@ def _():
 
 
 @app.cell
-def _():
-    # _ = test_medium(drop_battery=False)
+def _(test_medium):
+    _ = test_medium(drop_battery=False)
     return
 
 
@@ -243,23 +243,11 @@ def _(devices, net, pao, pyo, setup_pyomo_model, time_horizon, zap):
 
 
 @app.cell
-def _(result):
-    result
-    return
-
-
-@app.cell
 def _():
     # pao_model = pao.pyomo.convert.convert_pyomo2MultilevelProblem(M)[0]
-
     # _opt = pao.Solver("gurobi")
-
     # _opt.solve(pao_model)
-    return
 
-
-@app.cell
-def _():
     # FA, MIBS, PCCG, REG
     # help(pao.Solver("pao.pyomo.REG").solve)
     return

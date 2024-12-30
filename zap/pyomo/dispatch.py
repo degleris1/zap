@@ -66,6 +66,9 @@ def setup_pyomo_model(
         # Add local objective
         pyo_devices[d].add_objective(dev_model)
 
+        # Model emissions
+        pyo_devices[d].model_emissions(dev_model)
+
     # Power balance constraint
     model.power_balance = pyo.Constraint(
         node_index,
