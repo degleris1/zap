@@ -12,7 +12,7 @@ from zap import importers
 from zap import planning
 from zap import dual
 from zap import pyomo
-
+from zap import admm
 from zap import network
 from zap import layer
 

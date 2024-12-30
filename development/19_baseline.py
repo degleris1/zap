@@ -10,8 +10,11 @@ def _():
     import pyomo
     import pyomo.environ as pyo
     import numpy as np
+    import pandas as pd
+    import datetime as dt
     import zap
-    return mo, np, pyo, pyomo, zap
+    import pypsa
+    return dt, mo, np, pd, pyo, pyomo, pypsa, zap
 
 
 @app.cell(hide_code=True)
@@ -58,34 +61,102 @@ def _(mo):
 
 
 @app.cell
-def _(np, zap):
-    # Initialize network
-    net, devices = zap.importers.load_garver_network(line_slack=5.0)
-    devices += [zap.Ground(num_nodes=net.num_nodes, terminal=np.array([0]))]
-    time_horizon = 1
-    return devices, net, time_horizon
-
-
-@app.cell
-def _(devices, net, pyo, time_horizon):
+def _():
     from zap.pyomo.model import setup_pyomo_model, parse_output
-
-    _devs = [devices[d] for d in [0, 1, 2, 3]]
-    model = setup_pyomo_model(net, _devs, time_horizon)
-
-    solver = pyo.SolverFactory("mosek")
-    solver.solve(model, tee=False, options={})
-
-    power, angle = parse_output(_devs, model)
-    power
-    return angle, model, parse_output, power, setup_pyomo_model, solver
+    from zap.admm.util import nested_subtract
+    return nested_subtract, parse_output, setup_pyomo_model
 
 
 @app.cell
-def _(devices, net, time_horizon, zap):
-    result = net.dispatch(devices, time_horizon, solver=zap.network.cp.CLARABEL)
-    result.power
-    return (result,)
+def _(nested_subtract, np, parse_output, pyo, setup_pyomo_model, zap):
+    def norm_check(x, ord=2):
+        return np.linalg.norm([np.linalg.norm(np.concatenate(ps), ord=1) for ps in x if ps is not None], ord=1)
+
+    def check_pyomo_dispatch(net, devices, time_horizon):
+        model = setup_pyomo_model(net, devices, time_horizon)
+
+        solver = pyo.SolverFactory("mosek")
+        solver.solve(model, tee=False, options={})
+
+        power, angle = parse_output(devices, model)
+
+        result = net.dispatch(devices, time_horizon, solver=zap.network.cp.MOSEK, add_ground=False)
+
+        print("Power Error: ", norm_check(nested_subtract(power, result.power)))
+        print("Angle Error: ", norm_check(nested_subtract(angle, result.angle)))
+        print("Objective Error: ", result.problem.value - pyo.value(model.objective))
+
+        return model, result
+    return check_pyomo_dispatch, norm_check
+
+
+@app.cell
+def _(check_pyomo_dispatch, np, zap):
+    # Test 6-bus garver network
+    def test_small():
+        net, devices = zap.importers.load_garver_network(line_slack=5.0)
+        devices += [zap.Ground(num_nodes=net.num_nodes, terminal=np.array([0]))]
+        time_horizon = 1
+
+        model, result = check_pyomo_dispatch(net, devices, time_horizon)
+
+    test_small()
+    return (test_small,)
+
+
+@app.cell
+def _(pypsa):
+    pn = pypsa.Network()
+    pn.import_from_csv_folder("data/pypsa/western/load_medium/elec_s_42")
+    return (pn,)
+
+
+@app.cell
+def _(check_pyomo_dispatch, dt, np, pd, pn, zap):
+    def test_medium(drop_battery=True):
+        
+        # Test 42-bus pypsa network
+        time_horizon = 12
+        
+        start_date = dt.datetime(2019, 8, 9, 7)
+        dates = pd.date_range(
+            start_date,
+            start_date + dt.timedelta(hours=time_horizon),
+            freq="1h",
+            inclusive="left",
+        )
+        net, devices = zap.importers.load_pypsa_network(
+            pn,
+            dates,
+            scale_load=0.5,
+            power_unit=1000.0,
+            cost_unit=100.0,
+            load_cost_perturbation=10.0,
+            generator_cost_perturbation=1.0,
+            ac_transmission_cost=1.0,
+        )
+        devices += [zap.Ground(num_nodes=net.num_nodes, terminal=np.array([0]))]
+
+        if drop_battery:
+            devices = [d for d in devices if not isinstance(d, zap.Battery)]
+        
+        # Tweak AC line costs
+        devices[3].linear_cost += 0.01 * np.random.rand(*devices[3].linear_cost.shape)
+
+        model, result = check_pyomo_dispatch(net, devices, time_horizon)
+    return (test_medium,)
+
+
+@app.cell
+def _(test_medium):
+    test_medium()
+    return
+
+
+@app.cell
+def _(test_medium):
+    test_medium(drop_battery=False)
+    return
 
 
 if __name__ == "__main__":

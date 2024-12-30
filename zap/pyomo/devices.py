@@ -59,7 +59,7 @@ class PyoGround(Ground):
 
         @block.Constraint(block.dev_index, block.model().time_index)
         def voltage_constraint(block, n, t):
-            return block.terminal[0].angle[n, t] == voltage[n][t]
+            return block.terminal[0].angle[n, t] == voltage[n][0]
 
         @block.Constraint(block.dev_index, block.model().time_index)
         def power_constraint(block, n, t):
@@ -70,22 +70,6 @@ class PyoGround(Ground):
     def add_objective(self, block: pyo.Block):
         block.operation_cost = pyo.Expression(expr=0.0)
         return block
-
-
-# def equality_constraints(
-#         self, power, angle, _, nominal_capacity=None, la=np, envelope=None, mask=None
-#     ):
-#         return [power[1] + power[0]]
-
-# def inequality_constraints(
-#     self, power, angle, _, nominal_capacity=None, la=np, envelope=None, mask=None
-# ):
-#     nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity, la=la)
-
-#     return [
-#         la.multiply(self.min_power, nominal_capacity) - power[1] - self.slack,
-#         power[1] - la.multiply(self.max_power, nominal_capacity) - self.slack,
-#     ]
 
 
 class PyoDCLine(DCLine):
@@ -100,7 +84,7 @@ class PyoDCLine(DCLine):
         return block
 
     def add_objective(self, block: pyo.Block):
-        block.operation_cost = pyo.Expression(expr=0.0)
+        _add_dc_line_cost(block, self)
         return block
 
 
@@ -129,12 +113,50 @@ class PyoACLine(ACLine):
         return block
 
     def add_objective(self, block: pyo.Block):
-        block.operation_cost = pyo.Expression(expr=0.0)
+        _add_dc_line_cost(block, self)
         return block
 
 
 class PyoBattery(Battery):
     pass
+
+
+# ========
+# Helper Functions
+# ========
+
+
+def convert_to_pyo(device: AbstractDevice):
+    if isinstance(device, Generator) or isinstance(device, Load):
+        return PyoInjector(device)
+    elif isinstance(device, Ground):
+        return PyoGround(device)
+    elif isinstance(device, ACLine):
+        return PyoACLine(device)
+    elif isinstance(device, DCLine):
+        return PyoDCLine(device)
+    else:
+        raise NotImplementedError(f"Device type {type(device)} not supported in Pyomo conversion")
+
+
+def _add_dc_line_cost(block: pyo.Block, line):
+    linear_cost = line.x.linear_cost.tolist()
+
+    block.abs_cost = pyo.Var(block.dev_index, block.model().time_index, domain=pyo.NonNegativeReals)
+
+    @block.Constraint(block.dev_index, block.model().time_index)
+    def cost_pos_constraint(block, k, t):
+        return block.abs_cost[k, t] >= block.terminal[1].power[k, t] * linear_cost[k][0]
+
+    @block.Constraint(block.dev_index, block.model().time_index)
+    def cost_neg_constraint(block, k, t):
+        return block.abs_cost[k, t] >= -block.terminal[1].power[k, t] * linear_cost[k][0]
+
+    @block.Expression()
+    def operation_cost(block):
+        return sum(block.abs_cost[k, t] for k in block.dev_index for t in block.model().time_index)
+
+    return block
 
 
 def _add_dc_line_constraints(block: pyo.Block, line):
@@ -155,16 +177,3 @@ def _add_dc_line_constraints(block: pyo.Block, line):
         return block.terminal[1].power[k, t] <= capacity[k][0] * nominal_capacity[k][0] + slack
 
     return block
-
-
-def convert_to_pyo(device: AbstractDevice):
-    if isinstance(device, Generator) or isinstance(device, Load):
-        return PyoInjector(device)
-    elif isinstance(device, Ground):
-        return PyoGround(device)
-    elif isinstance(device, ACLine):
-        return PyoACLine(device)
-    elif isinstance(device, DCLine):
-        return PyoDCLine(device)
-    else:
-        raise NotImplementedError(f"Device type {type(device)} not supported in Pyomo conversion")
