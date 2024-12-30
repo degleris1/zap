@@ -180,94 +180,73 @@ def _(mo):
 @app.cell
 def _():
     import pao
-    return (pao,)
+    from zap.pyomo.bilevel import solve_bilevel_model
+    from zap.planning import DispatchCostObjective, EmissionsObjective, MultiObjective
+    return (
+        DispatchCostObjective,
+        EmissionsObjective,
+        MultiObjective,
+        pao,
+        solve_bilevel_model,
+    )
 
 
 @app.cell
 def _(get_pypsa_net):
     net, devices, time_horizon = get_pypsa_net(drop_battery=True, time_horizon=2)
+    devices
     return devices, net, time_horizon
 
 
 @app.cell
-def _(devices):
-    devices
-    return
+def _(
+    DispatchCostObjective,
+    EmissionsObjective,
+    MultiObjective,
+    devices,
+    net,
+):
+    planner_objective = MultiObjective(
+        objectives=[DispatchCostObjective(net, devices), EmissionsObjective(devices)],
+        weights=[1.0, 0.1],
+    )
+    return (planner_objective,)
 
 
 @app.cell
-def _(devices, net, pao, pyo, setup_pyomo_model, time_horizon, zap):
-    # Settings
-    param_device_types = [zap.Generator, zap.DCLine, zap.Battery]
-    param_devices = [i for i in range(len(devices)) if type(devices[i]) in param_device_types]
-    print(param_devices)
-
-    # Build model
-    pyo_devices = [zap.pyomo.devices.convert_to_pyo(d) for d in devices]
-
-    M = pyo.ConcreteModel()
-    M.time_horizon = time_horizon
-    M.time_index = pyo.RangeSet(0, time_horizon - 1)
-    M.node_index = pyo.RangeSet(0, net.num_nodes - 1)
-
-    # Create parameters
-    params = []
-    M.param_blocks = pyo.Block(param_devices)
-    for p in param_devices:
-        par = pyo_devices[p].make_parameteric(M.param_blocks[p])
-        pyo_devices[p].add_investment_cost(M.param_blocks[p])
-
-        params += [par]
-
-    # Build dispatch problem
-    M.dispatch = pao.pyomo.SubModel(fixed=params)
-    setup_pyomo_model(net, devices, time_horizon, model=M.dispatch, pyo_devices=pyo_devices)
-
-    # Create top level objective
-    M.objective = pyo.Objective(
-        expr=(M.dispatch.objective + sum(M.param_blocks[p].investment_cost for p in param_devices)),
-        sense=pyo.minimize,
+def _(
+    devices,
+    net,
+    planner_objective,
+    solve_bilevel_model,
+    time_horizon,
+    zap,
+):
+    bilevel_model, _ = solve_bilevel_model(
+        net,
+        devices,
+        time_horizon,
+        planner_objective,
+        param_device_types=[zap.Generator, zap.DCLine, zap.Battery],
     )
-
-    # Solve bilevel problem
-    mip = pao.Solver("gurobi")
-    solver = pao.Solver("pao.pyomo.FA", mip_solver=mip)  #, linearize_bigm=100.0)
-
-    result = solver.solve(M, tee=True)
-    return (
-        M,
-        mip,
-        p,
-        par,
-        param_device_types,
-        param_devices,
-        params,
-        pyo_devices,
-        result,
-        solver,
-    )
+    return (bilevel_model,)
 
 
 @app.cell
 def _():
-    # pao_model = pao.pyomo.convert.convert_pyomo2MultilevelProblem(M)[0]
-    # _opt = pao.Solver("gurobi")
-    # _opt.solve(pao_model)
-
-    # FA, MIBS, PCCG, REG
-    # help(pao.Solver("pao.pyomo.REG").solve)
+    # help(pao.Solver("pao.pyomo.FA").solve)
     return
 
 
 @app.cell
-def _(M, devices, np, parse_output):
-    sum(np.round(parse_output(devices, M.dispatch)[0][0][0], decimals=2))
+def _(bilevel_model, devices, np, parse_output):
+    sum(np.round(parse_output(devices, bilevel_model.dispatch)[0][0][0], decimals=2))
     return
 
 
 @app.cell
-def _(M, devices):
-    sum([M.param_blocks[0].param[k].value for k in range(devices[0].num_devices)])
+def _(bilevel_model, devices):
+    sum([bilevel_model.param_blocks[0].param[k].value for k in range(devices[0].num_devices)])
     return
 
 

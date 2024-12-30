@@ -1886,7 +1886,7 @@ files = [
 name = "munch"
 version = "4.0.0"
 description = "A dot-accessible dictionary (a la JavaScript objects)"
-optional = false
+optional = true
 python-versions = ">=3.6"
 files = [
     {file = "munch-4.0.0-py2.py3-none-any.whl", hash = "sha256:71033c45db9fb677a0b7eb517a4ce70ae09258490e419b0e7f00d1e386ecb1b4"},
@@ -2188,7 +2188,7 @@ test = ["pytest (>=7.2)", "pytest-cov (>=4.0)"]
 name = "nose"
 version = "1.3.7"
 description = "nose extends unittest to make testing easier"
-optional = false
+optional = true
 python-versions = "*"
 files = [
     {file = "nose-1.3.7-py2-none-any.whl", hash = "sha256:dadcddc0aefbf99eea214e0f1232b94f2fa9bd98fa8353711dacb112bfcbbb2a"},
@@ -2591,7 +2591,7 @@ files = [
 name = "pao"
 version = "1.0.2"
 description = "PAO: Python Adversarial Optimization"
-optional = false
+optional = true
 python-versions = ">=3.7"
 files = [
     {file = "pao-1.0.2.tar.gz", hash = "sha256:a35c7ab54dcb566811f6dab6793b089f585617b1c93f60a51dd3971bef727427"},
@@ -2607,7 +2607,7 @@ scipy = "*"
 name = "parameterized"
 version = "0.9.0"
 description = "Parameterized testing with any Python test framework"
-optional = false
+optional = true
 python-versions = ">=3.7"
 files = [
     {file = "parameterized-0.9.0-py2.py3-none-any.whl", hash = "sha256:4e0758e3d41bea3bbd05ec14fc2c24736723f243b28d702081aef438c9372b1b"},
@@ -2776,7 +2776,7 @@ type = ["mypy (>=1.11.2)"]
 name = "ply"
 version = "3.11"
 description = "Python Lex & Yacc"
-optional = false
+optional = true
 python-versions = "*"
 files = [
     {file = "ply-3.11-py2.py3-none-any.whl", hash = "sha256:096f9b8350b65ebd2fd1346b12452efe5b9607f7482813ffca50c22722a807ce"},
@@ -3022,7 +3022,7 @@ test = ["pytest", "pytest-cov"]
 name = "pyomo"
 version = "6.6.1"
 description = "Pyomo: Python Optimization Modeling Objects"
-optional = false
+optional = true
 python-versions = ">=3.7"
 files = [
     {file = "Pyomo-6.6.1-cp310-cp310-macosx_11_0_x86_64.whl", hash = "sha256:ca93f624c536bd043cfa9dad7426cc8e317b95eb854d1f9796a4629fa8c37830"},
@@ -3163,7 +3163,7 @@ files = [
 name = "pyutilib"
 version = "6.0.0"
 description = "PyUtilib: A collection of Python utilities"
-optional = false
+optional = true
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 files = [
     {file = "PyUtilib-6.0.0-py2.py3-none-any.whl", hash = "sha256:f1f82d05ad8c42baeef915c8d3d97c0a3cbed6c506c857ab0ab7694dea50ebd8"},
@@ -4688,9 +4688,10 @@ type = ["pytest-mypy"]
 
 [extras]
 mkl = ["sparse-dot-mkl"]
+pyomo = ["pao", "pyomo", "pyutilib"]
 pypsa = ["pypsa"]
 
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.13"
-content-hash = "31aa82ff561429033e74eddc5bcf2f4d0bfea474a0a3518d5f0ee6167cc94975"
+content-hash = "2f9c2ecd4ea034dee4fb11d6f74403b54252b57fd33fd0030ab7a19a1adcb5c0"
