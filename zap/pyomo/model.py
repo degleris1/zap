@@ -25,6 +25,7 @@ def setup_pyomo_model(
 
     # Model setup
     model = pyo.ConcreteModel()
+    model.time_horizon = time_horizon
     model.device = pyo.Block(range(num_devices))
     model.time_index = time_index
     model.node_index = node_index

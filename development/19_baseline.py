@@ -99,8 +99,9 @@ def _(check_pyomo_dispatch, np, zap):
         time_horizon = 1
 
         model, result = check_pyomo_dispatch(net, devices, time_horizon)
+        return model
 
-    test_small()
+    _model = test_small()
     return (test_small,)
 
 
@@ -144,19 +145,21 @@ def _(check_pyomo_dispatch, dt, np, pd, pn, zap):
         devices[3].linear_cost += 0.01 * np.random.rand(*devices[3].linear_cost.shape)
 
         model, result = check_pyomo_dispatch(net, devices, time_horizon)
+        return model
     return (test_medium,)
 
 
 @app.cell
 def _(test_medium):
-    test_medium()
-    return
+    model = test_medium()
+    model.time_index
+    return (model,)
 
 
 @app.cell
 def _(test_medium):
-    test_medium(drop_battery=False)
-    return
+    devs = test_medium(drop_battery=False)
+    return (devs,)
 
 
 if __name__ == "__main__":
