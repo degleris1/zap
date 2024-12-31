@@ -70,7 +70,10 @@ def _():
 @app.cell
 def _(nested_subtract, np, parse_output, pyo, setup_pyomo_model, zap):
     def norm_check(x, ord=2):
-        return np.linalg.norm([np.linalg.norm(np.concatenate(ps), ord=1) for ps in x if ps is not None], ord=1)
+        return np.linalg.norm(
+            [np.linalg.norm(np.concatenate(ps), ord=1) for ps in x if ps is not None], ord=1
+        )
+
 
     def check_pyomo_dispatch(net, devices, time_horizon):
         model = setup_pyomo_model(net, devices, time_horizon)
@@ -80,7 +83,9 @@ def _(nested_subtract, np, parse_output, pyo, setup_pyomo_model, zap):
 
         power, angle = parse_output(devices, model)
 
-        result = net.dispatch(devices, time_horizon, solver=zap.network.cp.MOSEK, add_ground=False)
+        result = net.dispatch(
+            devices, time_horizon, solver=zap.network.cp.MOSEK, add_ground=False
+        )
 
         print("Power Error: ", norm_check(nested_subtract(power, result.power)))
         print("Angle Error: ", norm_check(nested_subtract(angle, result.angle)))
@@ -101,6 +106,7 @@ def _(check_pyomo_dispatch, np, zap):
         model, result = check_pyomo_dispatch(net, devices, time_horizon)
         return model
 
+
     _model = test_small()
     return (test_small,)
 
@@ -114,7 +120,7 @@ def _(pypsa):
 
 @app.cell
 def _(dt, np, pd, pn, zap):
-    def get_pypsa_net(drop_battery=True, time_horizon=12):    
+    def get_pypsa_net(drop_battery=True, time_horizon=12):
         start_date = dt.datetime(2019, 8, 9, 7)
         dates = pd.date_range(
             start_date,
@@ -193,7 +199,7 @@ def _():
 
 @app.cell
 def _(get_pypsa_net):
-    net, devices, time_horizon = get_pypsa_net(drop_battery=True, time_horizon=2)
+    net, devices, time_horizon = get_pypsa_net(drop_battery=True, time_horizon=1)
     devices
     return devices, net, time_horizon
 
@@ -214,22 +220,26 @@ def _(
 
 
 @app.cell
-def _(
-    devices,
-    net,
-    planner_objective,
-    solve_bilevel_model,
-    time_horizon,
-    zap,
-):
-    bilevel_model, _ = solve_bilevel_model(
-        net,
-        devices,
-        time_horizon,
-        planner_objective,
-        param_device_types=[zap.Generator, zap.DCLine, zap.Battery],
-    )
-    return (bilevel_model,)
+def _():
+    # bilevel_model, _ = solve_bilevel_model(
+    #     net,
+    #     devices,
+    #     time_horizon,
+    #     planner_objective,
+    #     param_device_types=[zap.Generator, zap.DCLine, zap.Battery],
+    #     mip_solver="mosek",
+    # )
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
+    return
 
 
 @app.cell
@@ -252,7 +262,14 @@ def _(bilevel_model, pyo):
 
 @app.cell
 def _(bilevel_model, devices, np):
-    np.sum(np.array([bilevel_model.param_blocks[0].param[k].value for k in range(devices[0].num_devices)]))
+    np.sum(
+        np.array(
+            [
+                bilevel_model.param_blocks[0].param[k].value
+                for k in range(devices[0].num_devices)
+            ]
+        )
+    )
     return
 
 

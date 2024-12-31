@@ -577,6 +577,59 @@ def solve_problem(
     }
 
 
+def solve_baseline(
+    problem_data,
+    mip_solver="mosek",
+    pao_solver="pao.pyomo.FA",
+    verbose=True,
+):
+    from zap.pyomo.bilevel import solve_bilevel_model
+    import pyomo.environ as pyo
+
+    print("\n\n\n\nSolving baseline problem.")
+
+    problem = problem_data["problem"]
+    layer: zap.DispatchLayer = problem_data["layer"]
+
+    assert type(problem) is not zap.planning.StochasticPlanningProblem
+
+    # Get parameter types
+    parameter_types = [ind for key, (ind, pname) in layer.parameter_names.items()]
+
+    # Model and solve problem
+    model = solve_bilevel_model(
+        layer.network,
+        layer.devices,
+        problem.time_horizon,
+        problem.operation_objective,
+        param_device_types=parameter_types,
+        pao_solver=pao_solver,
+        mip_solver=mip_solver,
+        verbose=verbose,
+    )
+
+    # Print stuff
+    print("Solved baseline problem.")
+    print("Objective: ", pyo.value(model.objective))
+    print("Emissions: ", pyo.value(model.dispatch.device[0].emissions))
+    print(
+        "Investment Cost: ",
+        sum(pyo.value(model.param_blocks[p].investment_cost) for p in parameter_types),
+    )
+
+    # Parse results
+    params = {
+        key: np.array(
+            [model.param_blocks[ind].param[k].value for k in range(layer.devices[ind].num_devices)]
+        )
+        for key, ind in layer.parameter_names.items()
+    }
+
+    return {
+        "parameters": params,
+    }
+
+
 def save_results(relaxation, results, config):
     # Pick a file name
     results_path = get_results_path(config["id"], config.get("index", None))
@@ -596,7 +649,7 @@ def save_results(relaxation, results, config):
     return None
 
 
-def run_experiment(config):
+def run_experiment(config: dict):
     print(platform.architecture())
     print(platform.machine())
     print(platform.platform())
@@ -618,13 +671,21 @@ def run_experiment(config):
     print(config["layer"])
     problem = setup_problem(**data, **config["problem"], **config["layer"])
 
+    # Solve baseline
+    if config.get("solve_baseline", False):
+        print("Solving baseline problem...")
+        baseline = solve_baseline(problem, **config["baseline"])
+        save_results(None, baseline, config)
+        return None
+
     # Solve relaxation and original problem
-    relaxation = solve_relaxed_problem(problem, **config["relaxation"])
-    results = solve_problem(problem, relaxation, config, **config["optimizer"])
+    else:
+        relaxation = solve_relaxed_problem(problem, **config["relaxation"])
+        results = solve_problem(problem, relaxation, config, **config["optimizer"])
 
-    save_results(relaxation, results, config)
+        save_results(relaxation, results, config)
 
-    return None
+        return None
 
 
 def get_wandb_trackers(problem_data, relaxation, config: dict):

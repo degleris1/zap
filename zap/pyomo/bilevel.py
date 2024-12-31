@@ -20,7 +20,10 @@ def solve_bilevel_model(
     verbose=True,
 ):
     # Settings
-    param_devices = [i for i in range(len(devices)) if type(devices[i]) in param_device_types]
+    if isinstance(param_device_types[0], int):
+        param_devices = param_device_types
+    else:
+        param_devices = [i for i in range(len(devices)) if type(devices[i]) in param_device_types]
 
     # Build model
     pyo_devices = [convert_to_pyo(d) for d in devices]
