@@ -597,7 +597,7 @@ def solve_baseline(
     parameter_types = [ind for key, (ind, pname) in layer.parameter_names.items()]
 
     # Model and solve problem
-    model = solve_bilevel_model(
+    model, solver_data = solve_bilevel_model(
         layer.network,
         layer.devices,
         problem.time_horizon,
@@ -756,7 +756,7 @@ def get_wandb_trackers(problem_data, relaxation, config: dict):
         "inv_cost": lambda J, grad, params, last_state, problem: problem.inv_cost.item(),
         "op_cost": lambda J, grad, params, last_state, problem: problem.op_cost.item(),
         "all_op_costs": all_op_costs,
-        "batch": lambda J, grad, params, last_state, problem: problem.batch[0],
+        "batch": lambda J, grad, params, last_state, problem: getattr(problem, "batch", [None])[0],
         "lower_bound": lambda *args: lower_bound,
         "true_relaxation_cost": lambda *args: true_relax_cost,
         "relaxation_solve_time": lambda *args: relax_solve_time,
