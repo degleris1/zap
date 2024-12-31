@@ -6,7 +6,7 @@ tags: []
 
 system:
   threads: 128
-  runtime: 180
+  runtime: 240
   memory: auto
 
 data:
@@ -17,7 +17,7 @@ data:
   num_nodes: 42
   use_extra_components: true
   start_hour: peak_hybrid_day
-  num_hours: 1
+  num_hours: [expand, 1, 2, 4, 8, 16, 32, 64, 128]
   battery_cost_scale: 1.0
   generator_cost_scale:
     hydro: 1.0
@@ -47,12 +47,12 @@ layer:
 
 optimizer:
   name: gradient_descent
-  num_iterations: 100
+  num_iterations: 1000
   initial_state: initial
   use_wandb: true
   log_wandb_every: 1
   checkpoint_every: 1
-  parallel: true
+  parallel: false
   batch_size: 1
   num_parallel_workers: 1
   track_full_loss_every: 1000
@@ -62,5 +62,5 @@ optimizer:
 
 solve_baseline: [expand, true, false]
 baseline:
-  mip_solver: mosek
+  mip_solver: gurobi
   pao_solver: "pao.pyomo.FA"

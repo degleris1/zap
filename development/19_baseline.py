@@ -199,7 +199,7 @@ def _():
 
 @app.cell
 def _(get_pypsa_net):
-    net, devices, time_horizon = get_pypsa_net(drop_battery=True, time_horizon=1)
+    net, devices, time_horizon = get_pypsa_net(drop_battery=True, time_horizon=2)
     devices
     return devices, net, time_horizon
 
@@ -220,16 +220,23 @@ def _(
 
 
 @app.cell
-def _():
-    # bilevel_model, _ = solve_bilevel_model(
-    #     net,
-    #     devices,
-    #     time_horizon,
-    #     planner_objective,
-    #     param_device_types=[zap.Generator, zap.DCLine, zap.Battery],
-    #     mip_solver="mosek",
-    # )
-    return
+def _(
+    devices,
+    net,
+    planner_objective,
+    solve_bilevel_model,
+    time_horizon,
+    zap,
+):
+    bilevel_model, _ = solve_bilevel_model(
+        net,
+        devices,
+        time_horizon,
+        planner_objective,
+        param_device_types=[zap.Generator, zap.DCLine, zap.Battery],
+        mip_solver="gurobi",
+    )
+    return (bilevel_model,)
 
 
 @app.cell
