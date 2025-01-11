@@ -1,0 +1,81 @@
+---
+tags: []
+
+system:
+  threads: 16
+  runtime: 120
+  memory: auto
+  gpu: 1
+
+data:
+  name: pypsa
+  case: load_medium
+  add_ground: true
+  use_batteries: true
+  num_nodes: 1000
+  use_extra_components: false
+  start_hour: peak_hybrid_day
+  num_hours: 8640
+  dont_expand: [hydro, coal, biomass]
+  scale_by_hours: false
+  args:
+    power_unit: 1000.0  # 1e3 = GW
+    cost_unit: 100.0  # $ / MWh
+    marginal_load_value: 500.0  # $ / MWh
+    scale_load: 1.0
+    scale_generator_capacity_factor: 0.7
+    scale_line_capacity_factor: 0.7
+    carbon_tax: 0.0  # $ / ton CO2
+    generator_cost_perturbation: 1.0  # MW
+    load_cost_perturbation: 10.0  # MW
+    drop_empty_generators: false
+    expand_empty_generators: 0.5  # MW
+    battery_discharge_cost: 1.0  # $ / MWh
+    battery_init_soc: 0.0
+    battery_final_soc: 0.0
+
+problem:
+  stochastic: true
+  hours_per_scenario: 192
+  cost_weight: 1.0
+  emissions_weight: 200.0  # $ / ton CO2
+  regularize: 1.0e-6  # Jacobian regularization
+  parameters: [generator, dc_line, ac_line, battery]
+
+optimizer:
+  name: gradient_descent
+  batch_size: 1
+  num_iterations: 500
+  initial_state: initial
+  use_wandb: true
+  log_wandb_every: 1
+  checkpoint_every: 1
+  track_full_loss_every: -1
+  args:
+    step_size: [expand, 1.0e-2, 1.0e-3]
+    clip: 1000.0
+
+layer:
+  use_admm: true
+  torch_dtype: float32
+  args:
+    # Settings
+    machine: cuda
+    resid_norm: 2
+    battery_window: 24
+    verbose: false
+
+    # Duration / convergence
+    num_iterations: 1000
+    minimum_iterations: 250
+    atol: 1.0e-3
+
+    # Penalty parameter
+    adaptive_rho: true
+    rho_power: 1.0
+    rho_angle: 1.0
+    alpha: 1.0
+    adaptation_frequency: 50
+
+relaxation:
+  should_solve: false

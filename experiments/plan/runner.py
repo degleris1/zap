@@ -774,7 +774,13 @@ def get_wandb_trackers(problem_data, relaxation, config: dict):
         if track_full_loss_every == 0:  # Track once per batch
             track_full_loss_every = int(num_problems / batch_size)
 
-        if batch_size != num_problems:
+        if (batch_size == num_problems) or (batch_size == -1):
+            print("Not tracking full loss because batch_size is 0, num_problems, or -1.")
+
+            def full_loss_tracker(J, grad, params, last_state, _stoch_prob):
+                return J
+
+        else:
             print(f"Tracking full loss every {track_full_loss_every} batches.")
 
             def full_loss_tracker(J, grad, params, last_state, _stoch_prob):
@@ -787,11 +793,6 @@ def get_wandb_trackers(problem_data, relaxation, config: dict):
                     return problem.full_loss
                 else:
                     return getattr(problem, "full_loss", np.inf)
-        else:
-            print("Not tracking full loss because batch_size is 0.")
-
-            def full_loss_tracker(J, grad, params, last_state, _stoch_prob):
-                return J
     else:
 
         def full_loss_tracker(J, grad, params, last_state, problem):

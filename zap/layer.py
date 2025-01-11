@@ -70,7 +70,7 @@ class DispatchLayer:
             contingency_device=self.contingency_device,
             contingency_mask=self.contingency_mask,
         )
-        print("Dispatch: ", time.time() - start)
+        # print("Dispatch: ", time.time() - start)
         return result
 
     def backward(self, z: DispatchOutcome, dz: DispatchOutcome, regularize=1e-8, **kwargs):
