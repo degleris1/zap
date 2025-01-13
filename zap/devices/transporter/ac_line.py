@@ -98,6 +98,19 @@ class ACLine(PowerLine):
             ub_angle_diff,
             *env,
         )
+        
+    # ====
+    # PLANNING FUNCTIONS
+    # ====
+    
+    def sample_time(self, time_periods, original_time_horizon):
+        dev = super().sample_time(time_periods, original_time_horizon)
+
+        if dev.susceptance.shape[1] > 1:
+            dev.susceptance = dev.susceptance[:, time_periods]
+
+        return dev
+
 
     # ====
     # DIFFERENTIATION
