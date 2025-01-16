@@ -32,6 +32,10 @@ class AbstractInjector(AbstractDevice):
     @property
     def terminals(self):
         return self.terminal
+    
+    @terminals.setter
+    def terminals(self, value):
+        self.terminal = value
 
     @property
     def time_horizon(self):
