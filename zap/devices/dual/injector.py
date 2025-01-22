@@ -1,11 +1,11 @@
 import numpy as np
 
-from zap.devices.injector import Injector
+from zap.devices.injector import AbstractInjector
 from zap.util import envelope_variable, use_envelope
 
 
-class DualInjector(Injector):
-    def __init__(self, injector: Injector, max_price=None, **kwargs):
+class DualInjector(AbstractInjector):
+    def __init__(self, injector: AbstractInjector, max_price=None, **kwargs):
         self.primal = injector
         self.max_price = max_price
 
@@ -23,13 +23,19 @@ class DualInjector(Injector):
     # def __getattr__(self, attr):
     #     return getattr(self.primal, attr)
 
-    def equality_constraints(self, power, angle, _, nominal_capacity=None, la=np, envelope=None):
+    def equality_constraints(
+        self, power, angle, _, nominal_capacity=None, la=np, envelope=None
+    ):
         return []
 
-    def inequality_constraints(self, power, angle, _, nominal_capacity=None, la=np, envelope=None):
+    def inequality_constraints(
+        self, power, angle, _, nominal_capacity=None, la=np, envelope=None
+    ):
         return []
 
-    def operation_cost(self, power, angle, _, nominal_capacity=None, la=np, envelope=None):
+    def operation_cost(
+        self, power, angle, _, nominal_capacity=None, la=np, envelope=None
+    ):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity, la=la)
 
         assert self.quadratic_cost is None
@@ -44,7 +50,9 @@ class DualInjector(Injector):
             print("Envelope relaxation applied to dual injector.")
             env, lower, upper = envelope
             lb, ub = lower["nominal_capacity"], upper["nominal_capacity"]
-            z_pnom = envelope_variable(pnom, z, lb, ub, -self.max_price, self.max_price, *env)
+            z_pnom = envelope_variable(
+                pnom, z, lb, ub, -self.max_price, self.max_price, *env
+            )
         else:
             z_pnom = la.multiply(z, pnom)
 

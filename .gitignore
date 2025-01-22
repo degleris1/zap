@@ -3,6 +3,7 @@ data/
 data
 wandb/
 wandb
+build/
 
 # Ray
 .prometheus*/
