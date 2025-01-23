@@ -2,9 +2,8 @@ import numpy as np
 import scipy.sparse as sp
 import cvxpy
 import torch
-from attrs import define, field, Factory
+from attrs import define, field
 
-from typing import Optional
 from numpy.typing import NDArray
 
 from .abstract import AbstractDevice, get_time_horizon, make_dynamic
@@ -18,6 +17,9 @@ class PowerTarget(AbstractDevice):
     terminal: NDArray
     target_power: NDArray = field(converter=make_dynamic)
     norm_order: int = field(default=2)
+
+    def __post_init__(self):
+        assert self.norm_order in [1, 2]
 
     @property
     def terminals(self):
@@ -40,12 +42,12 @@ class PowerTarget(AbstractDevice):
     def operation_cost(self, power, angle, _, target_power=None, la=np):
         target_power = self.parameterize(target_power=target_power, la=la)
 
-        if la == torch:
-            return 0.5 * torch.linalg.vector_norm(power[0] - target_power, ord=self.norm_order)
-        if la == np:
-            return 0.5 * np.linalg.norm((power[0] - target_power).reshape(-1), ord=self.norm_order)
-        if la == cvxpy:
-            return 0.5 * cvxpy.norm(power[0] - target_power, self.norm_order)
+        err = power[0] - target_power
+        if self.norm_order == 1:
+            return la.sum(la.abs(err))
+
+        else:  # L2
+            return (0.5) * la.sum(la.square(err))
 
     # ====
     # DIFFERENTIATION
@@ -60,7 +62,11 @@ class PowerTarget(AbstractDevice):
     def _hessian_power(self, hessians, power, angle, _, target_power=None, la=np):
         target_power = self.parameterize(target_power=target_power, la=la)
 
-        hessians[0] += sp.diags((power[0] - target_power).ravel())
+        if self.norm_order == 2:
+            hessians[0] += sp.diags(np.ones_like(power[0]).ravel())
+        else:  # L1
+            pass
+
         return hessians
 
     # ====
