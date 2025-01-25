@@ -26,7 +26,7 @@ class PowerTarget(AbstractDevice):
 
     @property
     def time_horizon(self):
-        return get_time_horizon(self.target_power)
+        return get_time_horizon(self.min_power)
 
     # ====
     # CORE MODELING FUNCTIONS
