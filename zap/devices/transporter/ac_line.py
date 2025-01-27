@@ -56,9 +56,18 @@ class ACLine(PowerLine):
     # ====
 
     def equality_constraints(
-        self, power, angle, u, nominal_capacity=None, la=np, envelope=None, mask=None
+        self,
+        power,
+        angle,
+        u,
+        nominal_capacity=None,
+        susceptance=None,
+        la=np,
+        envelope=None,
+        mask=None,
     ):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity, la=la)
+        susceptance = self.parameterize(susceptance=susceptance, la=la)
 
         # Regular transporter constraints
         eq_constraints = super().equality_constraints(
@@ -69,9 +78,9 @@ class ACLine(PowerLine):
         angle_diff = angle[0] - angle[1]
 
         if mask is None:
-            b = self.susceptance
+            b = susceptance
         else:
-            b = self.susceptance - la.multiply(self.susceptance, mask)
+            b = susceptance - la.multiply(susceptance, mask)
 
         if use_envelope(envelope):  # When line is plannable
             print("Envelope relaxation applied to AC line.")
@@ -98,11 +107,11 @@ class ACLine(PowerLine):
             ub_angle_diff,
             *env,
         )
-        
+
     # ====
     # PLANNING FUNCTIONS
     # ====
-    
+
     def sample_time(self, time_periods, original_time_horizon):
         dev = super().sample_time(time_periods, original_time_horizon)
 
@@ -111,20 +120,21 @@ class ACLine(PowerLine):
 
         return dev
 
-
     # ====
     # DIFFERENTIATION
     # ====
 
-    def _equality_matrices(self, equalities, nominal_capacity=None, la=np):
+    def _equality_matrices(self, equalities, nominal_capacity=None, susceptance=None, la=np):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity, la=la)
+        susceptance = self.parameterize(susceptance=susceptance, la=la)
+
         size = equalities[0].power[0].shape[1]
 
         time_horizon = int(size / self.num_devices)
         shaped_zeros = np.zeros((self.num_devices, time_horizon))
 
-        susceptance = la.multiply(self.susceptance, nominal_capacity)
-        b_mat = shaped_zeros + susceptance
+        b_pnom = la.multiply(susceptance, nominal_capacity)
+        b_mat = shaped_zeros + b_pnom
 
         equalities[1].power[1] += sp.eye(size)
         equalities[1].angle[0] += -sp.diags(b_mat.ravel())
@@ -143,6 +153,7 @@ class ACLine(PowerLine):
         power,
         angle,
         nominal_capacity=None,
+        susceptance=None,
         power_weights=None,
         angle_weights=None,
         cvx_mode=False,
@@ -156,6 +167,7 @@ class ACLine(PowerLine):
             mask = mask.T.unsqueeze(1)
 
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity)
+        susceptance = self.parameterize(susceptance=susceptance)
 
         if cvx_mode:
             return self.cvx_admm_prox_update(
@@ -168,8 +180,8 @@ class ACLine(PowerLine):
         if self.has_changed:
             pmax = torch.multiply(self.max_power, nominal_capacity) + self.slack
             pmin = torch.multiply(self.min_power, nominal_capacity) - self.slack
-            susceptance = torch.multiply(self.susceptance, nominal_capacity)
-            mu = torch.divide(1.0, 2.0 * susceptance)
+            b_pnom = torch.multiply(susceptance, nominal_capacity)
+            mu = torch.divide(1.0, 2.0 * b_pnom)
             bool_mask = None
 
             if nc > 0:
@@ -178,8 +190,8 @@ class ACLine(PowerLine):
                 pmin = pmin.unsqueeze(2)
 
                 # Multiply susceptance by 1 - mask
-                susceptance = susceptance.unsqueeze(2)
-                susceptance = susceptance * (1.0 - mask)
+                b_pnom = b_pnom.unsqueeze(2)
+                b_pnom = b_pnom * (1.0 - mask)
 
                 # Define mu normally
                 # When b = 0 (line outage), then mu = infty
@@ -191,9 +203,9 @@ class ACLine(PowerLine):
                 # Create a boolean mask for the update function
                 bool_mask = mask == 1.0
 
-            self.admm_data = (pmax, pmin, susceptance, mu, bool_mask)
+            self.admm_data = (pmax, pmin, b_pnom, mu, bool_mask)
 
-        pmax, pmin, susceptance, mu, bool_mask = self.admm_data
+        pmax, pmin, b_pnom, mu, bool_mask = self.admm_data
 
         if nc > 0:
             return _admm_prox_update_masked(
@@ -201,7 +213,7 @@ class ACLine(PowerLine):
                 angle,
                 rho_power,
                 rho_angle,
-                susceptance,
+                b_pnom,
                 mu,
                 quad_cost,
                 pmin,
@@ -211,7 +223,7 @@ class ACLine(PowerLine):
             )
         else:
             return _admm_prox_update(
-                power, angle, rho_power, rho_angle, susceptance, mu, quad_cost, pmin, pmax
+                power, angle, rho_power, rho_angle, b_pnom, mu, quad_cost, pmin, pmax
             )
 
     def cvx_admm_prox_update(self, rho_power, rho_angle, power, angle, nominal_capacity=None):
