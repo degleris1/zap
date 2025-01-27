@@ -1,0 +1,38 @@
+# name: "Sphinx: Render docs"
+
+name: documentation
+
+on: push
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pandoc
+        uses: r-lib/actions/setup-pandoc@v2
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Setup Poetry
+        uses: snok/install-poetry@v1
+      - name: Install Dependencies
+        run: poetry install --with=docs --without=experiment
+
+      - name: Sphinx build
+        run: poetry run sphinx-build docs/source _build
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        with:
+          publish_branch: gh-pages
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: _build/
+          force_orphan: true

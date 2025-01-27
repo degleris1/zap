@@ -60,14 +60,10 @@ class AbstractInjector(AbstractDevice):
     # CORE MODELING FUNCTIONS
     # ====
 
-    def equality_constraints(
-        self, power, angle, _, nominal_capacity=None, la=np, envelope=None
-    ):
+    def equality_constraints(self, power, angle, _, nominal_capacity=None, la=np, envelope=None):
         return []
 
-    def inequality_constraints(
-        self, power, angle, _, nominal_capacity=None, la=np, envelope=None
-    ):
+    def inequality_constraints(self, power, angle, _, nominal_capacity=None, la=np, envelope=None):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity, la=la)
         power = power[0]
 
@@ -76,9 +72,7 @@ class AbstractInjector(AbstractDevice):
             power - la.multiply(self.max_power, nominal_capacity),
         ]
 
-    def operation_cost(
-        self, power, angle, _, nominal_capacity=None, la=np, envelope=None
-    ):
+    def operation_cost(self, power, angle, _, nominal_capacity=None, la=np, envelope=None):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity, la=la)
         power = power[0] - la.multiply(self.min_power, nominal_capacity)
 
@@ -118,7 +112,7 @@ class AbstractInjector(AbstractDevice):
         if self.quadratic_cost is None:
             return hessians
 
-        hessians[0] += 2 * sp.diags((self.quadratic_cost * power[0]).ravel())
+        hessians[0] += 2 * sp.diags((self.quadratic_cost * np.ones_like(power[0])).ravel())
         return hessians
 
     # ====
@@ -142,9 +136,7 @@ class AbstractInjector(AbstractDevice):
 
         if self.has_changed:
             quadratic_cost = (
-                0.0 * self.linear_cost
-                if self.quadratic_cost is None
-                else self.quadratic_cost
+                0.0 * self.linear_cost if self.quadratic_cost is None else self.quadratic_cost
             )
             pmax = torch.multiply(self.max_power, nominal_capacity)
             pmin = torch.multiply(self.min_power, nominal_capacity)
@@ -153,9 +145,7 @@ class AbstractInjector(AbstractDevice):
 
         quadratic_cost, pmax, pmin = self.admm_data
 
-        return _admm_prox_update(
-            power, rho_power, self.linear_cost, quadratic_cost, pmin, pmax
-        )
+        return _admm_prox_update(power, rho_power, self.linear_cost, quadratic_cost, pmin, pmax)
 
     def get_admm_power_weights(self, power, strategy: str, nominal_capacity=None):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity)
@@ -194,12 +184,8 @@ class Generator(AbstractInjector):
     quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     capital_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     emission_rates: Optional[NDArray] = field(default=None, converter=make_dynamic)
-    min_nominal_capacity: Optional[NDArray] = field(
-        default=None, converter=make_dynamic
-    )
-    max_nominal_capacity: Optional[NDArray] = field(
-        default=None, converter=make_dynamic
-    )
+    min_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    max_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
 
     # TODO - Add dimension checks
 
@@ -280,9 +266,7 @@ class Load(AbstractInjector):
 
 
 @torch.jit.script
-def _admm_prox_update(
-    power: list[torch.Tensor], rho: float, lin_cost, quad_cost, pmin, pmax
-):
+def _admm_prox_update(power: list[torch.Tensor], rho: float, lin_cost, quad_cost, pmin, pmax):
     # Problem is
     #     min_p    a (p - pmin)^2 + b (p - pmin) + (rho / 2) || (p - power) ||_2^2 + {box constraints}
     # Objective derivative is
