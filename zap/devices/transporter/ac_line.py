@@ -118,6 +118,9 @@ class ACLine(PowerLine):
         if dev.susceptance.shape[1] > 1:
             dev.susceptance = dev.susceptance[:, time_periods]
 
+        if dev.nominal_capacity.shape[1] > 1:
+            dev.nominal_capacity = dev.nominal_capacity[:, time_periods]
+
         return dev
 
     # ====
