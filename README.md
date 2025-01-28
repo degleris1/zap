@@ -55,4 +55,5 @@ If you also used the gradient-based planning methods, please also cite our paper
   journal={arXiv preprint arXiv:2404.01255},
   year={2024}
 }
+
 ```
