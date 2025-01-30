@@ -32,7 +32,7 @@ class AbstractInjector(AbstractDevice):
     @property
     def terminals(self):
         return self.terminal
-    
+
     @property
     def time_horizon(self):
         return get_time_horizon(self.min_power)
@@ -60,23 +60,60 @@ class AbstractInjector(AbstractDevice):
     # CORE MODELING FUNCTIONS
     # ====
 
-    def equality_constraints(self, power, angle, _, nominal_capacity=None, la=np, envelope=None):
+    def equality_constraints(
+        self,
+        power,
+        angle,
+        _,
+        nominal_capacity=None,
+        max_power=None,
+        min_power=None,
+        linear_cost=None,
+        la=np,
+        envelope=None,
+    ):
         return []
 
-    def inequality_constraints(self, power, angle, _, nominal_capacity=None, la=np, envelope=None):
+    def inequality_constraints(
+        self,
+        power,
+        angle,
+        _,
+        nominal_capacity=None,
+        max_power=None,
+        min_power=None,
+        linear_cost=None,
+        la=np,
+        envelope=None,
+    ):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity, la=la)
+        max_power = self.parameterize(max_power=max_power, la=la)
+        min_power = self.parameterize(min_power=min_power, la=la)
         power = power[0]
 
         return [
-            la.multiply(self.min_power, nominal_capacity) - power,
-            power - la.multiply(self.max_power, nominal_capacity),
+            la.multiply(min_power, nominal_capacity) - power,
+            power - la.multiply(max_power, nominal_capacity),
         ]
 
-    def operation_cost(self, power, angle, _, nominal_capacity=None, la=np, envelope=None):
+    def operation_cost(
+        self,
+        power,
+        angle,
+        _,
+        nominal_capacity=None,
+        max_power=None,
+        min_power=None,
+        linear_cost=None,
+        la=np,
+        envelope=None,
+    ):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity, la=la)
-        power = power[0] - la.multiply(self.min_power, nominal_capacity)
+        min_power = self.parameterize(min_power=min_power, la=la)
+        linear_cost = self.parameterize(linear_cost=linear_cost, la=la)
+        power = power[0] - la.multiply(min_power, nominal_capacity)
 
-        cost = la.sum(la.multiply(self.linear_cost, power))
+        cost = la.sum(la.multiply(linear_cost, power))
         if self.quadratic_cost is not None:
             cost += la.sum(la.multiply(self.quadratic_cost, la.square(power)))
 
@@ -99,16 +136,43 @@ class AbstractInjector(AbstractDevice):
     # DIFFERENTIATION
     # ====
 
-    def _equality_matrices(self, equalities, nominal_capacity=None, la=np):
+    def _equality_matrices(
+        self,
+        equalities,
+        nominal_capacity=None,
+        max_power=None,
+        min_power=None,
+        linear_cost=None,
+        la=np,
+    ):
         return equalities
 
-    def _inequality_matrices(self, inequalities, nominal_capacity=None, la=np):
+    def _inequality_matrices(
+        self,
+        inequalities,
+        nominal_capacity=None,
+        max_power=None,
+        min_power=None,
+        linear_cost=None,
+        la=np,
+    ):
         size = inequalities[0].power[0].shape[1]
         inequalities[0].power[0] += -sp.eye(size)
         inequalities[1].power[0] += sp.eye(size)
         return inequalities
 
-    def _hessian_power(self, hessians, power, angle, _, nominal_capacity=None, la=np):
+    def _hessian_power(
+        self,
+        hessians,
+        power,
+        angle,
+        _,
+        nominal_capacity=None,
+        max_power=None,
+        min_power=None,
+        linear_cost=None,
+        la=np,
+    ):
         if self.quadratic_cost is None:
             return hessians
 
@@ -126,32 +190,47 @@ class AbstractInjector(AbstractDevice):
         power,
         angle,
         nominal_capacity=None,
+        max_power=None,
+        min_power=None,
+        linear_cost=None,
         power_weights=None,
         angle_weights=None,
     ):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity)
+        max_power = self.parameterize(max_power=max_power)
+        min_power = self.parameterize(min_power=min_power)
+        linear_cost = self.parameterize(linear_cost=linear_cost)
 
         # machine, dtype = power[0].device, power[0].dtype
         assert angle is None
 
         if self.has_changed:
             quadratic_cost = (
-                0.0 * self.linear_cost if self.quadratic_cost is None else self.quadratic_cost
+                0.0 * linear_cost if self.quadratic_cost is None else self.quadratic_cost
             )
-            pmax = torch.multiply(self.max_power, nominal_capacity)
-            pmin = torch.multiply(self.min_power, nominal_capacity)
+            pmax = torch.multiply(max_power, nominal_capacity)
+            pmin = torch.multiply(min_power, nominal_capacity)
             self.admm_data = (quadratic_cost, pmax, pmin)
             self.has_changed = False
 
         quadratic_cost, pmax, pmin = self.admm_data
 
-        return _admm_prox_update(power, rho_power, self.linear_cost, quadratic_cost, pmin, pmax)
+        return _admm_prox_update(power, rho_power, linear_cost, quadratic_cost, pmin, pmax)
 
-    def get_admm_power_weights(self, power, strategy: str, nominal_capacity=None):
+    def get_admm_power_weights(
+        self,
+        power,
+        strategy: str,
+        nominal_capacity=None,
+        max_power=None,
+        min_power=None,
+        linear_cost=None,
+    ):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity)
+        linear_cost = self.parameterize(linear_cost=linear_cost)
 
         if strategy == "smart_cost":
-            avg_cost = np.mean(self.linear_cost, axis=1).reshape((-1, 1))
+            avg_cost = np.mean(linear_cost, axis=1).reshape((-1, 1))
             return [np.maximum(np.sqrt(1 / (avg_cost + 0.01)), 1.0)]
 
         if strategy == "smart_bounds":
