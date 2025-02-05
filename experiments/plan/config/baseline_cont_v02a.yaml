@@ -1,13 +1,14 @@
 # Basic config
 # -> Run baseline only
 # -> Try different solvers
+# -> Change cost unit to 100 or 1000
 
 ---
 tags: []
 
 system:
   threads: 128
-  runtime: 240
+  runtime: 120
   memory: auto
 
 data:
@@ -25,7 +26,7 @@ data:
   dont_expand: [hydro, coal, biomass]
   args:
     power_unit: 1.0e3  # 1e3 = GW
-    cost_unit: 1.0  # $ / MWh
+    cost_unit: [expand, 100.0, 1000.0]  # $ / MWh
     marginal_load_value: 500.0  # $ / MWh
     scale_load: 1.0
     scale_generator_capacity_factor: 0.7

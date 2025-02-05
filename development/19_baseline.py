@@ -114,14 +114,14 @@ def _(check_pyomo_dispatch, np, zap):
 @app.cell
 def _(pypsa):
     pn = pypsa.Network()
-    pn.import_from_csv_folder("data/pypsa/western/load_medium/elec_s_42")
+    pn.import_from_csv_folder("data/pypsa/western/load_medium/elec_s_42_ec")
     return (pn,)
 
 
 @app.cell
 def _(dt, np, pd, pn, zap):
     def get_pypsa_net(drop_battery=True, time_horizon=12):
-        start_date = dt.datetime(2019, 8, 9, 7)
+        start_date = dt.datetime(2019, 8, 14, 7)
         dates = pd.date_range(
             start_date,
             start_date + dt.timedelta(hours=time_horizon),
@@ -133,18 +133,23 @@ def _(dt, np, pd, pn, zap):
             dates,
             scale_load=1.0,
             power_unit=1000.0,
-            cost_unit=100.0,
+            cost_unit=100.0 * time_horizon,
+            marginal_load_value=500.0,
             load_cost_perturbation=10.0,
             generator_cost_perturbation=1.0,
-            ac_transmission_cost=1.0,
+            scale_generator_capacity_factor=0.7,
+            scale_line_capacity_factor=0.7,
+            drop_empty_generators=False,
+            expand_empty_generators=0.5,
+            # ac_transmission_cost=1.0,
         )
         devices += [zap.Ground(num_nodes=net.num_nodes, terminal=np.array([0]))]
 
-        if drop_battery:
+        if drop_battery or time_horizon == 1:
             devices = [d for d in devices if not isinstance(d, zap.Battery)]
 
         # Tweak AC line costs
-        devices[3].linear_cost += 0.01 * np.random.rand(*devices[3].linear_cost.shape)
+        # devices[3].linear_cost += 0.1 * np.random.rand(*devices[3].linear_cost.shape)
 
         return net, devices, time_horizon
     return (get_pypsa_net,)
@@ -199,7 +204,7 @@ def _():
 
 @app.cell
 def _(get_pypsa_net):
-    net, devices, time_horizon = get_pypsa_net(drop_battery=True, time_horizon=8)
+    net, devices, time_horizon = get_pypsa_net(drop_battery=False, time_horizon=4)
     devices
     return devices, net, time_horizon
 
@@ -235,7 +240,7 @@ def _(
         planner_objective,
         param_device_types=[zap.Generator, zap.DCLine, zap.Battery],
         mip_solver="gurobi",
-        mip_solver_options={"MIPGap": 0.01, "Threads": 64, "MIPFocus": 1},
+        mip_solver_options={"MIPGap": 0.0, "Threads": 64, "MIPFocus": 1},
         pao_solver="pao.pyomo.FA",
         verbose=True
     )
