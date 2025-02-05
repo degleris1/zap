@@ -1,11 +1,11 @@
 import marimo
 
-__generated_with = "0.8.3"
+__generated_with = "0.10.7"
 app = marimo.App(width="medium")
 
 
 @app.cell
-def __():
+def _():
     import marimo as mo
     import numpy as np
     import pandas as pd
@@ -18,13 +18,13 @@ def __():
 
 
 @app.cell
-def __():
+def _():
     import zap
-    return zap,
+    return (zap,)
 
 
 @app.cell
-def __(importlib):
+def _(importlib):
     import matplotlib.pyplot as plt
     import seaborn
 
@@ -34,10 +34,10 @@ def __(importlib):
         rc={
             "axes.edgecolor": "0.15",
             "axes.linewidth": 1.25,
-            "font.size": 10,
-            "axes.labelsize": 10,
-            "axes.titlesize": 10,
-            "legend.fontsize": 10,
+            "font.size": 8,
+            "axes.labelsize": 8,
+            "axes.titlesize": 8,
+            "legend.fontsize": 8,
             "xtick.labelsize": 8,
             "ytick.labelsize": 8,
         },
@@ -50,28 +50,28 @@ def __(importlib):
 
 
 @app.cell
-def __(importlib):
+def _(importlib):
     from experiments.solve import runner
 
     _ = importlib.reload(runner)
-    return runner,
+    return (runner,)
 
 
 @app.cell(hide_code=True)
-def __(mo):
+def _(mo):
     mo.md(r"""## Helper Functions""")
     return
 
 
 @app.cell
-def __(runner):
+def _(runner):
     def open_configs(path):
         return runner.expand_config(runner.load_config(path))
-    return open_configs,
+    return (open_configs,)
 
 
 @app.cell
-def __(extract_runtime, np, pd):
+def _(extract_runtime, np, pd):
     def build_runtime_table(configs, skip_missing=False, iter=-1):
         df = {}
 
@@ -117,11 +117,11 @@ def __(extract_runtime, np, pd):
         df["subopt"] = np.abs(df["median_obj_vals"] - df["best_obj"]) / df["best_obj"]
 
         return df, data
-    return build_runtime_table,
+    return (build_runtime_table,)
 
 
 @app.cell
-def __(
+def _(
     Path,
     get_dual_resid_scaled,
     get_primal_resid_scaled,
@@ -155,11 +155,11 @@ def __(
         data = solver_data
 
         return runtimes, primal_residuals, dual_residuals, total_resids, objective_vals, data
-    return extract_runtime,
+    return (extract_runtime,)
 
 
 @app.cell
-def __(np):
+def _(np):
     def get_primal_resid_scaled(data, iter):
         h = data["history"]
         root_n = np.sqrt(data["num_ac_terminals"]) + np.sqrt(data["num_dc_terminals"])
@@ -175,13 +175,13 @@ def __(np):
 
 
 @app.cell
-def __(solver_data):
+def _(solver_data):
     solver_data[-1][0][0]["problem_data"][0]["value"]
     return
 
 
-@app.cell(hide_code=True)
-def __(plt):
+@app.cell
+def _(plt):
     def plot_runtimes(
         df,
         fig=None,
@@ -194,7 +194,7 @@ def __(plt):
         if fig is None:
             fig, ax = plt.subplots(figsize=(3, 2))
 
-        keys = sorted(df[compare].unique())
+        keys = labels.keys()
 
         for k in keys:
             data = df[df[compare] == k]
@@ -208,93 +208,104 @@ def __(plt):
             else:
                 label = labels[k]
 
-            ax.plot(data.index, data[value], label=label, marker=".", ms=8)
+            ax.plot(data.index, data[value], label=label, marker=".", ms=4)
             ax.set_xlabel(x_index)
             ax.set_ylabel(value)
 
         ax.legend()
 
         return fig, ax
-    return plot_runtimes,
+    return (plot_runtimes,)
 
 
 @app.cell(hide_code=True)
-def __(mo):
+def _(mo):
     mo.md("""## Scaling""")
     return
 
 
 @app.cell(hide_code=True)
-def __(mo):
+def _(mo):
     mo.md(r"""### Time Horizon""")
     return
 
 
 @app.cell
-def __(df_hours):
+def _(df_hours):
     print(df_hours.subopt.max())
     print(df_hours.subopt.median())
     return
 
 
 @app.cell
-def __(build_runtime_table, open_configs):
+def _(build_runtime_table, open_configs, pd):
     _configs = open_configs("./experiments/solve/config/scaling_hours_v03.yaml")
     df_hours, solver_data = build_runtime_table(_configs)
+    df_hours.loc[df_hours.solver == "admm", "solver"] = "admm_gpu"
+
+    df_hours_cpu, _ = build_runtime_table(open_configs("./experiments/solve/config/scaling_hours_v04cpu.yaml"))
+    df_hours_cpu["solver"] = "admm_cpu"
+
+    df_hours = pd.concat([df_hours, df_hours_cpu])
 
     df_hours["num_days"] = df_hours.hours_per_scenario / 24
     df_hours.sort_values(by=["median_resid", "hours_per_scenario", "solver"])
 
     df_hours.sort_values(by=["hours_per_scenario", "scale_load", "solver"], ascending=False)
-    return df_hours, solver_data
+    return df_hours, df_hours_cpu, solver_data
 
 
 @app.cell(hide_code=True)
-def __(mo):
+def _(mo):
     mo.md(r"""### Number of Nodes""")
     return
 
 
 @app.cell
-def __(df_nodes):
+def _(df_nodes):
     print(df_nodes.subopt.max())
     print(df_nodes.subopt.median())
     return
 
 
 @app.cell
-def __():
+def _():
     # plt.plot(solver_data_nodes[28][0][0]["history"].objective)
     return
 
 
 @app.cell
-def __(build_runtime_table, open_configs):
+def _(build_runtime_table, open_configs, pd):
     _configs = open_configs("./experiments/solve/config/scaling_devices_v03.yaml")
     df_nodes, solver_data_nodes = build_runtime_table(_configs)
+    df_nodes.loc[df_nodes.solver == "admm", "solver"] = "admm_gpu"
 
+    df_nodes_cpu, _ = build_runtime_table(open_configs("./experiments/solve/config/scaling_devices_v04cpu.yaml"))
+    df_nodes_cpu["solver"] = "admm_cpu"
+
+    df_nodes = pd.concat([df_nodes, df_nodes_cpu])
     df_nodes = df_nodes[df_nodes.num_nodes >= 500]
 
     df_nodes.sort_values(by=["upper_resid"], ascending=False)
     df_nodes.sort_values(by=["num_nodes", "scale_load", "solver"], ascending=False)
-    return df_nodes, solver_data_nodes
+    return df_nodes, df_nodes_cpu, solver_data_nodes
 
 
 @app.cell(hide_code=True)
-def __(mo):
+def _(mo):
     mo.md(r"""### Contingencies""")
     return
 
 
 @app.cell
-def __(df_cont):
+def _(df_cont):
     print(df_cont.subopt.max())
     print(df_cont.subopt.median())
     return
 
 
 @app.cell
-def __():
+def _():
     # plt.plot(solver_data_cont[54][0][0]["history"].dual_power)
     # plt.yscale("log")
     # plt.show()
@@ -302,27 +313,35 @@ def __():
 
 
 @app.cell
-def __(build_runtime_table, np, open_configs):
+def _(build_runtime_table, np, open_configs, pd):
     _configs = open_configs("./experiments/solve/config/scaling_cont_v04.yaml")
     df_cont, solver_data_cont = build_runtime_table(_configs, skip_missing=False)
+    df_cont.loc[df_cont.solver == "admm", "solver"] = "admm_gpu"
+
+    df_cont_cpu, _ = build_runtime_table(open_configs("./experiments/solve/config/scaling_cont_v04cpu.yaml"))
+    df_cont_cpu["solver"] = "admm_cpu"
+
     # df_cont_big, _solver_data = build_runtime_table(
     #     open_configs("./experiments/solve/config/scaling_cont_big_v04.yaml")
     # )
+    # df_cont_big["solver"] = "admm_gpu"
     # df_cont_base, _solver_data = build_runtime_table(
     #     open_configs("./experiments/solve/config/scaling_cont_big_base_v01.yaml"),
     #     skip_missing=True,
     # )
-    #df_cont = pd.concat([df_cont, df_cont_big, df_cont_base])
+
+    df_cont = pd.concat([df_cont, df_cont_cpu])  #, df_cont_big, df_cont_base])
+
 
     df_cont["num_contingencies"] = np.minimum(df_cont["num_contingencies"], 1158) + 1
 
     df_cont.sort_values(by=["upper_resid"], ascending=False)
     df_cont.sort_values(by=["num_contingencies", "scale_load"], ascending=False)
-    return df_cont, solver_data_cont
+    return df_cont, df_cont_cpu, solver_data_cont
 
 
 @app.cell
-def __(df_cont, df_hours, df_nodes, np):
+def _(df_cont, df_hours, df_nodes, np):
     _median = np.median([df_hours["median_resid"].median(), df_nodes["median_resid"].median(), df_cont["median_resid"].median()])
     _max = np.max([df_hours["upper_resid"].max(), df_nodes["upper_resid"].max(), df_cont["upper_resid"].max()])
 
@@ -332,78 +351,90 @@ def __(df_cont, df_hours, df_nodes, np):
 
 
 @app.cell(hide_code=True)
-def __(mo):
+def _(mo):
     mo.md(r"""## Combine Plots""")
     return
 
 
 @app.cell
-def __(df_cont, df_hours, df_nodes, plot_runtimes, plt):
+def _(df_cont, df_hours, df_nodes, plot_runtimes, plt):
     def plot_scaling(figsize):
         _fig, _axes = plt.subplots(1, 3, figsize=figsize)
+        labels = {"cvxpy": "Mosek", "admm_cpu": "ADMM CPU", "admm_gpu": "ADMM GPU"}
 
         plot_runtimes(
             df_nodes,
             fig=_fig,
             ax=_axes[0],
             x_index="num_nodes",
-            labels={"cvxpy": "Mosek", "admm": "ADMM"},
+            labels=labels,
         )
         plot_runtimes(
             df_hours,
             fig=_fig,
             ax=_axes[1],
             x_index="hours_per_scenario",
-            labels={"cvxpy": "Mosek", "admm": "ADMM"},
+            labels=labels,
         )
         plot_runtimes(
             df_cont,
             fig=_fig,
             ax=_axes[2],
             x_index="num_contingencies",
-            labels={"cvxpy": "Mosek", "admm": "ADMM"},
+            labels=labels,
         )
-        
+
+        _axes[0].set_ylim(1.0, 1000.0)
+        _axes[0].set_yscale("log")
         _axes[0].set_xlabel("Network Size")
         _axes[0].set_ylabel("Mean Runtime (s)")
         _axes[0].get_legend().remove()
         _axes[0].set_xticks([500, 2000, 4000])
-        
+
+        _axes[1].set_ylim(1.0, 1000.0)
         _axes[1].get_legend().remove()
         _axes[1].set_xlabel("Time Horizon")
         _axes[1].set_ylabel("")
         _axes[1].set_yscale("log")
-        _axes[1].set_ylim(1.0, 1000.0)
         _axes[1].set_xticks([24, 384, 768])
-        
+        _axes[1].tick_params(labelleft=False)
+
+        _axes[2].set_ylim(1.0, 1000.0)
         _axes[2].set_ylabel("")
         _axes[2].set_yscale("log")
         _axes[2].set_xscale("log")
         _axes[2].get_legend().remove()
         _axes[2].set_xlabel("Contingencies")
+        _axes[2].tick_params(labelleft=False)
 
-        _axes[1].legend(loc="upper left", framealpha=1)
-        
-        for ax in _axes[1:]:
+
+        for ax in _axes:
             ax.grid(True, which='minor', axis="y", color="lightgray", linestyle="dashed", linewidth=0.3)
-            
+
+        _fig.align_xlabels()
         _fig.tight_layout()
-        
+
+        _axes[1].legend(loc="upper center", framealpha=1, ncol=3, bbox_to_anchor=(0.5, 1.3))
+        _fig.subplots_adjust(top=0.8)
+
+        # _fig.tight_layout()
+
         return _fig, _axes
-    return plot_scaling,
+    return (plot_scaling,)
 
 
 @app.cell
-def __(Path, plot_scaling, plotter):
+def _(Path, plot_scaling, plotter):
     plotter.set_full_style()
     _fig, _axes = plot_scaling(figsize=(plotter.FIGWIDTH_FULL, 2.5))
     _fig.savefig(Path().home() / "figures/gpu/scaling_devices_hours_fig_full.eps")
+    _fig.savefig(Path().home() / "figures/gpu/scaling_devices_hours_fig_full.pdf")
     _fig
     return
 
 
 @app.cell
-def __(Path, plot_scaling, plotter):
+def _(Path, plot_scaling, plotter):
     plotter.set_small_style()
     _fig, _axes = plot_scaling(figsize=(plotter.FIGWIDTH_SMALL, 2))
     _fig.savefig(Path().home() / "figures/gpu/scaling_devices_hours_fig_small.eps")
@@ -414,13 +445,13 @@ def __(Path, plot_scaling, plotter):
 
 
 @app.cell(hide_code=True)
-def __(mo):
+def _(mo):
     mo.md(r"""## Debug""")
     return
 
 
 @app.cell
-def __():
+def _():
     # _index = 1
     # _path = Path(runner.get_results_path(configs[_index]["id"], _index))
 
@@ -430,7 +461,7 @@ def __():
 
 
 @app.cell
-def __():
+def _():
     # _c = data[1][0]
     # _c["time"]
     return
