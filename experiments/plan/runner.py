@@ -580,6 +580,7 @@ def solve_problem(
 def solve_baseline(
     problem_data,
     mip_solver="mosek",
+    mip_solver_options={},
     pao_solver="pao.pyomo.FA",
     verbose=True,
 ):
@@ -605,6 +606,7 @@ def solve_baseline(
         param_device_types=parameter_types,
         pao_solver=pao_solver,
         mip_solver=mip_solver,
+        mip_solver_options=mip_solver_options,
         verbose=verbose,
     )
 
@@ -622,7 +624,7 @@ def solve_baseline(
         key: np.array(
             [model.param_blocks[ind].param[k].value for k in range(layer.devices[ind].num_devices)]
         )
-        for key, ind in layer.parameter_names.items()
+        for key, (ind, pname) in layer.parameter_names.items()
     }
 
     return {

@@ -17,6 +17,7 @@ def solve_bilevel_model(
     param_device_types=[Generator, DCLine, Battery],
     pao_solver="pao.pyomo.FA",
     mip_solver="gurobi",
+    mip_solver_options={},
     verbose=True,
 ):
     # Settings
@@ -57,8 +58,15 @@ def solve_bilevel_model(
     )
 
     # Solve bilevel problem
-    mip = pao.Solver(mip_solver)
-    solver = pao.Solver(pao_solver, mip_solver=mip)  # , linearize_bigm=100.0)
+    mip = pao.Solver(mip_solver, **mip_solver_options)
+
+    if pao_solver == "pao.pyomo.REG":
+        solver = pao.Solver(pao_solver, nlp_solver="ipopt")
+    elif pao_solver == "pao.pyomo.MIBS":
+        solver = pao.Solver(pao_solver)
+    else:  # FA, PCCG
+        solver = pao.Solver(pao_solver, mip_solver=mip)  # , linearize_bigm=100.0)
+
     result = solver.solve(M, tee=verbose)
 
     return M, {"result": result, "solver": solver}

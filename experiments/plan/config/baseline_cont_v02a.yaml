@@ -1,0 +1,71 @@
+# Basic config
+# -> Run baseline only
+# -> Try different solvers
+
+---
+tags: []
+
+system:
+  threads: 128
+  runtime: 240
+  memory: auto
+
+data:
+  name: pypsa
+  case: load_medium
+  add_ground: true
+  use_batteries: true
+  num_nodes: 42
+  use_extra_components: true
+  start_hour: peak_hybrid_day
+  num_hours: [expand, 1, 2, 4, 8]
+  battery_cost_scale: 1.0
+  generator_cost_scale:
+    hydro: 1.0
+  dont_expand: [hydro, coal, biomass]
+  args:
+    power_unit: 1.0e3  # 1e3 = GW
+    cost_unit: 1.0  # $ / MWh
+    marginal_load_value: 500.0  # $ / MWh
+    scale_load: 1.0
+    scale_generator_capacity_factor: 0.7
+    scale_line_capacity_factor: 0.7
+    carbon_tax: 0.0  # $ / ton CO2
+    generator_cost_perturbation: 1.0  # MW
+    load_cost_perturbation: 10.0  # MW
+    drop_empty_generators: false
+    expand_empty_generators: 0.5  # MW
+
+problem:
+  stochastic: false
+  cost_weight: 1.0
+  emissions_weight: 100.0  # $ / ton CO2
+  parameters: [generator, dc_line, battery]
+
+layer:
+  linear_solver: mkl
+  regularize: 1.0e-6  # Jacobian regularization
+
+optimizer:
+  name: gradient_descent
+  num_iterations: 1000
+  initial_state: initial
+  use_wandb: true
+  log_wandb_every: 1
+  checkpoint_every: 1
+  parallel: false
+  batch_size: 1
+  num_parallel_workers: 1
+  track_full_loss_every: 1000
+  args:
+    step_size: 1.0e-2
+    clip: 5000.0
+
+solve_baseline: true
+baseline:
+  mip_solver: gurobi
+  mip_solver_options:
+    MIPGap: 0.01
+    Threads: 64
+    MIPFocus: [expand, 0, 1]
+  pao_solver: [expand, "pao.pyomo.FA", "pao.pyomo.PCCG"]

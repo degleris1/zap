@@ -1,0 +1,65 @@
+# Basic config
+# -> More nodes
+
+---
+tags: []
+
+system:
+  threads: 128
+  runtime: 1000  # minutes (about 16 hours)
+  memory: auto
+
+data:
+  name: pypsa
+  case: load_medium
+  add_ground: true
+  use_batteries: true
+  num_nodes: 500
+  use_extra_components: true
+  start_hour: peak_hybrid_day
+  num_hours: 8640  # days = 360
+  battery_cost_scale: 1.0
+  generator_cost_scale:
+    hydro: 1.0
+  dont_expand: [hydro, coal, biomass]
+  args:
+    power_unit: 1.0e3  # 1e3 = GW
+    cost_unit: 1.0  # $ / MWh
+    marginal_load_value: 500.0  # $ / MWh
+    scale_load: 1.0
+    scale_generator_capacity_factor: 0.7
+    scale_line_capacity_factor: 0.7
+    carbon_tax: 0.0  # $ / ton CO2
+    generator_cost_perturbation: 1.0  # MW
+    load_cost_perturbation: 10.0  # MW
+    drop_empty_generators: false
+    expand_empty_generators: 0.5  # MW
+
+problem:
+  stochastic: true
+  hours_per_scenario: 24
+  cost_weight: 1.0
+  emissions_weight: 200.0  # $ / ton CO2
+  regularize: 1.0e-6  # Jacobian regularization
+  parameters: [generator, dc_line, ac_line, battery]
+
+optimizer:
+  name: gradient_descent
+  num_iterations: 500
+  initial_state: initial
+  use_wandb: true
+  log_wandb_every: 1
+  checkpoint_every: 1
+  parallel: true
+  batch_size: 8  # total batches = 360 / 8 = 45
+  num_parallel_workers: 8
+  track_full_loss_every: 25
+  batch_strategy: [expand, fixed, sequential]
+  args:
+    step_size: 1.0e-2
+    clip: 5000.0
+
+relaxation:
+  should_solve: false
+  price_bound: 50.0  # In scaled units
+  inf_value: 50.0  # Relative to maximum lower bound of that device type

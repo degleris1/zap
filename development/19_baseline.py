@@ -199,7 +199,7 @@ def _():
 
 @app.cell
 def _(get_pypsa_net):
-    net, devices, time_horizon = get_pypsa_net(drop_battery=True, time_horizon=2)
+    net, devices, time_horizon = get_pypsa_net(drop_battery=True, time_horizon=8)
     devices
     return devices, net, time_horizon
 
@@ -214,7 +214,7 @@ def _(
 ):
     planner_objective = MultiObjective(
         objectives=[DispatchCostObjective(net, devices), EmissionsObjective(devices)],
-        weights=[1.0, 10.0],
+        weights=[1.0, 100.0],
     )
     return (planner_objective,)
 
@@ -235,6 +235,9 @@ def _(
         planner_objective,
         param_device_types=[zap.Generator, zap.DCLine, zap.Battery],
         mip_solver="gurobi",
+        mip_solver_options={"MIPGap": 0.01, "Threads": 64, "MIPFocus": 1},
+        pao_solver="pao.pyomo.FA",
+        verbose=True
     )
     return (bilevel_model,)
 
@@ -277,12 +280,6 @@ def _(bilevel_model, devices, np):
             ]
         )
     )
-    return
-
-
-@app.cell
-def _():
-    # help(pao.Solver("pao.pyomo.FA").solve)
     return
 
 
