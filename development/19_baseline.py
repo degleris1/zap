@@ -240,7 +240,7 @@ def _(
         planner_objective,
         param_device_types=[zap.Generator, zap.DCLine, zap.Battery],
         mip_solver="gurobi",
-        mip_solver_options={"MIPGap": 0.0, "Threads": 64, "MIPFocus": 1},
+        mip_solver_options={"MIPGap": 0.0, "Threads": 64, "MIPFocus": 0},
         pao_solver="pao.pyomo.FA",
         verbose=True
     )
