@@ -5,7 +5,7 @@ import numpy as np
 
 PERLMUTTER_CORES_PER_GPU = 32
 MAX_TIME = 24 * 60
-BASELINE_POWER = np.log2(5.0 / 2.0)
+BASELINE_POWER = np.log2(5.0)
 
 config_path = sys.argv[1]
 config_list = runner.expand_config(runner.load_config(config_path))
@@ -23,7 +23,7 @@ def get_dynamic_runtime(config: dict):
     if config["solve_baseline"]:
         return np.minimum(
             MAX_TIME,
-            int(np.ceil(offset_time + np.power(base_time * num_hours, BASELINE_POWER))),
+            int(np.ceil(offset_time + base_time * np.power(num_hours, BASELINE_POWER))),
         )
     else:
         return np.minimum(MAX_TIME, int(np.ceil(offset_time + base_time * num_hours)))
@@ -75,5 +75,5 @@ srun python -u experiments/plan/runner.py {config_path} {i}
         f.write(slurm_script)
 
     # Launch
-    print(f"Launching job {config['name']} (parameter {i}) for {runtime//60} hours...")
+    print(f"Launching job {config['name']} (parameter {i}) for {runtime/60:.3f} hours...")
     os.system(f"sbatch {script_file}")
