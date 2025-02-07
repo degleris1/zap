@@ -11,8 +11,10 @@ class PyoDevice:
         self.has_parameter = False
         self.param_name = "nominal_capacity"
 
-    def make_parameteric(self, block: pyo.Block):
-        return _add_simple_parameter(block, self, attr_name=self.param_name)
+    def make_parameteric(self, block: pyo.Block, is_int: bool = False, int_quantity: float = 0.1):
+        return _add_simple_parameter(
+            block, self, attr_name=self.param_name, is_int=is_int, int_quantity=int_quantity
+        )
 
     def add_investment_cost(self, block: pyo.Block):
         return _add_simple_investment_cost(block, self, attr_name=self.param_name)
@@ -312,7 +314,9 @@ def _add_dc_line_constraints(block: pyo.Block, line):
     return block
 
 
-def _add_simple_parameter(block: pyo.Block, device, attr_name="nominal_capacity"):
+def _add_simple_parameter(
+    block: pyo.Block, device, is_int: bool, int_quantity: float, attr_name="nominal_capacity"
+):
     block.param = pyo.Var(range(device.x.num_devices))
 
     # Add constraints on parameter
@@ -333,6 +337,22 @@ def _add_simple_parameter(block: pyo.Block, device, attr_name="nominal_capacity"
     @block.Constraint(range(device.x.num_devices))
     def upper_bound(block, k):
         return block.param[k] <= max_param[k]
+
+    # Add integer variable and constraints
+    if is_int:
+        print(f"!!!Adding integer variables for device {type(device)} with size {int_quantity}!!!")
+        block.int_param = pyo.Var(range(device.x.num_devices), domain=pyo.NonNegativeIntegers)
+
+        block.int_constraint = pyo.Constraint(
+            range(device.x.num_devices),
+            rule=lambda block, k: block.param[k]
+            == min_param[k] + int_quantity * block.int_param[k],
+        )
+
+        device.param = block.int_param
+
+    else:
+        print(f"!!!Adding continuous variables for device {type(device)}!!!")
 
     device.has_parameter = True
     device.param = block.param

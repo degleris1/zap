@@ -583,6 +583,8 @@ def solve_baseline(
     mip_solver_options={},
     pao_solver="pao.pyomo.FA",
     verbose=True,
+    integer_constraints=False,
+    integer_size=0.1,
 ):
     from zap.pyomo.bilevel import solve_bilevel_model
     import pyomo.environ as pyo
@@ -607,6 +609,8 @@ def solve_baseline(
         pao_solver=pao_solver,
         mip_solver=mip_solver,
         mip_solver_options=mip_solver_options,
+        integer_investments=integer_constraints,
+        integer_quantity=integer_size,
         verbose=verbose,
     )
 
@@ -668,6 +672,9 @@ def run_experiment(config: dict):
     if "relaxation" not in config.keys():
         config["relaxation"] = {"should_solve": False}
 
+    integer_constraints = config.get("integer_constraints", False)
+    integer_size = config.get("integer_size", 0.1)
+
     # Load data and formulate problem
     data = load_dataset(**config["data"])
     print(config["layer"])
@@ -676,7 +683,12 @@ def run_experiment(config: dict):
     # Solve baseline
     if config.get("solve_baseline", False):
         print("Solving baseline problem...")
-        baseline = solve_baseline(problem, **config["baseline"])
+        baseline = solve_baseline(
+            problem,
+            **config["baseline"],
+            integer_constraints=integer_constraints,
+            integer_size=integer_size,
+        )
         save_results(None, baseline, config)
         return None
 

@@ -120,7 +120,7 @@ def _(pypsa):
 
 @app.cell
 def _(dt, np, pd, pn, zap):
-    def get_pypsa_net(drop_battery=True, time_horizon=12):
+    def get_pypsa_net(drop_battery=True, time_horizon=12, ac_cost=0.0, ac_perturb=0.1):
         start_date = dt.datetime(2019, 8, 14, 7)
         dates = pd.date_range(
             start_date,
@@ -141,7 +141,7 @@ def _(dt, np, pd, pn, zap):
             scale_line_capacity_factor=0.7,
             drop_empty_generators=False,
             expand_empty_generators=0.5,
-            # ac_transmission_cost=1.0,
+            ac_transmission_cost=ac_cost,
         )
         devices += [zap.Ground(num_nodes=net.num_nodes, terminal=np.array([0]))]
 
@@ -149,7 +149,7 @@ def _(dt, np, pd, pn, zap):
             devices = [d for d in devices if not isinstance(d, zap.Battery)]
 
         # Tweak AC line costs
-        # devices[3].linear_cost += 0.1 * np.random.rand(*devices[3].linear_cost.shape)
+        devices[3].linear_cost += ac_perturb * np.random.rand(*devices[3].linear_cost.shape)
 
         return net, devices, time_horizon
     return (get_pypsa_net,)
@@ -158,27 +158,23 @@ def _(dt, np, pd, pn, zap):
 @app.cell
 def _(check_pyomo_dispatch, get_pypsa_net):
     def test_medium(drop_battery=True):
-        net, devices, time_horizon = get_pypsa_net(drop_battery=drop_battery)
+        net, devices, time_horizon = get_pypsa_net(
+            drop_battery=drop_battery, ac_cost=1.0, ac_perturb=0.1
+        )
         model, result = check_pyomo_dispatch(net, devices, time_horizon)
-        return model
+        return model, result
     return (test_medium,)
 
 
 @app.cell
-def _():
-    # _ = test_medium()
-    return
-
-
-@app.cell
 def _(test_medium):
-    quick_toy_model = test_medium(drop_battery=False)
-    return (quick_toy_model,)
+    toy_pyo, toy_zap = test_medium(drop_battery=False)
+    return toy_pyo, toy_zap
 
 
 @app.cell
-def _(pyo, quick_toy_model):
-    pyo.value(quick_toy_model.device[0].emissions)
+def _(pyo, toy_pyo):
+    print(pyo.value(toy_pyo.device[0].emissions))
     return
 
 
@@ -204,7 +200,7 @@ def _():
 
 @app.cell
 def _(get_pypsa_net):
-    net, devices, time_horizon = get_pypsa_net(drop_battery=False, time_horizon=4)
+    net, devices, time_horizon = get_pypsa_net(drop_battery=False, time_horizon=1)
     devices
     return devices, net, time_horizon
 
@@ -240,20 +236,50 @@ def _(
         planner_objective,
         param_device_types=[zap.Generator, zap.DCLine, zap.Battery],
         mip_solver="gurobi",
-        mip_solver_options={"MIPGap": 0.0, "Threads": 64, "MIPFocus": 0},
+        mip_solver_options={"MIPGap": 0.01, "Threads": 64, "MIPFocus": 0},
         pao_solver="pao.pyomo.FA",
-        verbose=True
+        verbose=True,
+        integer_investments=False,
+        integer_quantity=0.5,
     )
     return (bilevel_model,)
 
 
 @app.cell
-def _():
+def _(bilevel_model, devices, np):
+    gen_invest = np.round(
+        np.array(
+            [
+                bilevel_model.param_blocks[0].param[k].value
+                for k in range(devices[0].num_devices)
+            ]
+        )
+        - devices[0].min_nominal_capacity.reshape(-1),
+        decimals=3,
+    )
+
+    line_invest = np.round(
+        np.array(
+            [
+                bilevel_model.param_blocks[2].param[k].value
+                for k in range(devices[2].num_devices)
+            ]
+        )
+        - devices[2].nominal_capacity.reshape(-1),
+        decimals=3,
+    )
+    return gen_invest, line_invest
+
+
+@app.cell
+def _(gen_invest):
+    {i: gen_invest[i] for i in range(len(gen_invest)) if gen_invest[i] != 0.0}
     return
 
 
 @app.cell
-def _():
+def _(line_invest):
+    line_invest
     return
 
 
@@ -272,19 +298,6 @@ def _(bilevel_model, pyo):
 @app.cell
 def _(bilevel_model, pyo):
     pyo.value(bilevel_model.dispatch.device[0].emissions)
-    return
-
-
-@app.cell
-def _(bilevel_model, devices, np):
-    np.sum(
-        np.array(
-            [
-                bilevel_model.param_blocks[0].param[k].value
-                for k in range(devices[0].num_devices)
-            ]
-        )
-    )
     return
 
 

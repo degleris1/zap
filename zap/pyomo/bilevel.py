@@ -19,6 +19,8 @@ def solve_bilevel_model(
     mip_solver="gurobi",
     mip_solver_options={},
     verbose=True,
+    integer_investments=False,
+    integer_quantity=0.1,  # 100 MW, for example
 ):
     # Settings
     if isinstance(param_device_types[0], int):
@@ -38,7 +40,9 @@ def solve_bilevel_model(
     params = []
     M.param_blocks = pyo.Block(param_devices)
     for p in param_devices:
-        par = pyo_devices[p].make_parameteric(M.param_blocks[p])
+        par = pyo_devices[p].make_parameteric(
+            M.param_blocks[p], is_int=integer_investments, int_quantity=integer_quantity
+        )
         pyo_devices[p].add_investment_cost(M.param_blocks[p])
 
         params += [par]
