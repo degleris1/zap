@@ -172,6 +172,58 @@ class AbstractPlanningProblem:
 
         return state, history
 
+    def round_solutions(
+        self,
+        parameters,
+        history,
+        integer_size: float = 0.1,
+        num_samples: int = 10,
+        wandb=None,
+        log_wandb_every=1,
+        extra_wandb_trackers=None,
+        checkpoint_func=lambda x: None,
+        checkpoint_every=100_000,
+    ):
+        assert num_samples >= 1
+
+        best_cost = np.inf
+        best_parameters = None
+
+        J_cont, grad = self.forward_and_back(**parameters)
+        print("Continuous cost:", J_cont)
+
+        for sample in range(num_samples):
+            print(f"Starting integer sample {sample}...")
+
+            # Use probabilistic rounding to generate sample
+            integer_parameters = _probabilistic_round(parameters, self.lower_bounds, integer_size)
+
+            # Evaluate cost
+            cost = self.forward(**integer_parameters)
+            cost = torch.tensor(cost)
+
+            # Update best solution
+            if cost < best_cost:
+                best_cost = cost
+                best_parameters = integer_parameters
+                print(f"New best solution found: {best_cost}.")
+            else:
+                print(f"Solution had cost {cost} > best cost {best_cost}.")
+
+            # Update history and log to wandb
+            history = self.update_history(
+                history,
+                DEFAULT_TRACKERS,
+                cost,
+                grad,
+                integer_parameters,
+                best_parameters,
+                wandb,
+                log_wandb_every,
+            )
+
+        return best_parameters, history
+
     def initialize_parameters(self, initial_state):
         if initial_state is None:
             return self.layer.initialize_parameters()
@@ -378,3 +430,22 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
 def get_next_batch(batch, batch_size, num_subproblems):
     last_index = batch[-1]
     return [(last_index + 1 + i) % num_subproblems for i in range(batch_size)]
+
+
+def _probabilistic_round(parameters, lower_bounds, integer_size, factor=2.0):
+    integer_parameters = {}
+
+    for k, param in parameters.items():
+        # Draw noise from uniform distribution
+        noise = np.random.uniform(
+            -factor * integer_size / 2.0, factor * integer_size / 2.0, size=param.shape
+        )
+
+        noisy_value = np.maximum(param - lower_bounds[k] + noise, 0.0)
+
+        # Round parameters nearest multiple of integer_size
+        integer_parameters[k] = (
+            lower_bounds[k] + np.round(noisy_value / integer_size) * integer_size
+        )
+
+    return integer_parameters

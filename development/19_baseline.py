@@ -245,7 +245,7 @@ def _(
     return (bilevel_model,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(bilevel_model, devices, np):
     gen_invest = np.round(
         np.array(

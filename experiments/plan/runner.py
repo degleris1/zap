@@ -488,6 +488,9 @@ def solve_problem(
     batch_size=0,
     track_full_loss_every=0,
     batch_strategy="sequential",
+    integer_constraints=False,
+    integer_size=0.1,
+    num_integer_samples=10,
 ):
     print("Solving problem...")
 
@@ -549,6 +552,11 @@ def solve_problem(
         }
 
     # Solve
+    trackers = get_wandb_trackers(problem_data, relaxation, config)
+
+    def checkpoint_func(*args):
+        return checkpoint_model(*args, config)
+
     parameters, history = problem.solve(
         num_iterations=num_iterations,
         algorithm=alg,
@@ -557,15 +565,30 @@ def solve_problem(
         wandb=logger,
         log_wandb_every=log_wandb_every,
         lower_bound=relaxation["lower_bound"] if relaxation is not None else None,
-        extra_wandb_trackers=get_wandb_trackers(problem_data, relaxation, config),
+        extra_wandb_trackers=trackers,
         checkpoint_every=checkpoint_every,
-        checkpoint_func=lambda *args: checkpoint_model(*args, config),
+        checkpoint_func=checkpoint_func,
         batch_size=batch_size,
         batch_strategy=batch_strategy,
     )
 
     if parallel:
         problem.shutdown_workers()
+
+    # Round solutions, logging to Wandb
+    if integer_constraints:
+        print("\n\n\n\nRounding solutions to integers.")
+        parameters, history = problem.round_solutions(
+            parameters,
+            history,
+            integer_size=integer_size,
+            num_samples=num_integer_samples,
+            wandb=logger,
+            log_wandb_every=log_wandb_every,
+            extra_wandb_trackers=get_wandb_trackers(problem_data, relaxation, config),
+            checkpoint_func=checkpoint_func,
+            checkpoint_every=checkpoint_every,
+        )
 
     if use_wandb:
         wandb.finish()
@@ -685,9 +708,9 @@ def run_experiment(config: dict):
         print("Solving baseline problem...")
         baseline = solve_baseline(
             problem,
-            **config["baseline"],
             integer_constraints=integer_constraints,
             integer_size=integer_size,
+            **config["baseline"],
         )
         save_results(None, baseline, config)
         return None
@@ -695,7 +718,15 @@ def run_experiment(config: dict):
     # Solve relaxation and original problem
     else:
         relaxation = solve_relaxed_problem(problem, **config["relaxation"])
-        results = solve_problem(problem, relaxation, config, **config["optimizer"])
+        results = solve_problem(
+            problem,
+            relaxation,
+            config,
+            integer_constraints=integer_constraints,
+            integer_size=integer_size,
+            num_integer_samples=config.get("num_integer_samples", 10),
+            **config["optimizer"],
+        )
 
         save_results(relaxation, results, config)
 

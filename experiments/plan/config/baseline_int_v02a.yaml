@@ -6,7 +6,7 @@ tags: []
 
 system:
   threads: 128
-  runtime: [dynamic, 1, 30]
+  runtime: 240
   memory: auto
 
 data:
@@ -62,9 +62,9 @@ optimizer:
 
 integer_constraints: true
 integer_size: [expand, 0.1, 0.5]
-num_integer_samples: 10
+num_integer_samples: 100
 
-solve_baseline: true
+solve_baseline: false
 baseline:
   mip_solver: gurobi
   mip_solver_options:
