@@ -1,12 +1,12 @@
 import numpy as np
 import cvxpy as cp
 
-from zap.devices.store import Battery
+from zap.devices.storage_unit import StorageUnit
 from zap.util import envelope_variable, use_envelope
 
 
-class DualBattery(Battery):
-    def __init__(self, battery: Battery, max_price=None, **kwargs):
+class DualBattery(StorageUnit):
+    def __init__(self, battery: StorageUnit, max_price=None, **kwargs):
         self.primal = battery
         self.max_price = max_price
 
