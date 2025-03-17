@@ -5,7 +5,8 @@ from zap.layer import DispatchLayer
 
 from zap.devices.injector import Injector, Generator, Load
 from zap.devices.transporter import DCLine, ACLine
-from zap.devices.store import Battery
+from zap.devices.storage_unit import StorageUnit
+from zap.devices.store import Store
 from zap.devices.ground import Ground
 
 from zap import importers

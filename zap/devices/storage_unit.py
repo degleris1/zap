@@ -9,7 +9,17 @@ from numpy.typing import NDArray
 
 from zap.devices.abstract import AbstractDevice, make_dynamic
 
-class Store(AbstractDevice):
+StorageUnitVariable = namedtuple(
+    "StorageUnitVariable",
+    [
+        "energy",
+        "charge",
+        "discharge",
+    ],
+)
+
+
+class StorageUnit(AbstractDevice):
     """An Injector that stores power between time steps.
 
     May have a discharge cost.
@@ -20,54 +30,46 @@ class Store(AbstractDevice):
         *,
         num_nodes,
         terminal,
-        nominal_energy_capacity: NDArray,
-        min_energy_capacity_availability: Optional[NDArray] = None,
-        max_energy_capacity_availability: Optional[NDArray] = None,
-        storage_efficiency: Optional[NDArray] = None,
+        power_capacity: NDArray,
+        duration: NDArray,
+        charge_efficiency: Optional[NDArray] = None,
+        discharge_efficiency: Optional[NDArray] = None,
         initial_soc: Optional[NDArray] = None,
         final_soc: Optional[NDArray] = None,
         linear_cost: Optional[NDArray] = None,
         quadratic_cost: Optional[NDArray] = None,
-        linear_storage_cost: Optional[NDArray] = None,
         capital_cost: Optional[NDArray] = None,
-        min_nominal_energy_capacity=None,
-        max_nominal_energy_capacity=None,
+        min_power_capacity=None,
+        max_power_capacity=None,
     ):
-        if linear_storage_cost is None:
-            linear_storage_cost = np.zeros(nominal_energy_capacity.shape)
+        if linear_cost is None:
+            linear_cost = np.zeros(power_capacity.shape)
 
-        if storage_efficiency is None:
-            storage_efficiency = np.ones(nominal_energy_capacity.shape)
-
-        if min_energy_capacity_availability is None:
-            min_energy_capacity_availability = np.ones(nominal_energy_capacity.shape)
-
-        if max_energy_capacity_availability is None:
-            max_energy_capacity_availability = np.ones(nominal_energy_capacity.shape)
+        if charge_efficiency is None:
+            charge_efficiency = np.ones(power_capacity.shape)
 
         if initial_soc is None:
-            initial_soc = 0.5 * np.ones(nominal_energy_capacity.shape)
+            initial_soc = 0.5 * np.ones(power_capacity.shape)
 
         if final_soc is None:
-            final_soc = 0.5 * np.ones(nominal_energy_capacity.shape)
+            final_soc = 0.5 * np.ones(power_capacity.shape)
 
         self.num_nodes = num_nodes
         self.terminal = terminal
-        self.nominal_energy_capacity = make_dynamic(nominal_energy_capacity)
-        self.min_energy_capacity_availability = make_dynamic(min_energy_capacity_availability)
-        self.max_energy_capacity_availability = make_dynamic(max_energy_capacity_availability)
-        self.storage_efficiency = make_dynamic(storage_efficiency)
+        self.power_capacity = make_dynamic(power_capacity)
+        self.duration = make_dynamic(duration)
+        self.charge_efficiency = make_dynamic(charge_efficiency)
+        self.discharge_efficiency = make_dynamic(discharge_efficiency)
         self.initial_soc = make_dynamic(initial_soc)
         self.final_soc = make_dynamic(final_soc)
         self.linear_cost = make_dynamic(linear_cost)
         self.quadratic_cost = make_dynamic(quadratic_cost)
-        self.linear_storage_cost = make_dynamic(linear_storage_cost)
         self.capital_cost = make_dynamic(capital_cost)
-        self.min_nominal_energy_capacity = make_dynamic(min_nominal_energy_capacity)
-        self.max_nominal_energy_capacity = make_dynamic(max_nominal_energy_capacity)
+        self.min_power_capacity = make_dynamic(min_power_capacity)
+        self.max_power_capacity = make_dynamic(max_power_capacity)
+
         self.has_changed = True
         self.rho = -1.0
-        # helper for setting cyclical charging
 
     @property
     def terminals(self):
@@ -75,29 +77,21 @@ class Store(AbstractDevice):
 
     @property
     def time_horizon(self):
-        """
-        Returns the time horizon of the device.
-        0 if static, otherwise the maximum time horizon of the device.
-        """
-        if (self.min_nominal_energy_capacity.shape[1] == 1) and (self.max_nominal_energy_capacity.shape[1] == 1):
-            return 0
-        else: 
-            return max(self.min_nominal_energy_capacity.shape[1], self.max_nominal_energy_capacity.shape[1])
+        return 0  # Static device
 
     def scale_costs(self, scale):
         self.linear_cost /= scale
-        self.linear_storage_cost /= scale
         if self.quadratic_cost is not None:
             self.quadratic_cost /= scale
         if self.capital_cost is not None:
             self.capital_cost /= scale
 
     def scale_power(self, scale):
-        self.nominal_energy_capacity /= scale
-        if self.min_nominal_energy_capacity is not None:
-            self.min_nominal_energy_capacity /= scale
-        if self.max_nominal_energy_capacity is not None:
-            self.max_nominal_energy_capacity /= scale
+        self.power_capacity /= scale
+        if self.min_power_capacity is not None:
+            self.min_power_capacity /= scale
+        if self.max_power_capacity is not None:
+            self.max_power_capacity /= scale
 
         # Invert scaling because term is quadratic
         if self.quadratic_cost is not None:
@@ -108,41 +102,62 @@ class Store(AbstractDevice):
     # ====
 
     def model_local_variables(self, time_horizon: int) -> list[cp.Variable]:
-        return [cp.Variable((self.num_devices, time_horizon + 1))]
+        return StorageUnitVariable(
+            cp.Variable((self.num_devices, time_horizon + 1)),
+            cp.Variable((self.num_devices, time_horizon)),
+            cp.Variable((self.num_devices, time_horizon)),
+        )
 
-    def equality_constraints(self, power, angle, SOC, nominal_energy_capacity= None, la=np, envelope=None):
-        SOC = SOC[0]
-        nominal_energy_capacity = self.parameterize(nominal_energy_capacity=nominal_energy_capacity, la=la)
+    def equality_constraints(self, power, angle, state, power_capacity=None, la=np, envelope=None):
+        power_capacity = self.parameterize(power_capacity=power_capacity, la=la)
+
+        if not isinstance(state, StorageUnitVariable):
+            state = StorageUnitVariable(*state)
 
         T = power[0].shape[1]
+        energy_capacity = la.multiply(power_capacity, self.duration)
 
-        return [ # eq 0
-            SOC[:, 1:] -  SOC[:, :-1] +  power[0],
-            SOC[:, 0:1] - la.multiply(self.initial_soc, nominal_energy_capacity),
-            SOC[:, T : (T + 1)] - la.multiply(self.final_soc, nominal_energy_capacity),
+        soc_evolution = (
+            state.energy[:, :-1]
+            + la.multiply(state.charge, self.charge_efficiency)
+            - la.divide(state.discharge, self.discharge_efficiency)
+        )
+        return [
+            power[0] - (state.discharge - state.charge),
+            state.energy[:, 1:] - soc_evolution,
+            state.energy[:, 0:1] - la.multiply(self.initial_soc, energy_capacity),
+            state.energy[:, T : (T + 1)] - la.multiply(self.final_soc, energy_capacity),
         ]
 
     def inequality_constraints(
-        self, _1, _2, SOC, nominal_energy_capacity=None, la=np, envelope=None
+        self, power, angle, state, power_capacity=None, la=np, envelope=None
     ):
-        SOC = SOC[0]
-        nominal_energy_capacity = self.parameterize(nominal_energy_capacity=nominal_energy_capacity, la=la)
+        power_capacity = self.parameterize(power_capacity=power_capacity, la=la)
 
-        max_energy = la.multiply(nominal_energy_capacity, self.max_energy_capacity_availability)
-        min_energy = la.multiply(nominal_energy_capacity, self.min_energy_capacity_availability)
+        if not isinstance(state, StorageUnitVariable):
+            state = StorageUnitVariable(*state)
 
-        return [ # leq 0
-            SOC - max_energy,
-            min_energy - SOC
+        energy_capacity = la.multiply(power_capacity, self.duration)
+
+        return [
+            -state.energy,
+            state.energy - energy_capacity,
+            -state.charge,
+            state.charge - power_capacity,
+            -state.discharge,
+            state.discharge - power_capacity,
         ]
 
-    def operation_cost(self, power, _, state, power_capacity=None, la=np, envelope=None):
+    def operation_cost(self, power, angle, state, power_capacity=None, la=np, envelope=None):
         if state is None:
             return 0.0
 
-        cost = la.sum(la.multiply(self.linear_cost, power[0]))
+        if not isinstance(state, StorageUnitVariable):
+            state = StorageUnitVariable(*state)
+
+        cost = la.sum(la.multiply(self.linear_cost, state.discharge))
         if self.quadratic_cost is not None:
-            cost += la.sum(la.multiply(self.quadratic_cost, la.square(power[0])))
+            cost += la.sum(la.multiply(self.quadratic_cost, la.square(state.discharge)))
 
         return cost
 
@@ -194,11 +209,12 @@ class Store(AbstractDevice):
 
         # SOC evolution
         alpha = shaped_zeros + self.charge_efficiency
+        beta = shaped_zeros + self.discharge_efficiency
         soc_diff = self._soc_difference_matrix(self.num_devices, time_horizon)
 
         equalities[1].local_variables[0] += soc_diff  # Energy
         equalities[1].local_variables[1] += -sp.diags(alpha.ravel())  # Charging
-        equalities[1].local_variables[2] += sp.eye(size)  # Discharging
+        equalities[1].local_variables[2] += sp.diags(1.0/beta.ravel())  # Discharging
 
         # Initial / Final SOC
         equalities[2].local_variables[0] += self._soc_boundary_matrix(
@@ -360,7 +376,7 @@ def difference_matrix(T, machine=None, dtype=None):
     return D2 - D1
 
 
-def b_vector(device: Store, T, machine=None):
+def b_vector(device: Battery, T, machine=None):
     dtype = device.power_capacity.dtype
 
     # TODO - Support multiple costs
@@ -373,7 +389,7 @@ def b_vector(device: Store, T, machine=None):
     )
 
 
-def C_matrix(device: Store, T, machine=None, dtype=None):
+def C_matrix(device: Battery, T, machine=None, dtype=None):
     # TODO - Support multiple charge efficiencies
     beta = device.charge_efficiency[0]
     D = difference_matrix(T, machine, dtype)
@@ -387,7 +403,7 @@ def A_matrix(T, machine=None, dtype=None):
     return torch.hstack([-Id, Id, torch.zeros(T, T + 1, device=machine, dtype=dtype)])
 
 
-def K_matrix(device: Store, T, rho, w, machine=None):
+def K_matrix(device: Battery, T, rho, w, machine=None):
     dtype = device.power_capacity.dtype
 
     A = A_matrix(T, machine, dtype)
@@ -452,7 +468,7 @@ def battery_prox_inner(x, y, u, rhs, schur, ymin, ymax, w: float, alpha: float =
     return x, y, u
 
 
-def battery_prox_data(device: Store, T: int, rho, z, weight=1.0):
+def battery_prox_data(device: Battery, T: int, rho, z, weight=1.0):
     machine = z.device
 
     T_full = z.shape[1]
