@@ -108,7 +108,9 @@ class StorageUnit(AbstractDevice):
             cp.Variable((self.num_devices, time_horizon)),
         )
 
-    def equality_constraints(self, power, angle, state, power_capacity=None, la=np, envelope=None):
+    def equality_constraints(
+        self, power, angle, state, power_capacity=None, la=np, envelope=None
+    ):
         power_capacity = self.parameterize(power_capacity=power_capacity, la=la)
 
         if not isinstance(state, StorageUnitVariable):
@@ -148,7 +150,9 @@ class StorageUnit(AbstractDevice):
             state.discharge - power_capacity,
         ]
 
-    def operation_cost(self, power, angle, state, power_capacity=None, la=np, envelope=None):
+    def operation_cost(
+        self, power, angle, state, power_capacity=None, la=np, envelope=None
+    ):
         if state is None:
             return 0.0
 
@@ -214,7 +218,7 @@ class StorageUnit(AbstractDevice):
 
         equalities[1].local_variables[0] += soc_diff  # Energy
         equalities[1].local_variables[1] += -sp.diags(alpha.ravel())  # Charging
-        equalities[1].local_variables[2] += sp.diags(1.0/beta.ravel())  # Discharging
+        equalities[1].local_variables[2] += sp.diags(1.0 / beta.ravel())  # Discharging
 
         # Initial / Final SOC
         equalities[2].local_variables[0] += self._soc_boundary_matrix(
@@ -239,7 +243,9 @@ class StorageUnit(AbstractDevice):
 
         return inequalities
 
-    def _hessian_local_variables(self, hessians, power, angle, state, power_capacity=None, la=np):
+    def _hessian_local_variables(
+        self, hessians, power, angle, state, power_capacity=None, la=np
+    ):
         if self.quadratic_cost is None:
             return hessians
 
@@ -305,14 +311,18 @@ class StorageUnit(AbstractDevice):
             smax = torch.multiply(power_capacity, self.duration)
             gamma1 = torch.multiply(self.initial_soc, smax)
             gammaT = torch.multiply(self.final_soc, smax)
-            ymin, ymax = get_ymin_ymax(T, power_capacity, smax, gamma1, gammaT, machine, dtype)
+            ymin, ymax = get_ymin_ymax(
+                T, power_capacity, smax, gamma1, gammaT, machine, dtype
+            )
             A = A_matrix(T, machine, dtype=dtype)
             b = b_vector(self, T, machine)
 
             _zT = power[0].reshape(-1, num_scenarios, T, 1)
             _rhs = K_rhs_fixed(rho_power, A, b, _zT)
             zero_nu = torch.zeros(
-                (_rhs.shape[0], _rhs.shape[1], T, _rhs.shape[3]), device=machine, dtype=dtype
+                (_rhs.shape[0], _rhs.shape[1], T, _rhs.shape[3]),
+                device=machine,
+                dtype=dtype,
             )
 
             self.temp_data = (smax, gamma1, gammaT, ymin, ymax, A, b, zero_nu)
@@ -376,7 +386,7 @@ def difference_matrix(T, machine=None, dtype=None):
     return D2 - D1
 
 
-def b_vector(device: Battery, T, machine=None):
+def b_vector(device: StorageUnit, T, machine=None):
     dtype = device.power_capacity.dtype
 
     # TODO - Support multiple costs
@@ -389,7 +399,7 @@ def b_vector(device: Battery, T, machine=None):
     )
 
 
-def C_matrix(device: Battery, T, machine=None, dtype=None):
+def C_matrix(device: StorageUnit, T, machine=None, dtype=None):
     # TODO - Support multiple charge efficiencies
     beta = device.charge_efficiency[0]
     D = difference_matrix(T, machine, dtype)
@@ -403,7 +413,7 @@ def A_matrix(T, machine=None, dtype=None):
     return torch.hstack([-Id, Id, torch.zeros(T, T + 1, device=machine, dtype=dtype)])
 
 
-def K_matrix(device: Battery, T, rho, w, machine=None):
+def K_matrix(device: StorageUnit, T, rho, w, machine=None):
     dtype = device.power_capacity.dtype
 
     A = A_matrix(T, machine, dtype)
@@ -468,7 +478,7 @@ def battery_prox_inner(x, y, u, rhs, schur, ymin, ymax, w: float, alpha: float =
     return x, y, u
 
 
-def battery_prox_data(device: Battery, T: int, rho, z, weight=1.0):
+def battery_prox_data(device: StorageUnit, T: int, rho, z, weight=1.0):
     machine = z.device
 
     T_full = z.shape[1]

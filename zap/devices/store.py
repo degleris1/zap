@@ -4,10 +4,10 @@ import cvxpy as cp
 import scipy.sparse as sp
 
 from typing import Optional
-from collections import namedtuple
 from numpy.typing import NDArray
 
 from zap.devices.abstract import AbstractDevice, make_dynamic
+
 
 class Store(AbstractDevice):
     """An Injector that stores power between time steps.
@@ -54,8 +54,12 @@ class Store(AbstractDevice):
         self.num_nodes = num_nodes
         self.terminal = terminal
         self.nominal_energy_capacity = make_dynamic(nominal_energy_capacity)
-        self.min_energy_capacity_availability = make_dynamic(min_energy_capacity_availability)
-        self.max_energy_capacity_availability = make_dynamic(max_energy_capacity_availability)
+        self.min_energy_capacity_availability = make_dynamic(
+            min_energy_capacity_availability
+        )
+        self.max_energy_capacity_availability = make_dynamic(
+            max_energy_capacity_availability
+        )
         self.storage_efficiency = make_dynamic(storage_efficiency)
         self.initial_soc = make_dynamic(initial_soc)
         self.final_soc = make_dynamic(final_soc)
@@ -79,10 +83,15 @@ class Store(AbstractDevice):
         Returns the time horizon of the device.
         0 if static, otherwise the maximum time horizon of the device.
         """
-        if (self.min_nominal_energy_capacity.shape[1] == 1) and (self.max_nominal_energy_capacity.shape[1] == 1):
+        if (self.min_nominal_energy_capacity.shape[1] == 1) and (
+            self.max_nominal_energy_capacity.shape[1] == 1
+        ):
             return 0
-        else: 
-            return max(self.min_nominal_energy_capacity.shape[1], self.max_nominal_energy_capacity.shape[1])
+        else:
+            return max(
+                self.min_nominal_energy_capacity.shape[1],
+                self.max_nominal_energy_capacity.shape[1],
+            )
 
     def scale_costs(self, scale):
         self.linear_cost /= scale
@@ -110,14 +119,18 @@ class Store(AbstractDevice):
     def model_local_variables(self, time_horizon: int) -> list[cp.Variable]:
         return [cp.Variable((self.num_devices, time_horizon + 1))]
 
-    def equality_constraints(self, power, angle, SOC, nominal_energy_capacity= None, la=np, envelope=None):
+    def equality_constraints(
+        self, power, angle, SOC, nominal_energy_capacity=None, la=np, envelope=None
+    ):
         SOC = SOC[0]
-        nominal_energy_capacity = self.parameterize(nominal_energy_capacity=nominal_energy_capacity, la=la)
+        nominal_energy_capacity = self.parameterize(
+            nominal_energy_capacity=nominal_energy_capacity, la=la
+        )
 
         T = power[0].shape[1]
 
-        return [ # eq 0
-            SOC[:, 1:] -  SOC[:, :-1] +  power[0],
+        return [  # eq 0
+            SOC[:, 1:] - SOC[:, :-1] + power[0],
             SOC[:, 0:1] - la.multiply(self.initial_soc, nominal_energy_capacity),
             SOC[:, T : (T + 1)] - la.multiply(self.final_soc, nominal_energy_capacity),
         ]
@@ -126,17 +139,25 @@ class Store(AbstractDevice):
         self, _1, _2, SOC, nominal_energy_capacity=None, la=np, envelope=None
     ):
         SOC = SOC[0]
-        nominal_energy_capacity = self.parameterize(nominal_energy_capacity=nominal_energy_capacity, la=la)
+        nominal_energy_capacity = self.parameterize(
+            nominal_energy_capacity=nominal_energy_capacity, la=la
+        )
 
-        max_energy = la.multiply(nominal_energy_capacity, self.max_energy_capacity_availability)
-        min_energy = la.multiply(nominal_energy_capacity, self.min_energy_capacity_availability)
+        max_energy = la.multiply(
+            nominal_energy_capacity, self.max_energy_capacity_availability
+        )
+        min_energy = la.multiply(
+            nominal_energy_capacity, self.min_energy_capacity_availability
+        )
 
-        return [ # leq 0
+        return [  # leq 0
             SOC - max_energy,
-            min_energy - SOC
+            min_energy - SOC,
         ]
 
-    def operation_cost(self, power, _, state, power_capacity=None, la=np, envelope=None):
+    def operation_cost(
+        self, power, _, state, power_capacity=None, la=np, envelope=None
+    ):
         if state is None:
             return 0.0
 
@@ -223,7 +244,9 @@ class Store(AbstractDevice):
 
         return inequalities
 
-    def _hessian_local_variables(self, hessians, power, angle, state, power_capacity=None, la=np):
+    def _hessian_local_variables(
+        self, hessians, power, angle, state, power_capacity=None, la=np
+    ):
         if self.quadratic_cost is None:
             return hessians
 
@@ -289,14 +312,18 @@ class Store(AbstractDevice):
             smax = torch.multiply(power_capacity, self.duration)
             gamma1 = torch.multiply(self.initial_soc, smax)
             gammaT = torch.multiply(self.final_soc, smax)
-            ymin, ymax = get_ymin_ymax(T, power_capacity, smax, gamma1, gammaT, machine, dtype)
+            ymin, ymax = get_ymin_ymax(
+                T, power_capacity, smax, gamma1, gammaT, machine, dtype
+            )
             A = A_matrix(T, machine, dtype=dtype)
             b = b_vector(self, T, machine)
 
             _zT = power[0].reshape(-1, num_scenarios, T, 1)
             _rhs = K_rhs_fixed(rho_power, A, b, _zT)
             zero_nu = torch.zeros(
-                (_rhs.shape[0], _rhs.shape[1], T, _rhs.shape[3]), device=machine, dtype=dtype
+                (_rhs.shape[0], _rhs.shape[1], T, _rhs.shape[3]),
+                device=machine,
+                dtype=dtype,
             )
 
             self.temp_data = (smax, gamma1, gammaT, ymin, ymax, A, b, zero_nu)
