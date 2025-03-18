@@ -109,9 +109,19 @@ class StorageUnit(AbstractDevice):
         )
 
     def equality_constraints(
-        self, power, angle, state, power_capacity=None, la=np, envelope=None
+        self,
+        power,
+        angle,
+        state,
+        power_capacity=None,
+        initial_soc=None,
+        final_soc=None,
+        la=np,
+        envelope=None,
     ):
         power_capacity = self.parameterize(power_capacity=power_capacity, la=la)
+        initial_soc = self.parameterize(initial_soc=initial_soc, la=la)
+        final_soc = self.parameterize(final_soc=final_soc, la=la)
 
         if not isinstance(state, StorageUnitVariable):
             state = StorageUnitVariable(*state)
@@ -127,12 +137,20 @@ class StorageUnit(AbstractDevice):
         return [
             power[0] - (state.discharge - state.charge),
             state.energy[:, 1:] - soc_evolution,
-            state.energy[:, 0:1] - la.multiply(self.initial_soc, energy_capacity),
-            state.energy[:, T : (T + 1)] - la.multiply(self.final_soc, energy_capacity),
+            state.energy[:, 0:1] - la.multiply(initial_soc, energy_capacity),
+            state.energy[:, T : (T + 1)] - la.multiply(final_soc, energy_capacity),
         ]
 
     def inequality_constraints(
-        self, power, angle, state, power_capacity=None, la=np, envelope=None
+        self,
+        power,
+        angle,
+        state,
+        power_capacity=None,
+        initial_soc=None,
+        final_soc=None,
+        la=np,
+        envelope=None,
     ):
         power_capacity = self.parameterize(power_capacity=power_capacity, la=la)
 
@@ -151,7 +169,15 @@ class StorageUnit(AbstractDevice):
         ]
 
     def operation_cost(
-        self, power, angle, state, power_capacity=None, la=np, envelope=None
+        self,
+        power,
+        angle,
+        state,
+        power_capacity=None,
+        initial_soc=None,
+        final_soc=None,
+        la=np,
+        envelope=None,
     ):
         if state is None:
             return 0.0
@@ -200,7 +226,9 @@ class StorageUnit(AbstractDevice):
 
         return sp.coo_matrix((values, (rows, cols)), shape=shape)
 
-    def _equality_matrices(self, equalities, power_capacity=None, la=np):
+    def _equality_matrices(
+        self, equalities, power_capacity=None, initial_soc=None, final_soc=None, la=np
+    ):
         # Dimensions
         size = equalities[0].power[0].shape[1]
         time_horizon = int(size / self.num_devices)
@@ -230,7 +258,9 @@ class StorageUnit(AbstractDevice):
 
         return equalities
 
-    def _inequality_matrices(self, inequalities, power_capacity=None, la=np):
+    def _inequality_matrices(
+        self, inequalities, power_capacity=None, initial_soc=None, final_soc=None, la=np
+    ):
         size = inequalities[0].power[0].shape[1]
         e_size = inequalities[0].local_variables[0].shape[0]
 
@@ -244,7 +274,15 @@ class StorageUnit(AbstractDevice):
         return inequalities
 
     def _hessian_local_variables(
-        self, hessians, power, angle, state, power_capacity=None, la=np
+        self,
+        hessians,
+        power,
+        angle,
+        state,
+        power_capacity=None,
+        initial_soc=None,
+        final_soc=None,
+        la=np,
     ):
         if self.quadratic_cost is None:
             return hessians
@@ -256,7 +294,9 @@ class StorageUnit(AbstractDevice):
     # PLANNING FUNCTIONS
     # ====
 
-    def get_investment_cost(self, power_capacity=None, la=np):
+    def get_investment_cost(
+        self, power_capacity=None, initial_soc=None, final_soc=None, la=np
+    ):
         power_capacity = self.parameterize(power_capacity=power_capacity, la=la)
 
         if self.capital_cost is None or power_capacity is None:
@@ -279,6 +319,8 @@ class StorageUnit(AbstractDevice):
         power,
         angle,
         power_capacity=None,
+        initial_soc=None,
+        final_soc=None,
         power_weights=None,
         angle_weights=None,
         window=None,
@@ -289,6 +331,9 @@ class StorageUnit(AbstractDevice):
         inner_weight = rho_power * inner_weight
 
         power_capacity = self.parameterize(power_capacity=power_capacity)
+        initial_soc = self.parameterize(initial_soc=initial_soc)
+        final_soc = self.parameterize(final_soc=final_soc)
+
         N, full_time_horizon = power[0].shape
         T = full_time_horizon if window is None else window  # Window size
         num_scenarios = full_time_horizon // T
@@ -309,8 +354,8 @@ class StorageUnit(AbstractDevice):
             # print("Changing battery data.")
 
             smax = torch.multiply(power_capacity, self.duration)
-            gamma1 = torch.multiply(self.initial_soc, smax)
-            gammaT = torch.multiply(self.final_soc, smax)
+            gamma1 = torch.multiply(initial_soc, smax)
+            gammaT = torch.multiply(final_soc, smax)
             ymin, ymax = get_ymin_ymax(
                 T, power_capacity, smax, gamma1, gammaT, machine, dtype
             )
