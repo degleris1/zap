@@ -139,7 +139,9 @@ class Store(AbstractDevice):
         T = power[0].shape[1]
 
         return [  # eq 0
+            # soc[t+1] = soc[t] - power[t],   (power[t] is negative because it is discharge)
             SOC[:, 1:] - SOC[:, :-1] + power[0],
+            # initial/final soc constraints
             SOC[:, 0:1] - la.multiply(initial_soc, nominal_energy_capacity),
             SOC[:, T : (T + 1)] - la.multiply(final_soc, nominal_energy_capacity),
         ]
@@ -237,30 +239,23 @@ class Store(AbstractDevice):
         final_soc=None,
         la=np,
     ):
-        raise NotImplementedError("Please update from StorageUnit to Store.")
         # Dimensions
         size = equalities[0].power[0].shape[1]
         time_horizon = int(size / self.num_devices)
-        shaped_zeros = np.zeros((self.num_devices, time_horizon))
-
-        # Power balance
-        equalities[0].power[0] += sp.eye(size)
-        equalities[0].local_variables[1] += sp.eye(size)
-        equalities[0].local_variables[2] += -sp.eye(size)
+        # shaped_zeros = np.zeros((self.num_devices, time_horizon))
 
         # SOC evolution
-        alpha = shaped_zeros + self.charge_efficiency
+        # alpha = shaped_zeros + self.charge_efficiency
         soc_diff = self._soc_difference_matrix(self.num_devices, time_horizon)
 
-        equalities[1].local_variables[0] += soc_diff  # Energy
-        equalities[1].local_variables[1] += -sp.diags(alpha.ravel())  # Charging
-        equalities[1].local_variables[2] += sp.eye(size)  # Discharging
+        equalities[0].local_variables[0] += soc_diff  # Energy
+        equalities[0].power[0] = sp.eye(size)  # Charge / discharge
 
         # Initial / Final SOC
-        equalities[2].local_variables[0] += self._soc_boundary_matrix(
+        equalities[1].local_variables[0] += self._soc_boundary_matrix(
             self.num_devices, time_horizon, index=0
         )
-        equalities[3].local_variables[0] += self._soc_boundary_matrix(
+        equalities[2].local_variables[0] += self._soc_boundary_matrix(
             self.num_devices, time_horizon, index=-1
         )
 
@@ -274,35 +269,29 @@ class Store(AbstractDevice):
         final_soc=None,
         la=np,
     ):
-        raise NotImplementedError("Please update from StorageUnit to Store.")
-        size = inequalities[0].power[0].shape[1]
         e_size = inequalities[0].local_variables[0].shape[0]
 
-        inequalities[0].local_variables[0] += -sp.eye(e_size)
-        inequalities[1].local_variables[0] += sp.eye(e_size)
-        inequalities[2].local_variables[1] += -sp.eye(size)
-        inequalities[3].local_variables[1] += sp.eye(size)
-        inequalities[4].local_variables[2] += -sp.eye(size)
-        inequalities[5].local_variables[2] += sp.eye(size)
+        inequalities[0].local_variables[0] += sp.eye(e_size)
+        inequalities[1].local_variables[0] += -sp.eye(e_size)
 
         return inequalities
 
-    def _hessian_local_variables(
+    def _hessian_power(
         self,
         hessians,
         power,
         angle,
-        state,
+        local_vars,
         nominal_energy_capacity=None,
         initial_soc=None,
         final_soc=None,
         la=np,
     ):
-        raise NotImplementedError("Please update from StorageUnit to Store.")
         if self.quadratic_cost is None:
             return hessians
 
-        hessians[2] += 2 * sp.diags((self.quadratic_cost * state.discharge).ravel())
+        hessians[0] += 2 * sp.diags((self.quadratic_cost * power[0]).ravel())
+
         return hessians
 
     # ====
@@ -312,7 +301,6 @@ class Store(AbstractDevice):
     def get_investment_cost(
         self, nominal_energy_capacity=None, initial_soc=None, final_soc=None, la=np
     ):
-        raise NotImplementedError("Please update from StorageUnit to Store.")
         nominal_energy_capacity = self.parameterize(
             nominal_energy_capacity=nominal_energy_capacity, la=la
         )
