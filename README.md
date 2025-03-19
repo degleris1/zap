@@ -18,6 +18,7 @@ git clone https://github.com/degleris1/zap.git
 cd zap
 poetry install --all-extras --with experiment
 poetry shell  # Start a shell in a local virtual environment
+pre-commit install
 ```
 
 Then run Python from the subshell.
