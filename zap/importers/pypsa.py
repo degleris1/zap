@@ -332,6 +332,8 @@ def load_pypsa_network(
         ),
     ]
 
+    devices = [d for d in devices if d.num_devices > 0]
+
     for d in devices:
         d.scale_costs(cost_unit)
         d.scale_power(power_unit)
