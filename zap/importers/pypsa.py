@@ -6,7 +6,7 @@ from copy import deepcopy
 from zap.network import PowerNetwork
 from zap.devices.injector import Generator, Load
 from zap.devices.transporter import DCLine, ACLine
-from zap.devices.store import Battery
+from zap.devices.storage_unit import StorageUnit
 
 pd.set_option("future.no_silent_downcasting", True)
 
@@ -66,8 +66,12 @@ def parse_generators(
     terminals = net.generators.bus.replace(buses_to_index).values.astype(int)
 
     # Build dynamic capacities
-    dynamic_capacities = build_dynamic(net.generators, net.generators_t, "p_max_pu", dates)
-    dynamic_costs = build_dynamic(net.generators, net.generators_t, "marginal_cost", dates)
+    dynamic_capacities = build_dynamic(
+        net.generators, net.generators_t, "p_max_pu", dates
+    )
+    dynamic_costs = build_dynamic(
+        net.generators, net.generators_t, "marginal_cost", dates
+    )
 
     # Perturb costs
     dynamic_costs += generator_cost_perturbation * rng.random(dynamic_costs.shape)
@@ -237,7 +241,7 @@ def parse_batteries(
     else:
         quadratic_cost = battery_quadratic_discharge_cost * np.ones(terminals.size)
 
-    return Battery(
+    return StorageUnit(
         num_nodes=len(buses),
         terminal=terminals,
         power_capacity=net.storage_units.p_nom.values,
@@ -253,7 +257,7 @@ def parse_batteries(
 
 def load_pypsa_network(
     net: pypsa.Network,
-    dates,
+    dates=None,
     seed=0,
     battery_discharge_cost=0.0,
     battery_quadratic_discharge_cost=0.0,
@@ -282,6 +286,9 @@ def load_pypsa_network(
 
     rng = np.random.default_rng(seed)
 
+    if dates is None:
+        dates = net.snapshots
+
     devices = [
         parse_generators(
             net,
@@ -302,7 +309,9 @@ def load_pypsa_network(
             quadratic_load_cost=quadratic_load_cost,
             scale_load=scale_load,
         ),
-        parse_dc_lines(net, dates, scale_line_capacity_factor=scale_line_capacity_factor),
+        parse_dc_lines(
+            net, dates, scale_line_capacity_factor=scale_line_capacity_factor
+        ),
         parse_ac_lines(
             net,
             dates,
