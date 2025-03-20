@@ -12,9 +12,10 @@ class PowerLine(Transporter):
         self,
         *,
         num_nodes,
+        name,
         source_terminal,
         sink_terminal,
-        capacity,
+        capacity,  # todo: should this be named dynamic_capacity to match generator and other devices?
         linear_cost=None,
         quadratic_cost=None,
         nominal_capacity=None,
@@ -29,6 +30,7 @@ class PowerLine(Transporter):
             linear_cost = np.zeros(capacity.shape)
 
         self.num_nodes = num_nodes
+        self.name = name
         self.source_terminal = source_terminal
         self.sink_terminal = sink_terminal
         self.capacity = make_dynamic(capacity)

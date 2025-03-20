@@ -50,15 +50,12 @@ def load_example_network(name=None):
     pypsa.Network or list
         The requested network or a list of available networks.
     """
-    # Get the path to the data directory
-    data_dir = Path(__file__).parent / "data" / "networks"
 
-    # If the data directory doesn't exist, create it
+    data_dir = Path(__file__).parent.parent / "resources" / "networks"
+
     if not data_dir.exists():
-        data_dir.mkdir(parents=True, exist_ok=True)
-        return []  # No networks available yet
+        return []
 
-    # Get available networks
     available_networks = [f.stem for f in data_dir.glob("*.nc")]
 
     if name is None:
