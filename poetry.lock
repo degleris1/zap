@@ -1550,6 +1550,16 @@ files = [
 ]
 
 [[package]]
+name = "logging"
+version = "0.4.9.6"
+description = "A logging module for Python"
+optional = false
+python-versions = "*"
+files = [
+    {file = "logging-0.4.9.6.tar.gz", hash = "sha256:26f6b50773f085042d301085bd1bf5d9f3735704db9f37c1ce6d8b85c38f2417"},
+]
+
+[[package]]
 name = "marimo"
 version = "0.9.14"
 description = "A library for making reactive notebooks and apps"
@@ -4726,4 +4736,4 @@ pypsa = ["pypsa"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.13"
-content-hash = "c09acfaa7b1a23141a5e49bf7785081e05ffae59b0f1ff2a4e77edc831aa526b"
+content-hash = "5f8316fdf088a632d0541edc2def56019b15b63762e2de2db39ff7b745f2d8ff"

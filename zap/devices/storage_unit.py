@@ -29,6 +29,7 @@ class StorageUnit(AbstractDevice):
         self,
         *,
         num_nodes,
+        name,
         terminal,
         power_capacity: NDArray,
         duration: NDArray,
@@ -58,6 +59,7 @@ class StorageUnit(AbstractDevice):
             final_soc = 0.5 * np.ones(power_capacity.shape)
 
         self.num_nodes = num_nodes
+        self.name = name
         self.terminal = terminal
         self.power_capacity = make_dynamic(power_capacity)
         self.duration = make_dynamic(duration)

@@ -14,9 +14,10 @@ class ACLine(PowerLine):
         self,
         *,
         num_nodes,
+        name,
         source_terminal,
         sink_terminal,
-        capacity,
+        capacity,  # todo: name this dynamic_capacity to match generator naming?
         susceptance,
         linear_cost=None,
         quadratic_cost=None,
@@ -33,6 +34,7 @@ class ACLine(PowerLine):
 
         super().__init__(
             num_nodes=num_nodes,
+            name=name,
             source_terminal=source_terminal,
             sink_terminal=sink_terminal,
             capacity=capacity,
@@ -84,7 +86,9 @@ class ACLine(PowerLine):
 
         if use_envelope(envelope):  # When line is plannable
             print("Envelope relaxation applied to AC line.")
-            pnom_dtheta = self.get_envelope_variable(*envelope, angle_diff, nominal_capacity)
+            pnom_dtheta = self.get_envelope_variable(
+                *envelope, angle_diff, nominal_capacity
+            )
         else:
             pnom_dtheta = la.multiply(angle_diff, nominal_capacity)
 
@@ -124,7 +128,9 @@ class ACLine(PowerLine):
     # DIFFERENTIATION
     # ====
 
-    def _equality_matrices(self, equalities, nominal_capacity=None, susceptance=None, la=np):
+    def _equality_matrices(
+        self, equalities, nominal_capacity=None, susceptance=None, la=np
+    ):
         nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity, la=la)
         susceptance = self.parameterize(susceptance=susceptance, la=la)
 
@@ -140,7 +146,9 @@ class ACLine(PowerLine):
         equalities[1].angle[0] += -sp.diags(b_mat.ravel())
         equalities[1].angle[1] += sp.diags(b_mat.ravel())
 
-        return super()._equality_matrices(equalities, nominal_capacity=nominal_capacity, la=la)
+        return super()._equality_matrices(
+            equalities, nominal_capacity=nominal_capacity, la=la
+        )
 
     # ====
     # ADMM FUNCTIONS
@@ -226,7 +234,9 @@ class ACLine(PowerLine):
                 power, angle, rho_power, rho_angle, b_pnom, mu, quad_cost, pmin, pmax
             )
 
-    def cvx_admm_prox_update(self, rho_power, rho_angle, power, angle, nominal_capacity=None):
+    def cvx_admm_prox_update(
+        self, rho_power, rho_angle, power, angle, nominal_capacity=None
+    ):
         print("Solving AC line prox update via CVX...")
         import cvxpy as cp
 
@@ -241,7 +251,9 @@ class ACLine(PowerLine):
         theta0 = cp.Variable(angle[0].shape)
         theta1 = cp.Variable(angle[0].shape)
 
-        objective = rho_power * (cp.sum_squares(p0 - power[0]) + cp.sum_squares(p1 - power[1]))
+        objective = rho_power * (
+            cp.sum_squares(p0 - power[0]) + cp.sum_squares(p1 - power[1])
+        )
         objective += rho_angle * (
             cp.sum_squares(theta0 - angle[0]) + cp.sum_squares(theta1 - angle[1])
         )
