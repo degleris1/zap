@@ -206,9 +206,7 @@ def parse_loads(
     )
 
     # Build and perturb costs
-    load_cost = defaults.marginal_value * np.ones(
-        net.loads.shape[0]
-    )  # todo: why do we use this marginal cost
+    load_cost = defaults.marginal_value * np.ones(net.loads.shape[0])
     load_cost += load_cost_perturbation * rng.random(load_cost.shape)
 
     # Add quadratic term
