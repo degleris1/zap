@@ -4,8 +4,9 @@ import cvxpy as cp
 from attrs import define
 from typing import List
 from numpy.typing import NDArray
-
-from .abstract import AbstractDevice
+from attrs import define, field
+from ..abstract import AbstractDevice, make_dynamic
+from ..abstract import AbstractDevice
 
 @define(kw_only=True, slots=False)
 class SlackDevice(AbstractDevice):
@@ -15,30 +16,22 @@ class SlackDevice(AbstractDevice):
 
     num_nodes: int
     terminals: NDArray
-    b_d: NDArray 
+    b_d: NDArray = field(converter=make_dynamic)
 
     @property
     def time_horizon(self) -> int:
         return 1
 
-    @property
-    def is_ac(self) -> bool:
-        return False
-
-    @property
-    def is_convex(self) -> bool:
-        return True
-
     def model_local_variables(self, time_horizon: int) -> List[cp.Variable]:
         return None
 
-    def operation_cost(self, power, angle, local_variables, **kwargs):
+    def operation_cost(self, power, angle, local_variables, la=np, **kwargs):
         return 0.0
 
-    def equality_constraints(self, power, angle, local_variables, **kwargs):
+    def equality_constraints(self, power, angle, local_variables, la=np):
         raise NotImplementedError
 
-    def inequality_constraints(self, power, angle, local_variables, **kwargs):
+    def inequality_constraints(self, power, angle, local_variables, la=np):
         raise NotImplementedError
 
     def admm_prox_update(self, power, rho):
@@ -54,7 +47,7 @@ class ZeroConeSlackDevice(SlackDevice):
     """
     Slack device that enforces p_d + b_d = 0 (zero cone)
     """
-
+    # could make these underscore for unused stuff everywhere
     def equality_constraints(self, power, angle, local_variables, **kwargs):
         return [power[0] + self.b_d]
     
@@ -75,7 +68,7 @@ def _admm_prox_update_zero(power: list[torch.Tensor], b_d: torch.Tensor):
     ADMM projection for zero cone:
     p_d^* = -b_d
     """
-    return [-b_d.reshape(-1,1)], None
+    return [-b_d], None
 
 
 # ====
@@ -111,4 +104,4 @@ def _admm_prox_update_nonneg(power: list[torch.Tensor], b_d: torch.Tensor):
     p_d^* = max(z_d, -b_d)
     """
     p = torch.maximum(power[0], -b_d)
-    return [p.reshape(-1,1)], None
+    return [p], None

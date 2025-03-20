@@ -11,7 +11,7 @@ import sys
 import os
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(PROJECT_ROOT)
-from zap.devices.cone_bridge import ConeBridge
+from zap.devices.conic.cone_bridge import ConeBridge
 
 
 def main():
@@ -68,10 +68,12 @@ def main():
         dtype=dtype,
         atol=1e-6,
         rtol=1e-6,
+        track_objective=False,
+        rtol_dual_use_objective = False,
     )
     solution_admm, history_admm = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
     ### End Test ADMM
-    
+
     print("helllooooo")
 
 
