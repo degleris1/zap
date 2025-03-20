@@ -1,11 +1,12 @@
 import torch
 import numpy as np
 import cvxpy as cp
-from attrs import define, field
-from typing import Optional, List
+from attrs import define
+from typing import List
 from numpy.typing import NDArray
 
-from ..abstract import AbstractDevice
+from ..devices.abstract import AbstractDevice
+
 
 @define(kw_only=True, slots=False)
 class VariableDevice(AbstractDevice):
@@ -14,9 +15,9 @@ class VariableDevice(AbstractDevice):
     """
 
     num_nodes: int
-    terminals: NDArray # (num_devices, num_terminals_per_device (k))
-    A_v: NDArray 
-    cost_vector: NDArray # add make dynamic here?
+    terminals: NDArray  # (num_devices, num_terminals_per_device (k))
+    A_v: NDArray
+    cost_vector: NDArray  # add make dynamic here?
 
     def __attrs_post_init__(self):
         assert self.A_v.shape == (self.num_terminals_per_device, self.num_devices)
@@ -40,7 +41,10 @@ class VariableDevice(AbstractDevice):
         return cost
 
     def equality_constraints(self, power, _angle, local_variables, la=np, **kwargs):
-        return [power[i] - la.multiply(self.A_v[i], local_variables[0]) for i in range(len(power))]
+        return [
+            power[i] - la.multiply(self.A_v[i], local_variables[0])
+            for i in range(len(power))
+        ]
 
     def inequality_constraints(self, _power, _angle, _local_variables, **kwargs):
         return []
@@ -52,13 +56,14 @@ class VariableDevice(AbstractDevice):
     def admm_prox_update(self, rho_power, _rho_angle, power, _angle, **kwargs):
         return _admm_prox_update(self.A_v, self.cost_vector, power, rho_power)
 
-    
+
 @torch.jit.script
 def _admm_prox_update(A_v, c_bv, power: list[torch.Tensor], rho: float):
-    '''
+    """
     See Overleaf on Conic Translation Sec. 4.1.1 for full details (will update the comments here eventually)
-    '''
-    Z = torch.stack(power, dim=0).squeeze(-1)  # (num_terminals_per_device, num_devices), now it's like A_v
+    """
+    # (num_terminals_per_device, num_devices), now it's like A_v
+    Z = torch.stack(power, dim=0).squeeze(-1)
 
     # Compute the proximal update efficiently (again see 4.1.1)
     diag_AT_Z = torch.sum(A_v * Z, dim=0)
@@ -67,6 +72,9 @@ def _admm_prox_update(A_v, c_bv, power: list[torch.Tensor], rho: float):
 
     x_star = (diag_AT_Z - c_bv_scaled) / A_norms_sq
     p_tensor = torch.multiply(A_v, x_star)
-    p_list = [p_tensor[i].unsqueeze(-1) for i in range(p_tensor.shape[0])] # go back to list of tensors (list of length number of terminals, each element is num_devices,time_horizon)
+
+    # go back to list of tensors (list of length number of terminals,
+    # each element is num_devices, time_horizon)
+    p_list = [p_tensor[i].unsqueeze(-1) for i in range(p_tensor.shape[0])]
 
     return p_list, None

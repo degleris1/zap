@@ -4,9 +4,9 @@ import cvxpy as cp
 from attrs import define
 from typing import List
 from numpy.typing import NDArray
-from attrs import define, field
-from ..abstract import AbstractDevice, make_dynamic
-from ..abstract import AbstractDevice
+from attrs import field
+from ..devices.abstract import AbstractDevice, make_dynamic
+
 
 @define(kw_only=True, slots=False)
 class SlackDevice(AbstractDevice):
@@ -42,21 +42,23 @@ class SlackDevice(AbstractDevice):
 # Zero Cone Slack Device
 # ====
 
+
 @define(kw_only=True, slots=False)
 class ZeroConeSlackDevice(SlackDevice):
     """
     Slack device that enforces p_d + b_d = 0 (zero cone)
     """
+
     def equality_constraints(self, power, _angle, _local_variables, **kwargs):
-        return [power[0] + self.b_d]
-    
+        return [power[0] + self.b_d]  # == 0
+
     def inequality_constraints(self, _power, _angle, _local_variables, **kwargs):
         return []
 
     def admm_prox_update(self, _rho_power, _rho_angle, power, _angle, **kwargs):
         """
         ADMM projection for zero cone:
-        p_d^* = -b_d
+            p_d^* = -b_d
         """
         return _admm_prox_update_zero(power, self.b_d)
 
@@ -65,7 +67,7 @@ class ZeroConeSlackDevice(SlackDevice):
 def _admm_prox_update_zero(power: list[torch.Tensor], b_d: torch.Tensor):
     """
     ADMM projection for zero cone:
-    p_d^* = -b_d
+        p_d^* = -b_d
     """
     return [-b_d], None
 
@@ -74,14 +76,16 @@ def _admm_prox_update_zero(power: list[torch.Tensor], b_d: torch.Tensor):
 # Non-Negative Cone Slack Device
 # ====
 
+
 @define(kw_only=True, slots=False)
 class NonNegativeConeSlackDevice(SlackDevice):
     """
     Slack device that enforces p_d + b_d >= 0 (non-negative cone).
     """
+
     def equality_constraints(self, _power, _angle, _local_variables, **kwargs):
         return []
-    
+
     def inequality_constraints(self, power, _angle, _local_variables, **kwargs):
         """
         Enforces p_d + b_d >= 0.

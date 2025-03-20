@@ -1,41 +1,37 @@
 import marimo
 
-__generated_with = "0.11.21"
+__generated_with = "0.10.7"
 app = marimo.App(width="medium")
 
 
 @app.cell
-def _(__file__):
+def _():
     import marimo as mo
     import cvxpy as cp
     import numpy as np
     import scipy.sparse as sp
-    from cvxpy.reductions.dcp2cone.dcp2cone import Dcp2Cone
-    np.set_printoptions(formatter={'float': '{:6.3f}'.format})
-    import sys
-    import os
-    import scs
-    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    sys.path.append(PROJECT_ROOT)
-    from zap.devices.conic.cone_bridge import ConeBridge
-    from zap.devices.conic.variable_device import VariableDevice
-    from zap.devices.conic.slack_device import SlackDevice
-    from zap.admm import ADMMSolver
     import torch
+    import scs
+
+    from cvxpy.reductions.dcp2cone.dcp2cone import Dcp2Cone
+    from zap.conic.cone_bridge import ConeBridge
+    from zap.conic.variable_device import VariableDevice
+    from zap.conic.slack_device import SlackDevice
+
+    from zap.admm import ADMMSolver
+
+    np.set_printoptions(formatter={'float': '{:6.3f}'.format})
     return (
         ADMMSolver,
         ConeBridge,
         Dcp2Cone,
-        PROJECT_ROOT,
         SlackDevice,
         VariableDevice,
         cp,
         mo,
         np,
-        os,
         scs,
         sp,
-        sys,
         torch,
     )
 
@@ -118,6 +114,42 @@ def _(ConeBridge, cone_params):
 
 
 @app.cell
+def _(cone_params):
+    cone_params["A"].shape
+    return
+
+
+@app.cell
+def _(cones):
+    cones
+    return
+
+
+@app.cell
+def _(cone_bridge):
+    cone_bridge.terminal_groups
+    return
+
+
+@app.cell
+def _(cone_bridge):
+    cone_bridge.device_group_map_list
+    return
+
+
+@app.cell
+def _(cone_bridge):
+    cone_bridge.devices[3]
+    return
+
+
+@app.cell
+def _(cone_params):
+    cone_params["b"]
+    return
+
+
+@app.cell
 def _(cone_bridge, torch):
     machine = "cpu"
     dtype = torch.float32
@@ -126,68 +158,54 @@ def _(cone_bridge, torch):
 
 
 @app.cell
-def _(ADMMSolver, admm_devices, cone_bridge, dtype, machine):
-    admm = ADMMSolver(
-        machine=machine,
-        dtype=dtype,
-        atol=1e-6,
-        rtol=1e-6,
-        track_objective=False,
-        rtol_dual_use_objective=False,
-        num_iterations = int(1e5),
-    )
+def _():
+    # admm = ADMMSolver(
+    #     machine=machine,
+    #     dtype=dtype,
+    #     atol=1e-6,
+    #     rtol=1e-6,
+    #     track_objective=False,
+    #     rtol_dual_use_objective=False,
+    #     num_iterations = int(1e5),
+    # )
 
-    solution_admm, history_admm = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
-    return admm, history_admm, solution_admm
-
-
-@app.cell
-def _(VariableDevice, torch):
-    def get_solution(solution_admm, cone_bridge):
-        """
-        Parses out solution from the "flow" view into actual primal and slacks to compare against SCS
-        """
-        x = []
-        s = []
-        for idx, device in enumerate(cone_bridge.devices):
-            if type(device) is VariableDevice:
-                tensor_list = [t.squeeze() for t in solution_admm.power[idx]]
-                p_tensor = torch.stack(tensor_list, dim=0).flatten() 
-
-                A_v = torch.tensor(device.A_v, dtype=torch.float32)
-                A_expanded = torch.cat([torch.diag(A_v[i]) for i in range(A_v.shape[0])], dim=0)
-
-                x_recovered = torch.linalg.lstsq(A_expanded, p_tensor).solution
-
-                x.extend(x_recovered.squeeze())
-            
-
-            else:
-                cone_slacks = solution_admm.power[idx][0].flatten()
-                s.extend(cone_slacks + device.b_d.flatten())
-
-
-        return x, s
-            
-        
-    return (get_solution,)
-
-
-@app.cell
-def _(cone_bridge, get_solution, solution_admm):
-    x_admm, s_admm = get_solution(solution_admm, cone_bridge)
-    return s_admm, x_admm
-
-
-@app.cell
-def _(x_admm):
-    x_admm
+    # solution_admm, history_admm = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
     return
 
 
 @app.cell
-def _(s_admm):
-    s_admm
+def _():
+    # def get_solution(solution_admm, cone_bridge):
+    #     """
+    #     Parses out solution from the "flow" view into actual primal and slacks to compare against SCS
+    #     """
+    #     x = []
+    #     s = []
+    #     for idx, device in enumerate(cone_bridge.devices):
+    #         if type(device) is VariableDevice:
+    #             tensor_list = [t.squeeze() for t in solution_admm.power[idx]]
+    #             p_tensor = torch.stack(tensor_list, dim=0).flatten() 
+
+    #             A_v = torch.tensor(device.A_v, dtype=torch.float32)
+    #             A_expanded = torch.cat([torch.diag(A_v[i]) for i in range(A_v.shape[0])], dim=0)
+
+    #             x_recovered = torch.linalg.lstsq(A_expanded, p_tensor).solution
+
+    #             x.extend(x_recovered.squeeze())
+
+
+    #         else:
+    #             cone_slacks = solution_admm.power[idx][0].flatten()
+    #             s.extend(cone_slacks + device.b_d.flatten())
+
+
+    #     return x, s
+    return
+
+
+@app.cell
+def _():
+    # x_admm, s_admm = get_solution(solution_admm, cone_bridge)
     return
 
 
