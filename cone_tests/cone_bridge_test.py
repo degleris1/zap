@@ -56,22 +56,22 @@ def main():
 
     cone_bridge = ConeBridge(cone_params)
     ### Test CVXPY
-    # outcome = cone_bridge.net.dispatch(cone_bridge.devices, cone_bridge.time_horizon, solver=cp.CLARABEL, add_ground=False)
+    outcome = cone_bridge.net.dispatch(cone_bridge.devices, cone_bridge.time_horizon, solver=cp.CLARABEL, add_ground=False)
     ### End Test CVXPY
 
     ### Test ADMM
-    machine = "cpu"
-    dtype = torch.float32
-    admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
-    admm = ADMMSolver(
-        machine=machine,
-        dtype=dtype,
-        atol=1e-6,
-        rtol=1e-6,
-        track_objective=False,
-        rtol_dual_use_objective = False,
-    )
-    solution_admm, history_admm = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
+    # machine = "cpu"
+    # dtype = torch.float32
+    # admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
+    # admm = ADMMSolver(
+    #     machine=machine,
+    #     dtype=dtype,
+    #     atol=1e-6,
+    #     rtol=1e-6,
+    #     track_objective=False,
+    #     rtol_dual_use_objective = False,
+    # )
+    # solution_admm, history_admm = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
     ### End Test ADMM
 
     print("helllooooo")

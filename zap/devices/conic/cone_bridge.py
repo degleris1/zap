@@ -5,8 +5,6 @@ import numpy as np
 from scipy.sparse import csc_matrix, isspmatrix_csc
 
 
-## high level be able adjust the grouping strategy—rn we hardcode to just distinct terminal groups
-# maybe add check for csc and convert to csc if not (conversions are fast between csc and csr)
 class ConeBridge:
     def __init__(self, cone_params: dict):
         self.A = cone_params["A"]

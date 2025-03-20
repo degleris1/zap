@@ -50,10 +50,6 @@ class VariableDevice(AbstractDevice):
     # ====
 
     def admm_prox_update(self, rho_power, _rho_angle, power, _angle, **kwargs):
-        # don't need to do this because .torchify will handle the conversion 
-        # A_v_tensor = torch.tensor(self.A_v, dtype=torch.float32)
-        # c_bv_tensor = torch.tensor(self.cost_vector, dtype=torch.float32)
-
         return _admm_prox_update(self.A_v, self.cost_vector, power, rho_power)
 
     
@@ -67,7 +63,7 @@ def _admm_prox_update(A_v, c_bv, power: list[torch.Tensor], rho: float):
     # Compute the proximal update efficiently (again see 4.1.1)
     diag_AT_Z = torch.sum(A_v * Z, dim=0)
     c_bv_scaled = (1 / rho) * c_bv
-    A_norms_sq = torch.sum(A_v * A_v, dim=0) # use torch.linalg.norm with a dim arg
+    A_norms_sq = torch.linalg.norm(A_v, dim=0, ord=2) ** 2
 
     x_star = (diag_AT_Z - c_bv_scaled) / A_norms_sq
     p_tensor = torch.multiply(A_v, x_star)

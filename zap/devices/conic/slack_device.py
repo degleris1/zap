@@ -47,14 +47,13 @@ class ZeroConeSlackDevice(SlackDevice):
     """
     Slack device that enforces p_d + b_d = 0 (zero cone)
     """
-    # could make these underscore for unused stuff everywhere
-    def equality_constraints(self, power, angle, local_variables, **kwargs):
+    def equality_constraints(self, power, _angle, _local_variables, **kwargs):
         return [power[0] + self.b_d]
     
-    def inequality_constraints(self, power, angle, local_variables, **kwargs):
+    def inequality_constraints(self, _power, _angle, _local_variables, **kwargs):
         return []
 
-    def admm_prox_update(self, rho_power, rho_angle, power, angle, **kwargs):
+    def admm_prox_update(self, _rho_power, _rho_angle, power, _angle, **kwargs):
         """
         ADMM projection for zero cone:
         p_d^* = -b_d
@@ -80,16 +79,16 @@ class NonNegativeConeSlackDevice(SlackDevice):
     """
     Slack device that enforces p_d + b_d >= 0 (non-negative cone).
     """
-    def equality_constraints(self, power, angle, local_variables, **kwargs):
+    def equality_constraints(self, _power, _angle, _local_variables, **kwargs):
         return []
     
-    def inequality_constraints(self, power, angle, local_variables, **kwargs):
+    def inequality_constraints(self, power, _angle, _local_variables, **kwargs):
         """
         Enforces p_d + b_d >= 0.
         """
         return [-power[0] - self.b_d]
 
-    def admm_prox_update(self, rho_power, rho_angle, power, angle, **kwargs):
+    def admm_prox_update(self, _rho_power, _rho_angle, power, _angle, **kwargs):
         """
         ADMM projection for non-negative cone:
         p_d^* = max(z_d, -b_d)
