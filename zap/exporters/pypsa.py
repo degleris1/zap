@@ -361,11 +361,14 @@ def export_to_pypsa(
     # Create buses
     buses = create_pypsa_buses(network)
     n.import_components_from_dataframe(buses, "Bus")
+    n.buses_t["marginal_price"] = pd.DataFrame(
+        data=results.prices.T, columns=buses.index, index=snapshots
+    )
 
     # Process each device type
     for device in devices:
         # Position in device list
-        # device_index = devices.index(device)
+        device_index = devices.index(device)
         # Undo any unit conversions
         if hasattr(device, "scale_power"):
             device.scale_power(1.0 / power_unit)
@@ -380,7 +383,14 @@ def export_to_pypsa(
                     # Add component with only static parameters
                     n.add("Generator", name, **params)
 
-                # results = results[device_index]
+                # Convert power results to a DataFrame with snapshots as index, generator names as columns
+                p_values = results.power[device_index][0]
+                p_df = pd.DataFrame(
+                    data=p_values.T,  # Transpose to have snapshots as rows
+                    index=snapshots,
+                    columns=data["generators"].index,
+                )
+                data["generators_t"]["p"] = p_df.T
 
                 # Set time-dependent data separately
                 for attr, df in data["generators_t"].items():
@@ -395,6 +405,13 @@ def export_to_pypsa(
                     # Add component with only static parameters
                     n.add("Load", name, **params)
 
+                # Convert power results to a DataFrame with snapshots as index, names as columns
+                p_values = results.power[device_index][0]
+                p_df = pd.DataFrame(
+                    data=p_values.T, index=snapshots, columns=data["loads"].index
+                )
+                data["loads_t"]["p"] = p_df.T
+
                 # Set time-dependent data separately
                 for attr, df in data["loads_t"].items():
                     for name in df.index:
@@ -408,6 +425,25 @@ def export_to_pypsa(
                     # Add component with only static parameters
                     n.add("Link", name, **params)
 
+                # Convert power results to DataFrames with snapshots as index, link names as columns
+                p0_values = results.power[device_index][0]
+                p1_values = results.power[device_index][1]
+
+                # Create DataFrames with link names as columns, snapshots as index
+                p0_df = pd.DataFrame(
+                    data=p0_values.T,  # Transpose to have snapshots as rows
+                    index=snapshots,
+                    columns=data["links"].index,
+                )
+                p1_df = pd.DataFrame(
+                    data=p1_values.T,  # Transpose to have snapshots as rows
+                    index=snapshots,
+                    columns=data["links"].index,
+                )
+
+                data["links_t"]["p0"] = p0_df.T
+                data["links_t"]["p1"] = p1_df.T
+
                 # Set time-dependent data separately
                 for attr, df in data["links_t"].items():
                     for name in df.index:
@@ -420,12 +456,45 @@ def export_to_pypsa(
                 for name, params in static_data.items():
                     n.add("Line", name, **params)
 
+                # Convert power results to DataFrames with snapshots as index, line names as columns
+                p0_values = results.power[device_index][0]
+                p1_values = results.power[device_index][1]
+
+                # Create DataFrames with line names as columns, snapshots as index
+                p0_df = pd.DataFrame(
+                    data=p0_values.T,  # Transpose to have snapshots as rows
+                    index=snapshots,
+                    columns=data["lines"].index,
+                )
+                p1_df = pd.DataFrame(
+                    data=p1_values.T,  # Transpose to have snapshots as rows
+                    index=snapshots,
+                    columns=data["lines"].index,
+                )
+
+                data["lines_t"] = {"p0": p0_df.T, "p1": p1_df.T}
+
+                # Set time-dependent data separately
+                for attr, df in data["lines_t"].items():
+                    for name in df.index:
+                        if name in static_data:
+                            n.lines_t[attr][name] = df.loc[name]
+
             case StorageUnit():
                 data = export_storage_units(device, snapshots)
                 static_data = data["storage_units"].to_dict(orient="index")
                 for name, params in static_data.items():
                     # Add component with only static parameters
                     n.add("StorageUnit", name, **params)
+
+                # Convert power results to a DataFrame with snapshots as index, names as columns
+                p_values = results.power[device_index][0]
+                p_df = pd.DataFrame(
+                    data=p_values.T,  # Transpose to have snapshots as rows
+                    index=snapshots,
+                    columns=data["storage_units"].index,
+                )
+                data["storage_units_t"]["p"] = p_df
 
                 # Set time-dependent data separately
                 for attr, df in data["storage_units_t"].items():
