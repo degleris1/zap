@@ -29,6 +29,7 @@ class StorageUnit(AbstractDevice):
         self,
         *,
         num_nodes,
+        name,
         terminal,
         power_capacity: NDArray,
         duration: NDArray,
@@ -48,6 +49,9 @@ class StorageUnit(AbstractDevice):
         if charge_efficiency is None:
             charge_efficiency = np.ones(power_capacity.shape)
 
+        if discharge_efficiency is None:
+            discharge_efficiency = np.ones(power_capacity.shape)
+
         if initial_soc is None:
             initial_soc = 0.5 * np.ones(power_capacity.shape)
 
@@ -55,6 +59,7 @@ class StorageUnit(AbstractDevice):
             final_soc = 0.5 * np.ones(power_capacity.shape)
 
         self.num_nodes = num_nodes
+        self.name = name
         self.terminal = terminal
         self.power_capacity = make_dynamic(power_capacity)
         self.duration = make_dynamic(duration)
@@ -132,7 +137,7 @@ class StorageUnit(AbstractDevice):
         soc_evolution = (
             state.energy[:, :-1]
             + la.multiply(state.charge, self.charge_efficiency)
-            - la.divide(state.discharge, self.discharge_efficiency)
+            - la.multiply(state.discharge, 1 / self.discharge_efficiency)
         )
         return [
             power[0] - (state.discharge - state.charge),

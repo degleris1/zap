@@ -29,9 +29,45 @@ def load_pypsa_network(num_hours=1, num_nodes=100):
     pn = pypsa.Network()
     pn.import_from_csv_folder(DATA_PATH / f"pypsa/western/elec_s_{num_nodes}")
 
-    net, devices = zap.importers.load_pypsa_network(pn, dates, power_unit=1e3, cost_unit=10.0)
+    net, devices = zap.importers.load_pypsa_network(
+        pn, dates, power_unit=1e3, cost_unit=10.0
+    )
     parameters = None
     return net, devices, parameters
+
+
+def load_example_network(name=None):
+    """
+    Load an example pypsa network from the data directory.
+
+    Parameters
+    ----------
+    name : str, optional
+        Name of the example network to load. If None, returns a list of available networks.
+
+    Returns
+    -------
+    pypsa.Network or list
+        The requested network or a list of available networks.
+    """
+
+    data_dir = Path(__file__).parent.parent / "resources" / "networks"
+
+    if not data_dir.exists():
+        return []
+
+    available_networks = [f.stem for f in data_dir.glob("*.nc")]
+
+    if name is None:
+        return available_networks
+
+    if name not in available_networks:
+        raise ValueError(
+            f"Network '{name}' not found. Available networks: {available_networks}"
+        )
+
+    network_path = data_dir / f"{name}.nc"
+    return pypsa.Network(network_path)
 
 
 def load_test_network():

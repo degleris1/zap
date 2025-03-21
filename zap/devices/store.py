@@ -18,11 +18,12 @@ class Store(AbstractDevice):
         self,
         *,
         num_nodes,
+        name,
         terminal,
         nominal_energy_capacity: NDArray,
         min_energy_capacity_availability: Optional[NDArray] = None,
         max_energy_capacity_availability: Optional[NDArray] = None,
-        storage_efficiency: Optional[NDArray] = None,
+        standing_loss: Optional[NDArray] = None,
         initial_soc: Optional[NDArray] = None,
         final_soc: Optional[NDArray] = None,
         linear_cost: Optional[NDArray] = None,
@@ -35,8 +36,8 @@ class Store(AbstractDevice):
         if linear_storage_cost is None:
             linear_storage_cost = np.zeros(nominal_energy_capacity.shape)
 
-        if storage_efficiency is None:
-            storage_efficiency = np.ones(nominal_energy_capacity.shape)
+        if standing_loss is None:
+            standing_loss = np.ones(nominal_energy_capacity.shape)
 
         if min_energy_capacity_availability is None:
             min_energy_capacity_availability = np.zeros(nominal_energy_capacity.shape)
@@ -51,6 +52,7 @@ class Store(AbstractDevice):
             final_soc = 0.5 * np.ones(nominal_energy_capacity.shape)
 
         self.num_nodes = num_nodes
+        self.name = name
         self.terminal = terminal
         self.nominal_energy_capacity = make_dynamic(nominal_energy_capacity)
         self.min_energy_capacity_availability = make_dynamic(
@@ -59,7 +61,7 @@ class Store(AbstractDevice):
         self.max_energy_capacity_availability = make_dynamic(
             max_energy_capacity_availability
         )
-        self.storage_efficiency = make_dynamic(storage_efficiency)
+        self.standing_loss = make_dynamic(standing_loss)
         self.initial_soc = make_dynamic(initial_soc)
         self.final_soc = make_dynamic(final_soc)
         self.linear_cost = make_dynamic(linear_cost)
@@ -139,8 +141,8 @@ class Store(AbstractDevice):
         T = power[0].shape[1]
 
         return [  # eq 0
-            # soc[t+1] = soc[t] - power[t],   (power[t] is negative because it is discharge)
-            SOC[:, 1:] - SOC[:, :-1] + power[0],
+            # soc[t+1] = soc[t] - power[t] - standing_loss[t],   (power[t] is negative because it is discharge)
+            SOC[:, 1:] - SOC[:, :-1] + power[0] + self.standing_loss[:, 1:],
             # initial/final soc constraints
             SOC[:, 0:1] - la.multiply(initial_soc, nominal_energy_capacity),
             SOC[:, T : (T + 1)] - la.multiply(final_soc, nominal_energy_capacity),
