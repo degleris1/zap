@@ -36,13 +36,15 @@ class VariableDevice(AbstractDevice):
         f_d(p_d) = min_{x_d} c_d^T x_d + I{ p_d = A_v x_d }
         """
         x_d = local_variables[0]
-        cost = la.sum(la.multiply(self.cost_vector, x_d))
+        cost = la.sum(la.multiply(self.cost_vector.reshape(-1, 1), x_d))
 
         return cost
 
     def equality_constraints(self, power, _angle, local_variables, la=np, **kwargs):
+        x_d = local_variables[0]
+
         return [
-            power[i] - la.multiply(self.A_v[i], local_variables[0])
+            power[i] - la.multiply(self.A_v[i : i + 1, :].T, x_d)
             for i in range(len(power))
         ]
 

@@ -90,7 +90,7 @@ class NonNegativeConeSlackDevice(SlackDevice):
         """
         Enforces p_d + b_d >= 0.
         """
-        return [-power[0] - self.b_d]
+        return [-power[0] - self.b_d]  # <= 0
 
     def admm_prox_update(self, _rho_power, _rho_angle, power, _angle, **kwargs):
         """

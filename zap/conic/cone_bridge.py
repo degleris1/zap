@@ -1,10 +1,9 @@
-import zap.network
-from .variable_device import VariableDevice
-from .slack_device import (
-    ZeroConeSlackDevice,
-    NonNegativeConeSlackDevice,
-)
 import numpy as np
+import cvxpy as cp
+
+from zap.network import PowerNetwork
+from .variable_device import VariableDevice
+from .slack_device import ZeroConeSlackDevice, NonNegativeConeSlackDevice
 from scipy.sparse import csc_matrix, isspmatrix_csc
 
 
@@ -30,7 +29,7 @@ class ConeBridge:
         self._create_slack_devices()
 
     def _build_network(self):
-        self.net = zap.network.PowerNetwork(self.A.shape[0])
+        self.net = PowerNetwork(self.A.shape[0])
 
     def _group_variable_devices(self):
         """
@@ -110,3 +109,8 @@ class ConeBridge:
                 b_d=np.array(b_d_values),
             )
             self.devices.append(nonneg_cone_device)
+
+    def solve(self, solver=cp.CLARABEL, **kwargs):
+        return self.net.dispatch(
+            self.devices, self.time_horizon, add_ground=False, solver=solver, **kwargs
+        )

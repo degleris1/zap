@@ -38,7 +38,7 @@ def _():
 
 @app.cell
 def _(cp, np, sp):
-    m, n = 2, 5 
+    m, n = 2, 5
     np.random.seed(42)
 
     # Create a random sparse matrix A
@@ -62,12 +62,30 @@ def _(cp, np, sp):
 
 
 @app.cell
+def _(A):
+    A.todense()
+    return
+
+
+@app.cell
+def _(b):
+    b
+    return
+
+
+@app.cell
+def _(cone_bridge):
+    cone_bridge.devices[2]
+    return
+
+
+@app.cell
 def _(s):
     s.value
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(cp, problem, scs):
     probdata, chain, inverse_data = problem.get_problem_data(cp.SCS)
 
@@ -94,7 +112,7 @@ def _(cp, problem, scs):
 
     print(f"A.shape: {cone_params['A'].shape}, c.shape: {cone_params['c'].shape}, b.shape: {cone_params['b'].shape}")
 
-    soln = scs.solve(data, cones)
+    soln = scs.solve(data, cones, verbose=False)
     return (
         chain,
         cone_dims,
@@ -114,14 +132,44 @@ def _(ConeBridge, cone_params):
 
 
 @app.cell
-def _(cone_params):
-    cone_params["A"].shape
+def _(cone_bridge, cp):
+    ystar = cone_bridge.solve(cp.CLARABEL)
+    return (ystar,)
+
+
+@app.cell
+def _(ystar):
+    ystar.problem.value
     return
 
 
 @app.cell
-def _(cones):
-    cones
+def _(ystar):
+    ystar.problem.status
+    return
+
+
+@app.cell
+def _(ystar):
+    ystar.local_variables
+    return
+
+
+@app.cell
+def _(s, x):
+    x.value, s.value
+    return
+
+
+@app.cell
+def _(cone_params):
+    cone_params["A"].todense()
+    return
+
+
+@app.cell
+def _(cone_params):
+    cone_params["b"]
     return
 
 
@@ -139,7 +187,7 @@ def _(cone_bridge):
 
 @app.cell
 def _(cone_bridge):
-    cone_bridge.devices[3]
+    cone_bridge.devices[2]
     return
 
 
