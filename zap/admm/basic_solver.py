@@ -460,7 +460,7 @@ class ADMMSolver:
         # Relative component
         # We add this check so we don't waste time computing norms if we don't need to
         if self.rtol > 0.0 or self.rtol_primal is not None or self.rtol_dual is not None:
-            assert self.track_objective
+            # assert self.track_objective
             # print("Adding relative component to convergence check.")
 
             # Compute norm of primal variables

@@ -16,4 +16,4 @@ from zap import dual
 # Get the version from the metadata
 from importlib import metadata
 
-__version__ = metadata.version("zap")
+# __version__ = metadata.version("zap")

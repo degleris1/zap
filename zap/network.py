@@ -195,7 +195,9 @@ class DispatchOutcome(Sequence):
 
     def package(self, vec):
         x = DispatchOutcome(
-            *self._package(vec, self.blocks, self.shape), problem=self.problem, ground=self.ground
+            *self._package(vec, self.blocks, self.shape),
+            problem=self.problem,
+            ground=self.ground,
         )
 
         # Replace Nones with empty arrays for the constraints
@@ -296,13 +298,23 @@ class PowerNetwork:
             local_eqs_cont = [
                 hi == 0
                 for hi in devices[cd].equality_constraints(
-                    power_cont[c], angle_cont[c], local_cont[c], **parameters[cd], la=cp, mask=mask
+                    power_cont[c],
+                    angle_cont[c],
+                    local_cont[c],
+                    **parameters[cd],
+                    la=cp,
+                    mask=mask,
                 )
             ]
             local_ineqs_cont = [
                 gi <= 0
                 for gi in devices[cd].inequality_constraints(
-                    power_cont[c], angle_cont[c], local_cont[c], **parameters[cd], la=cp, mask=mask
+                    power_cont[c],
+                    angle_cont[c],
+                    local_cont[c],
+                    **parameters[cd],
+                    la=cp,
+                    mask=mask,
                 )
             ]
 
@@ -390,7 +402,10 @@ class PowerNetwork:
 
         constraints = list(
             itertools.chain(
-                [power_balance], *phase_consistency, *local_equalities, *local_inequalities
+                [power_balance],
+                *phase_consistency,
+                *local_equalities,
+                *local_inequalities,
             )
         )
 
@@ -459,10 +474,20 @@ class PowerNetwork:
             )
 
         # Unpack data
-        power, angle, local_variables = data["power"], data["angle"], data["local_variables"]
+        power, angle, local_variables = (
+            data["power"],
+            data["angle"],
+            data["local_variables"],
+        )
         global_angle = data["global_angle"]
-        power_balance, phase_consistency = data["power_balance"], data["phase_consistency"]
-        local_equalities, local_inequalities = data["local_equalities"], data["local_inequalities"]
+        power_balance, phase_consistency = (
+            data["power_balance"],
+            data["phase_consistency"],
+        )
+        local_equalities, local_inequalities = (
+            data["local_equalities"],
+            data["local_inequalities"],
+        )
 
         # Formulate and solve cvxpy problem
         objective = cp.Minimize(cp.sum(costs))
@@ -573,7 +598,9 @@ class PowerNetwork:
         # Compute observed global angles
         theta_terminals = [
             apply_incidence_transpose(
-                d, repeat(dispatch_outcome.global_angle, d.num_terminals_per_device), la=la
+                d,
+                repeat(dispatch_outcome.global_angle, d.num_terminals_per_device),
+                la=la,
             )
             for d in devices
         ]
@@ -629,7 +656,12 @@ class PowerNetwork:
         eq_mats = [
             d.equality_matrices(eq, p, a, u, **param)
             for d, eq, p, a, u, param in zip(
-                devices, x.local_equality_duals, x.power, x.angle, x.local_variables, parameters
+                devices,
+                x.local_equality_duals,
+                x.power,
+                x.angle,
+                x.local_variables,
+                parameters,
             )
         ]
 
@@ -656,7 +688,12 @@ class PowerNetwork:
         ineq_mats = [
             d.inequality_matrices(ineq, p, a, u, **param)
             for d, ineq, p, a, u, param in zip(
-                devices, x.local_inequality_duals, x.power, x.angle, x.local_variables, parameters
+                devices,
+                x.local_inequality_duals,
+                x.power,
+                x.angle,
+                x.local_variables,
+                parameters,
             )
         ]
 
@@ -786,7 +823,13 @@ class PowerNetwork:
             return x.package(grad_back)
 
     def kkt_vjp_parameters(
-        self, grad, devices, x: DispatchOutcome, parameters=None, param_ind=None, param_name=None
+        self,
+        grad,
+        devices,
+        x: DispatchOutcome,
+        parameters=None,
+        param_ind=None,
+        param_name=None,
     ):
         if x.ground is not None:
             devices = devices + [x.ground]
@@ -862,7 +905,9 @@ class PowerNetwork:
             x_tc.power[i], x_tc.angle[i], x_tc.local_variables[i], **param_i, la=torch
         )
         for d_lam, lam, ineq in zip(
-            torchify(grad.local_inequality_duals[i]), x_tc.local_inequality_duals[i], ineqs
+            torchify(grad.local_inequality_duals[i]),
+            x_tc.local_inequality_duals[i],
+            ineqs,
         ):
             if ineq.requires_grad:
                 ineq.backward(torch.multiply(lam, d_lam), retain_graph=True)
