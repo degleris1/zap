@@ -1,7 +1,9 @@
-import zap.network
-from zap.devices.conic.variable_device import VariableDevice
-from zap.devices.conic.slack_device import ZeroConeSlackDevice, NonNegativeConeSlackDevice
 import numpy as np
+import cvxpy as cp
+
+from zap.network import PowerNetwork
+from .variable_device import VariableDevice
+from .slack_device import ZeroConeSlackDevice, NonNegativeConeSlackDevice
 from scipy.sparse import csc_matrix, isspmatrix_csc
 
 
@@ -27,7 +29,7 @@ class ConeBridge:
         self._create_slack_devices()
 
     def _build_network(self):
-        self.net = zap.network.PowerNetwork(self.A.shape[0])
+        self.net = PowerNetwork(self.A.shape[0])
 
     def _group_variable_devices(self):
         """
@@ -41,20 +43,26 @@ class ConeBridge:
         self.terminal_groups = np.sort(np.unique(num_terminals_per_device_list))
 
         # List of lists—each sublist contains the indices of devices with the same number of terminals
-        self.device_group_map_list = [np.argwhere(num_terminals_per_device_list == g).flatten() for g in self.terminal_groups]
-
+        self.device_group_map_list = [
+            np.argwhere(num_terminals_per_device_list == g).flatten()
+            for g in self.terminal_groups
+        ]
 
     def _create_variable_devices(self):
         for group_idx, num_terminals_per_device in enumerate(self.terminal_groups):
+            # Retrieve relevant columsn of A
             device_idxs = self.device_group_map_list[group_idx]
             num_devices = len(device_idxs)
+
             A_devices = self.A[:, device_idxs]
 
             # (i) A_v is a submatrix of A: (num_terminals, num_devices)
-            A_v = A_devices.data.reshape((num_devices, num_terminals_per_device)).T  
+            A_v = A_devices.data.reshape((num_devices, num_terminals_per_device)).T
 
             # (ii) terminal_device_array: (num_devices, num_terminals_per_device)
-            terminal_device_array = A_devices.indices.reshape((num_devices, num_terminals_per_device))
+            terminal_device_array = A_devices.indices.reshape(
+                (num_devices, num_terminals_per_device)
+            )
 
             # (iii) cost vector (subvector of c taking the corresponding device elements)
             cost_vector = self.c[device_idxs]
@@ -69,17 +77,20 @@ class ConeBridge:
 
     def _group_slack_devices(self):
         """
-        Currently assuming all zero cones before non-negative cones in CVXPY 
+        Currently assuming all zero cones before non-negative cones in CVXPY
         """
 
         num_zero_cone = self.K["z"]
-        num_nonneg_cone = self.K["l"]
+        # num_nonneg_cone = self.K["l"]
         slack_indices = np.arange(self.b.shape[0])
 
-        self.zero_cone_slacks = list(zip(slack_indices[:num_zero_cone],self.b[:num_zero_cone]))
-        self.nonneg_cone_slacks = list(zip(slack_indices[num_zero_cone:],self.b[num_zero_cone:]))
+        self.zero_cone_slacks = list(
+            zip(slack_indices[:num_zero_cone], self.b[:num_zero_cone])
+        )
+        self.nonneg_cone_slacks = list(
+            zip(slack_indices[num_zero_cone:], self.b[num_zero_cone:])
+        )
 
-    
     def _create_slack_devices(self):
         if self.zero_cone_slacks:
             terminals, b_d_values = zip(*self.zero_cone_slacks)
@@ -99,3 +110,7 @@ class ConeBridge:
             )
             self.devices.append(nonneg_cone_device)
 
+    def solve(self, solver=cp.CLARABEL, **kwargs):
+        return self.net.dispatch(
+            self.devices, self.time_horizon, add_ground=False, solver=solver, **kwargs
+        )
