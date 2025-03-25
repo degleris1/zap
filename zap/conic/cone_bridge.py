@@ -44,13 +44,12 @@ class ConeBridge:
 
         # List of lists—each sublist contains the indices of devices with the same number of terminals
         self.device_group_map_list = [
-            np.argwhere(num_terminals_per_device_list == g).flatten()
-            for g in self.terminal_groups
+            np.argwhere(num_terminals_per_device_list == g).flatten() for g in self.terminal_groups
         ]
 
     def _create_variable_devices(self):
         for group_idx, num_terminals_per_device in enumerate(self.terminal_groups):
-            # Retrieve relevant columsn of A
+            # Retrieve relevant columns of A
             device_idxs = self.device_group_map_list[group_idx]
             num_devices = len(device_idxs)
 
@@ -84,12 +83,8 @@ class ConeBridge:
         # num_nonneg_cone = self.K["l"]
         slack_indices = np.arange(self.b.shape[0])
 
-        self.zero_cone_slacks = list(
-            zip(slack_indices[:num_zero_cone], self.b[:num_zero_cone])
-        )
-        self.nonneg_cone_slacks = list(
-            zip(slack_indices[num_zero_cone:], self.b[num_zero_cone:])
-        )
+        self.zero_cone_slacks = list(zip(slack_indices[:num_zero_cone], self.b[:num_zero_cone]))
+        self.nonneg_cone_slacks = list(zip(slack_indices[num_zero_cone:], self.b[num_zero_cone:]))
 
     def _create_slack_devices(self):
         if self.zero_cone_slacks:

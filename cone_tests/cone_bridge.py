@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.10.7"
+__generated_with = "0.11.21"
 app = marimo.App(width="medium")
 
 
@@ -206,18 +206,30 @@ def _(cone_bridge, torch):
 
 
 @app.cell
-def _():
-    # admm = ADMMSolver(
-    #     machine=machine,
-    #     dtype=dtype,
-    #     atol=1e-6,
-    #     rtol=1e-6,
-    #     track_objective=False,
-    #     rtol_dual_use_objective=False,
-    #     num_iterations = int(1e5),
-    # )
+def _(torch):
+    print(torch.cuda.is_available())
+    return
 
-    # solution_admm, history_admm = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
+
+@app.cell
+def _(ADMMSolver, admm_devices, cone_bridge, dtype, machine):
+    admm = ADMMSolver(
+        machine=machine,
+        dtype=dtype,
+        atol=1e-3,
+        rtol=1e-3,
+        track_objective=True,
+        rtol_dual_use_objective=True,
+        num_iterations = 10000,
+    )
+
+    solution_admm, history_admm = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
+    return admm, history_admm, solution_admm
+
+
+@app.cell
+def _(solution_admm):
+    solution_admm.objective
     return
 
 

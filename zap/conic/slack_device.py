@@ -69,7 +69,7 @@ def _admm_prox_update_zero(power: list[torch.Tensor], b_d: torch.Tensor):
     ADMM projection for zero cone:
         p_d^* = -b_d
     """
-    return [-b_d], None
+    return [-b_d], None, None
 
 
 # ====
@@ -107,4 +107,4 @@ def _admm_prox_update_nonneg(power: list[torch.Tensor], b_d: torch.Tensor):
     p_d^* = max(z_d, -b_d)
     """
     p = torch.maximum(power[0], -b_d)
-    return [p], None
+    return [p], None, None

@@ -43,10 +43,7 @@ class VariableDevice(AbstractDevice):
     def equality_constraints(self, power, _angle, local_variables, la=np, **kwargs):
         x_d = local_variables[0]
 
-        return [
-            power[i] - la.multiply(self.A_v[i : i + 1, :].T, x_d)
-            for i in range(len(power))
-        ]
+        return [power[i] - la.multiply(self.A_v[i : i + 1, :].T, x_d) for i in range(len(power))]
 
     def inequality_constraints(self, _power, _angle, _local_variables, **kwargs):
         return []
@@ -59,7 +56,7 @@ class VariableDevice(AbstractDevice):
         return _admm_prox_update(self.A_v, self.cost_vector, power, rho_power)
 
 
-@torch.jit.script
+# @torch.jit.script
 def _admm_prox_update(A_v, c_bv, power: list[torch.Tensor], rho: float):
     """
     See Overleaf on Conic Translation Sec. 4.1.1 for full details (will update the comments here eventually)
@@ -79,4 +76,4 @@ def _admm_prox_update(A_v, c_bv, power: list[torch.Tensor], rho: float):
     # each element is num_devices, time_horizon)
     p_list = [p_tensor[i].unsqueeze(-1) for i in range(p_tensor.shape[0])]
 
-    return p_list, None
+    return p_list, None, [x_star.unsqueeze(-1).expand(-1, 1)]
