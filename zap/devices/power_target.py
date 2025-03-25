@@ -102,7 +102,7 @@ def _admm_prox_update_l2(power: list[torch.Tensor], rho: float, target_power: to
 
     p = (target_power + rho * power[0]) / (1 + rho)
 
-    return [p], None
+    return [p], None, None
 
 
 @torch.jit.script
@@ -126,4 +126,4 @@ def _admm_prox_update_l1(power: list[torch.Tensor], rho: float, target_power: to
     else:  # power[0] in [target_power - (1.0/rho), target_power + (1.0/rho)]
         p = target_power
 
-    return [p], None
+    return [p], None, None

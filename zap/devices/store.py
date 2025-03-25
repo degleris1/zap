@@ -352,7 +352,7 @@ class Battery(AbstractDevice):
         d = x[:, :, T : (2 * T), 0].reshape(N, -1)
         # s = x[:, :, (2 * T) :, 0].reshape(N, -1)
 
-        return [d - c], None
+        return [d - c], None, None
 
 
 # ====
