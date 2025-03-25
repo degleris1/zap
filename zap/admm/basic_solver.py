@@ -85,7 +85,6 @@ class ADMMState:
             phase_duals=nested_ax(self.dual_phase, self.rho_angle),
             local_equality_duals=None,
             local_inequality_duals=None,
-            # local_variables=[None for _ in self.power],
             local_variables=self.local_variables,
             power=self.power,
             angle=self.phase,
@@ -436,7 +435,6 @@ class ADMMSolver:
         parameters,
         as_item=True,
     ):
-        # TODO Incorporate local variables
         costs = []
         for i, d in enumerate(devices):
             if st.power[i][0].dim() == 3:
@@ -446,9 +444,6 @@ class ADMMSolver:
                 vi = [v[:, :, 0] for v in st.phase[i]] if st.phase[i] is not None else None
                 costs += [d.operation_cost(pi, vi, None, la=torch, **parameters[i])]
             else:
-                # costs += [
-                #     d.operation_cost(st.power[i], st.phase[i], None, la=torch, **parameters[i])
-                # ]
                 costs += [
                     d.operation_cost(
                         st.power[i], st.phase[i], st.local_variables[i], la=torch, **parameters[i]
