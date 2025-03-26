@@ -39,8 +39,9 @@ class ConeBridge:
 
         num_terminals_per_device_list = np.diff(self.A.indptr)
 
-        # Tells you what are the distinct number of terminals a device could have
-        self.terminal_groups = np.sort(np.unique(num_terminals_per_device_list))
+        # Tells you what are the distinct number of terminals a device could have (ignore devices with 0 terminals)
+        filtered_counts = num_terminals_per_device_list[num_terminals_per_device_list > 0]
+        self.terminal_groups = np.sort(np.unique(filtered_counts))
 
         # List of lists—each sublist contains the indices of devices with the same number of terminals
         self.device_group_map_list = [
