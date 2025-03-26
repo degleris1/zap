@@ -144,3 +144,28 @@ def use_envelope(envelope):
         if len(lb) > 0:
             return True
     return False
+
+
+def get_standard_conic_problem(problem, solver):
+    probdata, _, _ = problem.get_problem_data(solver)
+    data = {
+        "A": probdata["A"],
+        "b": probdata["b"],
+        "c": probdata["c"],
+    }
+    cone_dims = probdata["dims"]
+    cones = {
+        "z": cone_dims.zero,
+        "l": cone_dims.nonneg,
+        "q": cone_dims.soc,
+        "ep": cone_dims.exp,
+        "s": cone_dims.psd,
+    }
+    cone_params = {
+        "A": probdata["A"],
+        "b": probdata["b"],
+        "c": probdata["c"],
+        "K": cones,
+    }
+
+    return cone_params, data, cones
