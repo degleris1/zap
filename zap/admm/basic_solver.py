@@ -280,7 +280,6 @@ class ADMMSolver:
         contingency_device,
         contingency_mask,
     ):
-        local_variables = [None for _ in devices]
         for i, dev in enumerate(devices):
             rho_power, rho_angle = self.get_rho()
 
@@ -322,9 +321,8 @@ class ADMMSolver:
             )
             st.power[i] = p
             st.phase[i] = v
-            local_variables[i] = lv
+            st.local_variables[i] = lv
 
-        st = st.update(local_variables=local_variables)
         return st
 
     def set_power(self, dev: AbstractDevice, dev_index: int, st: ADMMState, nc: int):
@@ -730,6 +728,9 @@ class ADMMSolver:
         clone_phase = theta_bar.clone().detach()
 
         rho_power, rho_angle = self.get_rho()
+
+        local_variables = [None for _ in devices]
+
         return ADMMState(
             num_terminals=num_terminals,
             num_ac_terminals=num_ac_terminals,
@@ -745,4 +746,5 @@ class ADMMSolver:
             clone_phase=clone_phase,
             rho_power=rho_power,
             rho_angle=rho_angle,
+            local_variables=local_variables,
         )
