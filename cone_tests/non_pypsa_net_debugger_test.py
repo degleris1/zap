@@ -1,14 +1,11 @@
 import torch
 import cvxpy as cp
 import scs
-from zap.importers.toy import load_battery_network
 from zap.importers.toy import load_test_network
 from zap.admm import ADMMSolver
-from zap.util import get_standard_conic_problem
+from zap.conic.cone_utils import get_standard_conic_problem
 
 from zap.conic.cone_bridge import ConeBridge
-from zap.conic.variable_device import VariableDevice
-from zap.conic.slack_device import SlackDevice
 
 
 def main():
@@ -36,7 +33,7 @@ def main():
         num_iterations=3000,
     )
 
-    cone_solution_admm, cone_history_admm = cone_admm.solve(
+    cone_solution_admm, _ = cone_admm.solve(
         net=cone_bridge.net, devices=cone_admm_devices, time_horizon=cone_bridge.time_horizon
     )
     print("SCS Cone Objective: ", soln["info"]["pobj"])
