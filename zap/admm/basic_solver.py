@@ -44,6 +44,7 @@ class ADMMState:
     rho_angle: object = None
     local_variables: object = None
     P: object = None
+    G: object = None
 
     def update(self, **kwargs):
         """Return a new state with fields updated."""
@@ -657,16 +658,17 @@ class ADMMSolver:
     def update_preconditioner(self, st: ADMMState, r_prev):
         P = st.P
         r = st.avg_power
-        # r_flat = st.avg_power.view(-1)
-        # r_prev_flat = r_prev.view(-1)
         norm_sq = torch.norm(r_prev, p=2) ** 2
         # Just use the initial preconditioner here
         if norm_sq.item() == 0:
             return st
-        # P = P + (self.eta * torch.outer(r_flat, r_prev_flat)) / norm_sq
-        P = P + (self.eta * (r * r_prev)) / norm_sq
+        g = (r * r_prev) / norm_sq
+        # Update accumulator
+        G = st.G + g**2
+        scaling = self.eta / (torch.sqrt(G) + 1e-8)
+        P = P + scaling * g
 
-        return st.update(P=P)
+        return st.update(P=P, G=G)
 
     # ====
     # Initialization
@@ -762,6 +764,7 @@ class ADMMSolver:
 
         # P_init = rho_power * torch.eye(power_bar.numel(), device=machine, dtype=dtype)
         P_init = rho_power * torch.ones_like(power_bar, device=machine, dtype=dtype)
+        G_init = torch.zeros_like(power_bar, device=machine, dtype=dtype)
 
         return ADMMState(
             num_terminals=num_terminals,
@@ -780,4 +783,5 @@ class ADMMSolver:
             rho_angle=rho_angle,
             local_variables=local_variables,
             P=P_init,
+            G=G_init,
         )
