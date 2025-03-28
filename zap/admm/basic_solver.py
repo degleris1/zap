@@ -43,6 +43,7 @@ class ADMMState:
     rho_power: object = None
     rho_angle: object = None
     local_variables: object = None
+    P: object = None
 
     def update(self, **kwargs):
         """Return a new state with fields updated."""
@@ -126,6 +127,8 @@ class ADMMSolver:
     adaptation_frequency: int = 50
     verbose: int = 1
     scale_dual_residuals: bool = None  # Deprecated
+    eta: float = 1e-3
+    use_osgm: bool = False
 
     def __post_init__(self):
         if self.machine is None:
@@ -226,9 +229,14 @@ class ADMMSolver:
             # (2) Update averages and residuals
             last_avg_phase = st.avg_phase
             last_resid_power = st.resid_power
+            last_avg_power = st.avg_power
             st = self.update_averages_and_residuals(
                 st, net, devices, time_horizon, num_contingencies
             )
+
+            # (2.5) Update preconditioner
+            if self.use_osgm:
+                st = self.update_preconditioner(st, last_avg_power)
 
             # (3) Update scaled prices
             st = self.price_updates(st, net, devices, time_horizon)
@@ -398,10 +406,16 @@ class ADMMSolver:
         return st
 
     def price_updates(self, st: ADMMState, net, devices, time_horizon):
-        return st.update(
-            dual_power=st.dual_power + self.alpha * st.avg_power,
-            dual_phase=nested_bpax(st.dual_phase, st.resid_phase, self.alpha),
-        )
+        if self.use_osgm:
+            return st.update(
+                dual_power=st.dual_power + self.alpha * st.P @ st.avg_power,
+                dual_phase=nested_bpax(st.dual_phase, st.resid_phase, self.alpha),
+            )
+        else:
+            return st.update(
+                dual_power=st.dual_power + self.alpha * st.avg_power,
+                dual_phase=nested_bpax(st.dual_phase, st.resid_phase, self.alpha),
+            )
 
     # ====
     # History, numerical checks, etc
@@ -639,6 +653,17 @@ class ADMMSolver:
 
         return history
 
+    def update_preconditioner(self, st: ADMMState, r_prev):
+        P = st.P
+        r_flat = st.avg_power.view(-1)
+        r_prev_flat = r_prev.view(-1)
+        norm_sq = torch.norm(r_prev, p=2) ** 2
+        # Just use the diagonal initial preconditioner here
+        if norm_sq.item() == 0:
+            return st
+        P = P + (self.eta * torch.outer(r_flat, r_prev_flat)) / norm_sq
+        return st.update(P=P)
+
     # ====
     # Initialization
     # ====
@@ -731,6 +756,8 @@ class ADMMSolver:
 
         local_variables = [None for _ in devices]
 
+        P_init = rho_power * torch.eye(power_bar.numel(), device=machine, dtype=dtype)
+
         return ADMMState(
             num_terminals=num_terminals,
             num_ac_terminals=num_ac_terminals,
@@ -747,4 +774,5 @@ class ADMMSolver:
             rho_power=rho_power,
             rho_angle=rho_angle,
             local_variables=local_variables,
+            P=P_init,
         )
