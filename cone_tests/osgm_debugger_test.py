@@ -51,6 +51,7 @@ def main():
     obj_val = cone_solution_admm.objective
     print(f"Objective value: {obj_val}")
     print(f"Time taken: {solve_time:.4f} seconds")
+    print("pause")
 
 
 if __name__ == "__main__":

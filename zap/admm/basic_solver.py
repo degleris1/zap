@@ -408,7 +408,8 @@ class ADMMSolver:
     def price_updates(self, st: ADMMState, net, devices, time_horizon):
         if self.use_osgm:
             return st.update(
-                dual_power=st.dual_power + self.alpha * st.P @ st.avg_power,
+                dual_power=st.dual_power + self.alpha * st.P * st.avg_power,
+                # dual_power=st.dual_power + self.alpha * st.P @ st.avg_power,
                 dual_phase=nested_bpax(st.dual_phase, st.resid_phase, self.alpha),
             )
         else:
@@ -655,13 +656,16 @@ class ADMMSolver:
 
     def update_preconditioner(self, st: ADMMState, r_prev):
         P = st.P
-        r_flat = st.avg_power.view(-1)
-        r_prev_flat = r_prev.view(-1)
+        r = st.avg_power
+        # r_flat = st.avg_power.view(-1)
+        # r_prev_flat = r_prev.view(-1)
         norm_sq = torch.norm(r_prev, p=2) ** 2
-        # Just use the diagonal initial preconditioner here
+        # Just use the initial preconditioner here
         if norm_sq.item() == 0:
             return st
-        P = P + (self.eta * torch.outer(r_flat, r_prev_flat)) / norm_sq
+        # P = P + (self.eta * torch.outer(r_flat, r_prev_flat)) / norm_sq
+        P = P + (self.eta * (r * r_prev)) / norm_sq
+
         return st.update(P=P)
 
     # ====
@@ -756,7 +760,8 @@ class ADMMSolver:
 
         local_variables = [None for _ in devices]
 
-        P_init = rho_power * torch.eye(power_bar.numel(), device=machine, dtype=dtype)
+        # P_init = rho_power * torch.eye(power_bar.numel(), device=machine, dtype=dtype)
+        P_init = rho_power * torch.ones_like(power_bar, device=machine, dtype=dtype)
 
         return ADMMState(
             num_terminals=num_terminals,
