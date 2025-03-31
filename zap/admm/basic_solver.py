@@ -667,6 +667,7 @@ class ADMMSolver:
         G = st.G + g**2
         scaling = self.eta / (torch.sqrt(G) + 1e-8)
         P = P + scaling * g
+        P *= self.rho_power
 
         return st.update(P=P, G=G)
 
