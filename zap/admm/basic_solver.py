@@ -410,7 +410,6 @@ class ADMMSolver:
         if self.use_osgm:
             return st.update(
                 dual_power=st.dual_power + self.alpha * st.P * st.avg_power,
-                # dual_power=st.dual_power + self.alpha * st.P @ st.avg_power,
                 dual_phase=nested_bpax(st.dual_phase, st.resid_phase, self.alpha),
             )
         else:
@@ -667,7 +666,6 @@ class ADMMSolver:
         G = st.G + g**2
         scaling = self.eta / (torch.sqrt(G) + 1e-8)
         P = P + scaling * g
-        P *= self.rho_power
 
         return st.update(P=P, G=G)
 
@@ -763,7 +761,6 @@ class ADMMSolver:
 
         local_variables = [None for _ in devices]
 
-        # P_init = rho_power * torch.eye(power_bar.numel(), device=machine, dtype=dtype)
         P_init = rho_power * torch.ones_like(power_bar, device=machine, dtype=dtype)
         G_init = torch.zeros_like(power_bar, device=machine, dtype=dtype)
 
