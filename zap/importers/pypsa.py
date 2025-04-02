@@ -83,10 +83,10 @@ def parse_network(net: pypsa.Network) -> PowerNetwork:
 
 
 def get_active_assets(
-    net: pypsa.Network, asset_type: str, snapshots: pd.date_range
+    net: pypsa.Network, asset_type: str, snapshots: pd.date_range, use_active_only: bool
 ) -> pd.Index:
     """Get the active assets based on build_year and lifetime."""
-    if net.investment_periods.size > 0:
+    if use_active_only and net.investment_periods.size > 0:
         snapshot_year = snapshots.get_level_values(0).unique()[0]
         return net.get_active_assets(asset_type, snapshot_year)
     else:
@@ -101,10 +101,11 @@ def parse_generators(
     expand_empty_generators: float,
     scale_generator_capacity_factor: float,
     carbon_tax: float,
+    use_active_only: bool = False,
 ) -> Generator:
     buses, buses_to_index = parse_buses(net)
 
-    active_generator_mask = get_active_assets(net, "Generator", snapshots)
+    active_generator_mask = get_active_assets(net, "Generator", snapshots, use_active_only)
     generators = deepcopy(net.generators.loc[active_generator_mask])
 
     terminals = generators.bus.replace(buses_to_index).values.astype(int)
@@ -121,17 +122,13 @@ def parse_generators(
         .values
     )
     if dynamic_capacities_min.sum() > 0:
-        logger.warning(
-            "Some generators have a minimum capacity. This is not yet supported."
-        )
+        logger.warning("Some generators have a minimum capacity. This is not yet supported.")
     dynamic_costs = (
         net.get_switchable_as_dense("Generator", "marginal_cost", snapshots)
         .T.loc[active_generator_mask]
         .values
     )
-    dynamic_costs += generator_cost_perturbation * rng.random(
-        dynamic_costs.shape
-    )  # Perturb costs
+    dynamic_costs += generator_cost_perturbation * rng.random(dynamic_costs.shape)  # Perturb costs
 
     # Build nominal capacities
     # Set min and max capacities for non-extendable generators
@@ -156,9 +153,7 @@ def parse_generators(
 
     # Add emissions rates
     efficiency = generators.efficiency.values
-    fuel_emissions_rate = net.carriers.loc[
-        generators["carrier"].values
-    ].co2_emissions.values
+    fuel_emissions_rate = net.carriers.loc[generators["carrier"].values].co2_emissions.values
     plant_emissions_rate = fuel_emissions_rate / efficiency
     fuel_type = generators.carrier.values
 
@@ -191,19 +186,16 @@ def parse_loads(
     load_cost_perturbation: float,
     scale_load: float,
     defaults: LoadDefaults,
+    use_active_only: bool = False,
 ) -> Load:
     buses, buses_to_index = parse_buses(net)
 
     # Get active loads
-    active_load_mask = get_active_assets(net, "Load", snapshots)
+    active_load_mask = get_active_assets(net, "Load", snapshots, use_active_only)
     loads = deepcopy(net.loads.loc[active_load_mask])
 
     terminals = loads.bus.replace(buses_to_index).values.astype(int)
-    load = (
-        net.get_switchable_as_dense("Load", "p_set", snapshots)
-        .T.loc[active_load_mask]
-        .values
-    )
+    load = net.get_switchable_as_dense("Load", "p_set", snapshots).T.loc[active_load_mask].values
 
     # Build and perturb costs
     load_cost = defaults.marginal_value * np.ones(net.loads.shape[0])
@@ -225,51 +217,42 @@ def parse_loads(
     )
 
 
-def get_source_sinks(
-    df: pd.DataFrame, buses_to_index: dict
-) -> Tuple[np.ndarray, np.ndarray]:
+def get_source_sinks(df: pd.DataFrame, buses_to_index: dict) -> Tuple[np.ndarray, np.ndarray]:
     sources = df.bus0.replace(buses_to_index).values.astype(int)
     sinks = df.bus1.replace(buses_to_index).values.astype(int)
     return sources, sinks
 
 
 def parse_dc_lines(
-    net: pypsa.Network, snapshots: pd.DatetimeIndex, scale_line_capacity_factor: float
+    net: pypsa.Network,
+    snapshots: pd.DatetimeIndex,
+    scale_line_capacity_factor: float,
+    use_active_only: bool,
 ) -> DCLine:
     buses, buses_to_index = parse_buses(net)
 
     # Filter DC lines
-    active_links_mask = get_active_assets(net, "Link", snapshots)
+    active_links_mask = get_active_assets(net, "Link", snapshots, use_active_only)
     links = deepcopy(net.links.loc[active_links_mask])
 
     # Set min and max capacities for non-extendable links
     non_ext_links_mask = net.links.index[net.links.p_nom_extendable & active_links_mask]
     if not non_ext_links_mask.empty:
-        links.loc[non_ext_links_mask, "p_nom_min"] = links.loc[
-            non_ext_links_mask, "p_nom"
-        ]
-        links.loc[non_ext_links_mask, "p_nom_max"] = links.loc[
-            non_ext_links_mask, "p_nom"
-        ]
+        links.loc[non_ext_links_mask, "p_nom_min"] = links.loc[non_ext_links_mask, "p_nom"]
+        links.loc[non_ext_links_mask, "p_nom_max"] = links.loc[non_ext_links_mask, "p_nom"]
 
     # links = net.links[net.links.carrier == "DC"] # remove since we want to model multi-carrier networks
     sources, sinks = get_source_sinks(links, buses_to_index)
 
     # Get dynamic values
     dynamic_max_capacity = (
-        net.get_switchable_as_dense("Link", "p_max_pu", snapshots)
-        .T.loc[active_links_mask]
-        .values
+        net.get_switchable_as_dense("Link", "p_max_pu", snapshots).T.loc[active_links_mask].values
     )
     dynamic_min_capacity = (
-        net.get_switchable_as_dense("Link", "p_min_pu", snapshots)
-        .T.loc[active_links_mask]
-        .values
+        net.get_switchable_as_dense("Link", "p_min_pu", snapshots).T.loc[active_links_mask].values
     )
     if dynamic_min_capacity.sum() > 0:
-        logger.warning(
-            "Some DC lines have a minimum dynamic capacity. This is not yet supported."
-        )
+        logger.warning("Some DC lines have a minimum dynamic capacity. This is not yet supported.")
     dynamic_costs = (
         net.get_switchable_as_dense("Link", "marginal_cost", snapshots)
         .T.loc[active_links_mask]
@@ -297,10 +280,11 @@ def parse_ac_lines(
     scale_line_capacity_factor: float,
     b_factor: float,
     defaults: TransmissionDefaults,
+    use_active_only: bool,
 ) -> ACLine:
     buses, buses_to_index = parse_buses(net)
 
-    active_lines_mask = get_active_assets(net, "Line", dates)
+    active_lines_mask = get_active_assets(net, "Line", dates, use_active_only)
     lines = deepcopy(net.lines.loc[active_lines_mask])
 
     # Filter lines with infinite reactance
@@ -309,12 +293,8 @@ def parse_ac_lines(
     # Set min and max capacities for non-extendable lines
     non_ext_lines_mask = net.lines.index[net.lines.s_nom_extendable & active_lines_mask]
     if not non_ext_lines_mask.empty:
-        lines.loc[non_ext_lines_mask, "s_nom_min"] = lines.loc[
-            non_ext_lines_mask, "s_nom"
-        ]
-        lines.loc[non_ext_lines_mask, "s_nom_max"] = lines.loc[
-            non_ext_lines_mask, "s_nom"
-        ]
+        lines.loc[non_ext_lines_mask, "s_nom_min"] = lines.loc[non_ext_lines_mask, "s_nom"]
+        lines.loc[non_ext_lines_mask, "s_nom_max"] = lines.loc[non_ext_lines_mask, "s_nom"]
 
     sources, sinks = get_source_sinks(lines, buses_to_index)
 
@@ -346,11 +326,14 @@ def parse_ac_lines(
 
 
 def parse_storage_units(
-    net: pypsa.Network, snapshots: pd.DatetimeIndex, defaults: BatteryDefaults
+    net: pypsa.Network,
+    snapshots: pd.DatetimeIndex,
+    defaults: BatteryDefaults,
+    use_active_only: bool,
 ) -> Optional[StorageUnit]:
     buses, buses_to_index = parse_buses(net)
 
-    active_storage_mask = get_active_assets(net, "StorageUnit", snapshots)
+    active_storage_mask = get_active_assets(net, "StorageUnit", snapshots, use_active_only)
     storage_units = deepcopy(net.storage_units.loc[active_storage_mask])
 
     terminals = storage_units.bus.replace(buses_to_index).values.astype(int)
@@ -374,8 +357,7 @@ def parse_storage_units(
 
     # Set SOC set-points
     initial_soc = (
-        storage_units.state_of_charge_initial
-        / (storage_units.p_nom * storage_units.max_hours)
+        storage_units.state_of_charge_initial / (storage_units.p_nom * storage_units.max_hours)
     ).fillna(defaults.init_soc)
     final_soc = initial_soc * storage_units.cyclic_state_of_charge
 
@@ -388,33 +370,28 @@ def parse_storage_units(
         charge_efficiency=storage_units.efficiency_dispatch.values,
         linear_cost=defaults.discharge_cost * np.ones(terminals.size),
         quadratic_cost=quadratic_cost,
-        capital_cost=storage_units.capital_cost.values
-        * (len(snapshots) / HOURS_PER_YEAR),
+        capital_cost=storage_units.capital_cost.values * (len(snapshots) / HOURS_PER_YEAR),
         initial_soc=initial_soc.values,
         final_soc=final_soc.values,
     )
 
 
 def parse_stores(
-    net: pypsa.Network, dates: pd.DatetimeIndex, defaults: BatteryDefaults
+    net: pypsa.Network, dates: pd.DatetimeIndex, defaults: BatteryDefaults, use_active_only: bool
 ) -> Optional[Store]:
     buses, buses_to_index = parse_buses(net)
 
-    active_stores_mask = get_active_assets(net, "Store", dates)
+    active_stores_mask = get_active_assets(net, "Store", dates, use_active_only)
     stores = deepcopy(net.stores.loc[active_stores_mask])
 
     terminals = stores.bus.replace(buses_to_index).values.astype(int)
 
     # Dynamic Values
     dynamic_capacity = (
-        net.get_switchable_as_dense("Store", "e_max_pu", dates)
-        .T.loc[active_stores_mask]
-        .values
+        net.get_switchable_as_dense("Store", "e_max_pu", dates).T.loc[active_stores_mask].values
     )
     dynamic_min_capacity = (
-        net.get_switchable_as_dense("Store", "e_min_pu", dates)
-        .T.loc[active_stores_mask]
-        .values
+        net.get_switchable_as_dense("Store", "e_min_pu", dates).T.loc[active_stores_mask].values
     )
     dynamic_costs = (
         net.get_switchable_as_dense("Store", "marginal_cost", dates)
@@ -423,16 +400,10 @@ def parse_stores(
     )
 
     # Set min and max capacities for non-extendable stores
-    non_ext_stores_mask = net.stores.index[
-        net.stores.e_nom_extendable & active_stores_mask
-    ]
+    non_ext_stores_mask = net.stores.index[net.stores.e_nom_extendable & active_stores_mask]
     if not non_ext_stores_mask.empty:
-        stores.loc[non_ext_stores_mask, "e_nom_min"] = stores.loc[
-            non_ext_stores_mask, "e_nom"
-        ]
-        stores.loc[non_ext_stores_mask, "e_nom_max"] = stores.loc[
-            non_ext_stores_mask, "e_nom"
-        ]
+        stores.loc[non_ext_stores_mask, "e_nom_min"] = stores.loc[non_ext_stores_mask, "e_nom"]
+        stores.loc[non_ext_stores_mask, "e_nom_max"] = stores.loc[non_ext_stores_mask, "e_nom"]
 
     if "marginal_cost_storage" not in stores.columns:
         # this attr was added in recent pypsa version
@@ -461,12 +432,8 @@ def parse_stores(
     )
 
 
-def drop_empty_components(
-    net: pypsa.Network, drop_empty_devices: Union[bool, List[str]]
-):
-    logger.warning(
-        "Dropping empty devices. This feature will limit round-trip with PyPSA."
-    )
+def drop_empty_components(net: pypsa.Network, drop_empty_devices: Union[bool, List[str]]):
+    logger.warning("Dropping empty devices. This feature will limit round-trip with PyPSA.")
     if isinstance(drop_empty_devices, bool):
         device_types = ["Generator", "Link", "Line", "StorageUnit", "Store"]
     else:
@@ -484,9 +451,7 @@ def drop_empty_components(
         zero_capacity_devices = net.df(device_type)[net.df(device_type)[attr] == 0]
         if zero_capacity_devices.empty:
             continue
-        logger.info(
-            f"Dropping {len(zero_capacity_devices)} {device_type} with zero capacity."
-        )
+        logger.info(f"Dropping {len(zero_capacity_devices)} {device_type} with zero capacity.")
         net.mremove(device_type, zero_capacity_devices.index)
 
 
@@ -507,6 +472,8 @@ def load_pypsa_network(
     carbon_tax: float = 0.0,
     b_factor: float = 1.0,
     defaults: Optional[DefaultConfig] = None,
+    verbose: bool = False,
+    use_active_only: bool = True,
 ) -> Tuple[PowerNetwork, List[Any]]:
     if defaults is None:
         defaults = DEFAULT_CONFIG
@@ -540,13 +507,14 @@ def load_pypsa_network(
         expand_empty_generators,
         scale_generator_capacity_factor,
         carbon_tax,
+        use_active_only,
     )
 
     load = parse_loads(
-        net, snapshots, rng, load_cost_perturbation, scale_load, defaults.load
+        net, snapshots, rng, load_cost_perturbation, scale_load, defaults.load, use_active_only
     )
 
-    dc_line = parse_dc_lines(net, snapshots, scale_line_capacity_factor)
+    dc_line = parse_dc_lines(net, snapshots, scale_line_capacity_factor, use_active_only)
 
     ac_line = parse_ac_lines(
         net,
@@ -555,18 +523,20 @@ def load_pypsa_network(
         scale_line_capacity_factor,
         b_factor,
         defaults.transmission,
+        use_active_only,
     )
 
-    storage_unit = parse_storage_units(net, snapshots, defaults.battery)
+    storage_unit = parse_storage_units(net, snapshots, defaults.battery, use_active_only)
 
-    store = parse_stores(net, snapshots, defaults.battery)
+    store = parse_stores(net, snapshots, defaults.battery, use_active_only)
 
     devices = []
     for device in [generator, load, dc_line, ac_line, storage_unit, store]:
         if device is not None and device.num_devices > 0:
-            logger.info(
-                f"Importing {device.__class__.__name__} with {device.num_devices} devices."
-            )
+            if verbose:
+                logger.info(
+                    f"Importing {device.__class__.__name__} with {device.num_devices} devices."
+                )
             devices.append(device)
 
     for device in devices:
