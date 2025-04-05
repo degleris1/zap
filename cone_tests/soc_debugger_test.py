@@ -1,5 +1,5 @@
 from zap.conic.cone_bridge import ConeBridge
-from zap.conic.cone_utils import get_standard_conic_problem
+from zap.conic.cone_utils import get_standard_conic_problem, get_conic_solution
 import cvxpy as cp
 import numpy as np
 import scipy.sparse as sp
@@ -42,6 +42,7 @@ def main():
         cone_bridge.net, admm_devices, cone_bridge.time_horizon
     )
     ## End Test ADMM
+    x, s = get_conic_solution(solution_admm, cone_bridge)
 
     outcome = cone_bridge.solve()
 

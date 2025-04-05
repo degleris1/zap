@@ -8,17 +8,23 @@ app = marimo.App(width="medium")
 def _():
     import cvxpy as cp
     import numpy as np
+    import scipy.sparse as sp
     import time
     import torch
     from zap.admm import ADMMSolver
     from zap.conic.cone_bridge import ConeBridge
     import scipy.sparse as sp
     import scs
-    from zap.conic.cone_utils import get_standard_conic_problem
+    from zap.conic.cone_utils import get_standard_conic_problem, get_conic_solution
+    from zap.conic.variable_device import VariableDevice
+    from zap.conic.slack_device import SlackDevice
     return (
         ADMMSolver,
         ConeBridge,
+        SlackDevice,
+        VariableDevice,
         cp,
+        get_conic_solution,
         get_standard_conic_problem,
         np,
         scs,
@@ -29,67 +35,51 @@ def _():
 
 
 @app.cell
-def _(cp):
-    # x = cp.Variable(3)
-    # y = cp.Variable(4)
-    # objective = cp.Minimize(cp.sum_squares(x) + cp.sum_squares(y))
-    # constraints = [
-    #     x[0] >= 0,
-    #     cp.norm(x[1:]) <= x[0],
-    #     x[0] + x[1] >= 1,
+def _(cp, np, sp):
+    n = 3 
+    m = 8
 
-    #     y[0] >= 0,
-    #     cp.norm(y[1:]) <= y[0],
-    #     y[0] - y[1] <= 2
-    # ]
-    # prob = cp.Problem(objective, constraints)
-    # result = prob.solve()
+    np.random.seed(42)
+    density = 0.3
 
-    # print("Optimal value:", prob.value)
-    # print("Optimal x:", x.value)
-    # print("Optimal y:", y.value)
-    x = cp.Variable(2)
-    y = cp.Variable(2)
-    z = cp.Variable(2)
+    # Create a random sparse matrix A of shape (m, n)
+    A = sp.random(m, n, density=density, format='csc', data_rvs=np.random.randn)
+    b = np.random.randn(m)
 
-    # The objective minimizes the sum of squares of the first entries.
-    objective = cp.Minimize(cp.square(x[0]) + cp.square(y[0]) + cp.square(z[0]))
+    c = np.random.randn(n)
 
-    # Each SOC constraint enforces that the first entry is at least as large as
-    # the absolute value of the second entry. These form three separate cone blocks.
-    # The linear constraints couple the three variables:
-    #  - x[0] + y[0] + z[0] == 12  forces the sum of the first entries to be 12,
-    #  - x[0] - y[0] == 1          forces x[0] to be 1 greater than y[0],
-    #  - y[0] - z[0] == 1          forces y[0] to be 1 greater than z[0].
-    # With these constraints, we have:
-    #   x[0] = y[0] + 1, and z[0] = y[0] - 1, so:
-    #   (y[0]+1) + y[0] + (y[0]-1) = 3*y[0] = 12  →  y[0] = 4.
-    # Then, x[0] = 5 and z[0] = 3.
-    # Thus the objective evaluates to 5^2 + 4^2 + 3^2 = 25 + 16 + 9 = 50.
-    constraints = [
-        x[0] >= cp.norm(x[1:]),
-        y[0] >= cp.norm(y[1:]),
-        z[0] >= cp.norm(z[1:]),
-        x[0] + y[0] + z[0] == 12,
-        x[0] - y[0] == 1,
-        y[0] - z[0] == 1
-    ]
+    x = cp.Variable(n)
+    s = cp.Variable(m)
 
-    # Define and solve the problem
+    constraints = []
+    constraints.append(A @ x + s == b)
+    constraints.append(x >= -5)
+    constraints.append(x <= 5)
+    constraints.append(cp.norm(s[1:2]) <= s[0])
+    constraints.append(cp.norm(s[3:5]) <= s[2])
+    constraints.append(cp.norm(s[6:8]) <= s[5])
+    objective = cp.Minimize(c.T @ x)
+
     prob = cp.Problem(objective, constraints)
-    prob.solve()
+    result = prob.solve()
 
     print("Optimal value:", prob.value)
     print("Optimal x:", x.value)
-    print("Optimal y:", y.value)
-    print("Optimal z:", z.value)
-    return constraints, objective, prob, x, y, z
+    print("Optimal s:", s.value)
+
+    return A, b, c, constraints, density, m, n, objective, prob, result, s, x
 
 
 @app.cell
 def _(cp, get_standard_conic_problem, prob):
     cone_params, data, cones = get_standard_conic_problem(prob, solver=cp.CLARABEL)
     return cone_params, cones, data
+
+
+@app.cell
+def _(ConeBridge, cone_params):
+    cone_bridge = ConeBridge(cone_params)
+    return (cone_bridge,)
 
 
 @app.cell
@@ -106,43 +96,55 @@ def _(cone_params):
 
 
 @app.cell
+def _(cone_bridge):
+    ## Test cvxpy
+
+    outcome = cone_bridge.solve()
+    outcome.problem.value
+    return (outcome,)
+
+
+@app.cell
+def _(ADMMSolver, cone_bridge, torch):
+    ### Test ADMM
+    machine = "cpu"
+    dtype = torch.float32
+    admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
+    admm = ADMMSolver(
+        machine=machine,
+        dtype=dtype,
+        atol=1e-9,
+        rtol=1e-9,
+        num_iterations=10000
+        # track_objective=False,
+        # rtol_dual_use_objective=False,
+    )
+    solution_admm, history_admm = admm.solve(
+        cone_bridge.net, admm_devices, cone_bridge.time_horizon)
+    return admm, admm_devices, dtype, history_admm, machine, solution_admm
+
+
+@app.cell
+def _(cone_bridge, get_conic_solution, solution_admm):
+    x_admm, s_admm = get_conic_solution(solution_admm, cone_bridge)
+    return s_admm, x_admm
+
+
+@app.cell
+def _(solution_admm):
+    solution_admm.objective
+    return
+
+
+@app.cell
 def _(soln):
     soln['info']["pobj"]
     return
 
 
 @app.cell
-def _(soln):
-    soln
-    return
-
-
-app._unparsable_cell(
-    r"""
-    scaled_x = soln[\"x\"][:-1]
-    tau = soln[\"x\"][-1]
-    x_og = scaled_x/tau
-    obj_og = 
-    """,
-    name="_"
-)
-
-
-@app.cell
-def _(cones):
-    cones
-    return
-
-
-@app.cell
 def _(cone_params):
-    cone_params
-    return
-
-
-@app.cell
-def _(cone_params):
-    cone_params['A'].toarray()
+    cone_params['A'].toarray().shape
     return
 
 

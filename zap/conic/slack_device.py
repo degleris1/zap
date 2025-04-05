@@ -153,7 +153,7 @@ def _admm_prox_update_soc(power: list[torch.Tensor], b_d: torch.Tensor):
 
     ## Case 1: Already in SOC
     if r <= k:
-        projection = z
+        projection = z  # Really it is z + b_d but then we subtract b_d to get p_d
     ## Case 2: Project to the point (i.e. 0)
     elif k < -r:
         projection = torch.zeros_like(z)
