@@ -108,3 +108,62 @@ def _admm_prox_update_nonneg(power: list[torch.Tensor], b_d: torch.Tensor):
     """
     p = torch.maximum(power[0], -b_d)
     return [p], None, None
+
+
+# ====
+# Second Order Cone Slack Device
+# ====
+
+
+@define(kw_only=True, slots=False)
+class SecondOrderConeSlackDevice(SlackDevice):
+    """
+    Slack device that enforces p_d + b_d in the second order cone.
+    """
+
+    def equality_constraints(self, _power, _angle, _local_variables, **kwargs):
+        return []
+
+    def inequality_constraints(self, power, _angle, _local_variables, **kwargs):
+        """
+        Enforces p_d + b_d >= 0.
+        """
+        s = cp.vstack(power) + self.b_d
+        return [cp.norm(s[1:], 2) - s[0], -s[0]]  # <= 0
+
+    def admm_prox_update(self, _rho_power, _rho_angle, power, _angle, **kwargs):
+        """
+        ADMM projection for second order cone:
+        """
+        return _admm_prox_update_soc(power, self.b_d)
+
+
+# @torch.jit.script
+def _admm_prox_update_soc(power: list[torch.Tensor], b_d: torch.Tensor):
+    """
+    ADMM projection for second order cone:
+    See overleaf for details. Variable notation follows the Overleaf.
+    """
+
+    z = torch.cat(power, dim=0)
+    s = z + b_d
+    k = s[0]
+    u = s[1:]
+    r = torch.norm(u, 2)
+
+    ## Case 1: Already in SOC
+    if r <= k:
+        projection = z
+    ## Case 2: Project to the point (i.e. 0)
+    elif k < -r:
+        projection = torch.zeros_like(z)
+    ## Case 3: Project to the boundary of the cone
+    else:
+        x = (r + k) / (2 * r) * u
+        t = (r + k) / 2
+        t = t.unsqueeze(1)
+        projection = torch.cat([t, x], dim=0)
+        projection = projection - b_d
+
+    p_list = [projection[i].unsqueeze(-1) for i in range(projection.shape[0])]
+    return p_list, None, None
