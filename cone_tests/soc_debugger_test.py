@@ -10,19 +10,32 @@ np.set_printoptions(formatter={"float": "{:6.3f}".format})
 
 
 def main():
-    # Make a problem with two SOC constraints to test on
-    x = cp.Variable(3)
-    y = cp.Variable(4)
-    objective = cp.Minimize(cp.sum_squares(x) + cp.sum_squares(y))
-    constraints = [
-        x[0] >= 0,
-        cp.norm(x[1:]) <= x[0],
-        x[0] + x[1] >= 1,
-        y[0] >= 0,
-        cp.norm(y[1:]) <= y[0],
-        y[0] - y[1] <= 2,
-    ]
+    n = 3
+    m = 8
+
+    np.random.seed(42)
+    density = 0.3
+
+    # Create a random sparse matrix A of shape (m, n)
+    A = sp.random(m, n, density=density, format="csc", data_rvs=np.random.randn)
+    b = np.random.randn(m)
+
+    c = np.random.randn(n)
+
+    x = cp.Variable(n)
+    s = cp.Variable(m)
+
+    constraints = []
+    constraints.append(A @ x + s == b)
+    constraints.append(x >= -5)
+    constraints.append(x <= 5)
+    constraints.append(cp.norm(s[1:2]) <= s[0])
+    constraints.append(cp.norm(s[3:5]) <= s[2])
+    constraints.append(cp.norm(s[6:8]) <= s[5])
+    objective = cp.Minimize(c.T @ x)
+
     problem = cp.Problem(objective, constraints)
+
     cone_params, data, cones = get_standard_conic_problem(problem, solver=cp.CLARABEL)
     cone_bridge = ConeBridge(cone_params)
 
@@ -42,7 +55,7 @@ def main():
         cone_bridge.net, admm_devices, cone_bridge.time_horizon
     )
     ## End Test ADMM
-    x, s = get_conic_solution(solution_admm, cone_bridge)
+    # x, s = get_conic_solution(solution_admm, cone_bridge)
 
     outcome = cone_bridge.solve()
 

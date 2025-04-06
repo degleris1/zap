@@ -126,10 +126,11 @@ class SecondOrderConeSlackDevice(SlackDevice):
 
     def inequality_constraints(self, power, _angle, _local_variables, **kwargs):
         """
-        Enforces p_d + b_d >= 0.
+        Enforces SOC constraint.
         """
-        s = cp.vstack(power) + self.b_d
-        return [cp.norm(s[1:], 2) - s[0], -s[0]]  # <= 0
+        z = cp.vstack([p.T for p in power])  # (num_terminals, num_devices)
+        s = z + self.b_d
+        return [cp.norm(s[1:, i], 2) - s[0, i] for i in range(s.shape[1])]
 
     def admm_prox_update(self, _rho_power, _rho_angle, power, _angle, **kwargs):
         """
@@ -138,32 +139,43 @@ class SecondOrderConeSlackDevice(SlackDevice):
         return _admm_prox_update_soc(power, self.b_d)
 
 
-# @torch.jit.script
+@torch.jit.script
 def _admm_prox_update_soc(power: list[torch.Tensor], b_d: torch.Tensor):
     """
     ADMM projection for second order cone:
     See overleaf for details. Variable notation follows the Overleaf.
     """
 
-    z = torch.cat(power, dim=0)
+    z = torch.stack([p.squeeze(-1) for p in power], dim=0)  # (num_terminals, num_devices)
     s = z + b_d
-    k = s[0]
-    u = s[1:]
-    r = torch.norm(u, 2)
+    k = s[0, :]
+    u = s[1:, :]
+    r = torch.norm(u, 2, dim=0)
 
-    ## Case 1: Already in SOC
-    if r <= k:
-        projection = z  # Really it is z + b_d but then we subtract b_d to get p_d
-    ## Case 2: Project to the point (i.e. 0)
-    elif k < -r:
-        projection = torch.zeros_like(z)
-    ## Case 3: Project to the boundary of the cone
-    else:
-        x = (r + k) / (2 * r) * u
-        t = (r + k) / 2
-        t = t.unsqueeze(1)
-        projection = torch.cat([t, x], dim=0)
-        projection = projection - b_d
+    proj = torch.zeros_like(s)
 
-    p_list = [projection[i].unsqueeze(-1) for i in range(projection.shape[0])]
+    # These are column selection masks
+    no_projection_mask = r <= k
+    zero_projection = k < -r
+    # Else we project to the boundary
+    boundary_projection_mask = ~(no_projection_mask | zero_projection)
+
+    # Case 1: Already in SOC so we do nothing (we subtract b_d to get just z because we want to return p_d)
+    proj[:, no_projection_mask] = z[:, no_projection_mask]
+
+    # Case 2: Project onto the boundary
+    r_boundary = r[boundary_projection_mask]
+    k_boundary = k[boundary_projection_mask]
+    u_boundary = u[:, boundary_projection_mask]
+
+    scale_factor = (r_boundary + k_boundary) / (2 * r_boundary)
+    x_star = scale_factor.unsqueeze(0) * u_boundary
+    t_star = (r_boundary + k_boundary) / 2
+    proj_boundary = torch.cat([t_star.unsqueeze(0), x_star], dim=0)
+
+    proj[:, boundary_projection_mask] = proj_boundary - b_d[:, boundary_projection_mask]
+
+    # Note Case 3 is covered implicitly by our zero initialization of proj
+
+    p_list = [proj[i].unsqueeze(-1) for i in range(proj.shape[0])]
     return p_list, None, None

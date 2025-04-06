@@ -53,7 +53,8 @@ def get_conic_solution(solution, cone_bridge):
 
         # Parse SOC Slacks
         elif type(device) is SecondOrderConeSlackDevice:
-            soc_slacks = np.array([t.item() for t in solution.power[idx]])
+            soc_slacks = np.concatenate([t.flatten().numpy() for t in solution.power[idx]])
+
             s.extend(soc_slacks + device.b_d.flatten())
         # Parse Zero Cone and Nonnegative Slacks
         else:

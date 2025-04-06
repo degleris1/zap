@@ -61,12 +61,11 @@ def _(cp, np, sp):
     objective = cp.Minimize(c.T @ x)
 
     prob = cp.Problem(objective, constraints)
-    result = prob.solve()
+    result = prob.solve(solver=cp.CLARABEL)
 
     print("Optimal value:", prob.value)
     print("Optimal x:", x.value)
     print("Optimal s:", s.value)
-
     return A, b, c, constraints, density, m, n, objective, prob, result, s, x
 
 
@@ -145,11 +144,6 @@ def _(soln):
 @app.cell
 def _(cone_params):
     cone_params['A'].toarray().shape
-    return
-
-
-@app.cell
-def _():
     return
 
 
