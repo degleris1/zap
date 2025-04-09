@@ -142,7 +142,7 @@ def adjacency_to_incidence(adj):
     return coo_matrix((data, (row, col)), shape=(n_nodes, n_edges)).tocsc()
 
 
-def generate_max_flow_problem(n, seed=42):
+def generate_max_flow_problem(n, quad_obj = False, gamma = 1.0, seed=42):
     """
     Generate a random max flow problem with n nodes
     """
@@ -172,7 +172,11 @@ def generate_max_flow_problem(n, seed=42):
     constraints = []
     constraints.append(f <= capacities)
     constraints.append(inc @ f == b)
-    obj = c @ f
+    if (quad_obj):
+        # -f^TQf + c^Tf, where Q = gamma*I
+        obj = -gamma*cp.sum_squares(f) + c @ f
+    else:
+        obj = c @ f
     problem = cp.Problem(cp.Maximize(obj), constraints)
 
     return problem, adj, inc
