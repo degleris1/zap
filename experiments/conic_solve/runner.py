@@ -92,15 +92,10 @@ def solve(problem: cp.Problem, solver_name: str, solver_args):
     if solver_name.lower() == "zap":
         cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.CLARABEL)
         cone_bridge = ConeBridge(cone_params)
-        machine = "cpu"
+        machine = solver_args.get("machine", "cpu")
         dtype = torch.float32
         admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
-        admm = ADMMSolver(
-            machine=machine,
-            dtype=dtype,
-            atol=1e-6,
-            rtol=1e-6,
-        )
+        admm = ADMMSolver(**solver_args)
         start_time = time.time()
         solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
         end_time = time.time()
@@ -129,8 +124,8 @@ def run_benchmark_set(benchmark_set, solver_dict):
         try:
             pobj, solve_time = solve(problem, solver_name, solver_args)
         except Exception as e:
-            pobj = None
-            solve_time = None
+            pobj = float("nan")
+            solve_time = float("nan")
             print(f"  Error: {e}")
         results.append(
             {

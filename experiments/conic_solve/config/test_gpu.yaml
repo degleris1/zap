@@ -6,14 +6,20 @@ system:
 solvers:
   - "expand"
   - name: SCS
+    args:
+      gpu: True
   - name: OSQP
   - name: CLARABEL
+    args:
+      gpu: True
   - name: ZAP
     args:
-      machine: cpu
+      machine: cuda
       atol: 1.0e-9
       rtol: 1.0e-9
   - name: PDLP
+    args:
+      gpu: True
   
 benchmark_sets:
   maros:
