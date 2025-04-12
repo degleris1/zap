@@ -43,6 +43,5 @@ class NetlibBenchmarkSet(AbstractBenchmarkSet):
         objective = cp.Minimize(c @ x + z0)
         constraints = [A @ x == b, lo <= x, x <= hi]
         problem = cp.Problem(objective, constraints)
-        problem.solve()
 
         return problem

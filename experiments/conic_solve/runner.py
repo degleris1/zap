@@ -5,6 +5,7 @@ import csv
 import yaml
 import torch
 import cvxpy as cp
+import logging
 from copy import deepcopy
 from benchmarks.maros_benchmark import MarosBenchmarkSet
 from benchmarks.netlib_benchmark import NetlibBenchmarkSet

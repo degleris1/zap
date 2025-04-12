@@ -8,6 +8,7 @@ solvers:
   - name: SCS
     args:
       gpu: True
+      use_indirect: True
   - name: OSQP
   - name: CLARABEL
     args:
