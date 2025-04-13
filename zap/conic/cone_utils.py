@@ -6,10 +6,13 @@ from scipy.sparse import coo_matrix
 from collections import deque
 from zap.conic.variable_device import VariableDevice
 from zap.conic.slack_device import SecondOrderConeSlackDevice
+from cvxpy.reductions.dcp2cone.dcp2cone import Dcp2Cone
 
 
 def get_standard_conic_problem(problem, solver):
-    probdata, _, _ = problem.get_problem_data(solver)
+    reducer = Dcp2Cone(problem=problem, quad_obj=False)
+    conic_problem, _ = reducer.apply(problem)
+    probdata, _, _ = conic_problem.get_problem_data(solver)
     data = {
         "A": probdata["A"],
         "b": probdata["b"],
@@ -142,7 +145,7 @@ def adjacency_to_incidence(adj):
     return coo_matrix((data, (row, col)), shape=(n_nodes, n_edges)).tocsc()
 
 
-def generate_max_flow_problem(n, quad_obj = False, gamma = 1.0, seed=42):
+def generate_max_flow_problem(n, quad_obj=False, gamma=1.0, seed=42):
     """
     Generate a random max flow problem with n nodes
     """
@@ -172,9 +175,9 @@ def generate_max_flow_problem(n, quad_obj = False, gamma = 1.0, seed=42):
     constraints = []
     constraints.append(f <= capacities)
     constraints.append(inc @ f == b)
-    if (quad_obj):
+    if quad_obj:
         # -f^TQf + c^Tf, where Q = gamma*I
-        obj = -gamma*cp.sum_squares(f) + c @ f
+        obj = -gamma * cp.sum_squares(f) + c @ f
     else:
         obj = c @ f
     problem = cp.Problem(cp.Maximize(obj), constraints)

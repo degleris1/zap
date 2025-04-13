@@ -10,9 +10,10 @@ from copy import deepcopy
 from benchmarks.maros_benchmark import MarosBenchmarkSet
 from benchmarks.netlib_benchmark import NetlibBenchmarkSet
 from benchmarks.lasso_benchmark import LassoBenchmarkSet
+from benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
 from zap.admm import ADMMSolver
 from zap.conic.cone_bridge import ConeBridge
-from zap.conic.cone_utils import get_standard_conic_problem
+from zap.conic.cone_utils import get_standard_conic_problem, get_conic_solution
 
 BENCHMARK_CLASSES = {
     "maros": MarosBenchmarkSet,
@@ -91,7 +92,7 @@ def solve(problem: cp.Problem, solver_name: str, solver_args):
     (and possibly others in the future).
     """
     if solver_name.lower() == "zap":
-        cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.CLARABEL)
+        cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.SCS)
         cone_bridge = ConeBridge(cone_params)
         machine = solver_args.get("machine", "cpu")
         dtype = torch.float32

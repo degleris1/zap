@@ -25,10 +25,10 @@ solvers:
 benchmark_sets:
   maros:
     type: maros
-    data_dir: "data/conic_benchmarks/maros"
+    data_dir: "zap_data/conic_benchmarks/maros"
   netlib:
     type: netlib
-    data_dir: "data/conic_benchmarks/netlib"
+    data_dir: "zap_data/conic_benchmarks/netlib"
   lasso_small:
     type: lasso
     num_problems: 1

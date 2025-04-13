@@ -54,14 +54,3 @@ class LassoBenchmarkSet(AbstractBenchmarkSet):
         cost = 0.5 * cp.sum_squares(F @ z - g) + mu * cp.norm(z, 1)
         problem = cp.Problem(cp.Minimize(cost))
         return problem
-
-
-# Example usage if run directly
-if __name__ == "__main__":
-    # Generate 3 LASSO problems with dimension 8
-    lasso_set = LassoBenchmarkSet(
-        num_problems=3, n=8, m_factor=50, density=0.1, noise_scale=0.1, base_seed=42
-    )
-    for idx, problem in enumerate(lasso_set):
-        result = problem.solve(solver=cp.SCS, verbose=True)
-        print(f"Problem {idx + 1} status: {problem.status}, objective value: {problem.value}")
