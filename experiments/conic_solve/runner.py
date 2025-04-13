@@ -1,27 +1,36 @@
-import argparse
 import os
 import time
 import csv
 import yaml
 import torch
 import cvxpy as cp
-import logging
+import sys
+import zap
 from copy import deepcopy
 from benchmarks.maros_benchmark import MarosBenchmarkSet
 from benchmarks.netlib_benchmark import NetlibBenchmarkSet
 from benchmarks.lasso_benchmark import LassoBenchmarkSet
+from pathlib import Path
 from benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
 from zap.admm import ADMMSolver
 from zap.conic.cone_bridge import ConeBridge
-from zap.conic.cone_utils import get_standard_conic_problem, get_conic_solution
+from zap.conic.cone_utils import get_standard_conic_problem
 
+# Reference from .yaml type to get the right class
 BENCHMARK_CLASSES = {
     "maros": MarosBenchmarkSet,
     "netlib": NetlibBenchmarkSet,
     "lasso": LassoBenchmarkSet,
+    "sparse_cone": SparseConeBenchmarkSet,
 }
 
 RESULTS_DIR = "results/benchmark"
+ZAP_PATH = Path(zap.__file__).parent.parent
+DATA_PATH = ZAP_PATH / "data"
+
+
+def datadir(*args):
+    return Path(DATA_PATH, *args)
 
 
 def expand_config(config: dict, key="expand") -> list[dict]:
@@ -111,7 +120,7 @@ def solve(problem: cp.Problem, solver_name: str, solver_args):
     return pobj, solve_time
 
 
-def run_benchmark_set(benchmark_set, solver_dict):
+def run_benchmark_set(benchmark_set, solver_dict, bs_name):
     """
     Runs a given benchmark set using the specified solver and its args.
     Returns a list of results (as dictionaries).
@@ -120,9 +129,7 @@ def run_benchmark_set(benchmark_set, solver_dict):
     solver_name = solver_dict.get("name")
     solver_args = solver_dict.get("args", {})
     for idx, problem in enumerate(benchmark_set):
-        print(
-            f"Running problem {idx + 1} from {benchmark_set.__class__.__name__} with {solver_name}..."
-        )
+        print(f"Running problem {idx + 1} from {bs_name} with {solver_name}...")
         try:
             pobj, solve_time = solve(problem, solver_name, solver_args)
         except Exception as e:
@@ -131,7 +138,7 @@ def run_benchmark_set(benchmark_set, solver_dict):
             print(f"  Error: {e}")
         results.append(
             {
-                "benchmark_set": benchmark_set.__class__.__name__,
+                "benchmark_set": bs_name,
                 "problem_index": idx,
                 "solver": solver_name,
                 "solve_time": solve_time,
@@ -151,7 +158,7 @@ def run_benchmarks(config: dict):
         bench_set = instantiate_benchmark_set(bs_params)
         for solver_dict in solver_list:
             print(f"Running {bs_name} with solver {solver_dict['name']}...")
-            res = run_benchmark_set(bench_set, solver_dict=solver_dict)
+            res = run_benchmark_set(bench_set, solver_dict=solver_dict, bs_name=bs_name)
             all_results.extend(res)
     return all_results
 
@@ -168,14 +175,14 @@ def write_results_to_csv(results, output_file: str):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config_path", type=str, required=True, help="Path to config.yaml")
-    parser.add_argument("--config_num", type=int, default=0, help="Index of the configs to run")
-    args = parser.parse_args()
-    config_path = args.config_path
-    config_num = args.config_num
+    config_path = sys.argv[1]
+
+    if len(sys.argv) > 2:
+        config_num = int(sys.argv[2])
+    else:
+        config_num = 0
     config_name = os.path.splitext(os.path.basename(config_path))[0]
-    output_file = f"{config_name}_{config_num}.csv"
+    output_file = f"{config_name}_{config_num:03d}.csv"
 
     config = expand_config(load_config(config_path))[config_num]
     results = run_benchmarks(config)

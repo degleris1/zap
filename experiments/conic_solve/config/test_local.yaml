@@ -16,9 +16,9 @@ solvers:
   - name: PDLP
   
 benchmark_sets:
-  maros:
-    type: maros
-    data_dir: "data/conic_benchmarks/maros"
+  # maros:
+  #   type: maros
+  #   data_dir: "data/conic_benchmarks/maros"
   netlib:
     type: netlib
     data_dir: "data/conic_benchmarks/netlib"
