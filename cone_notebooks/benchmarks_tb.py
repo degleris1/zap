@@ -10,8 +10,18 @@ def _():
     import numpy as np
     import cvxpy as cp
     import scipy.io
+    import sys
+    import os
     from scipy.sparse import csc_matrix
-    return cp, csc_matrix, mo, np, scipy
+    # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+    from experiments.conic_solve.benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
+    return SparseConeBenchmarkSet, cp, csc_matrix, mo, np, os, scipy, sys
+
+
+@app.cell
+def _(os):
+    os.getcwd()
+    return
 
 
 @app.cell
@@ -86,8 +96,8 @@ def _(problem):
 
 
 @app.cell
-def _(cp, problem):
-    problem.solve(solver=cp.SCS, verbose=True)
+def _():
+    # problem.solve(solver=cp.SCS, verbose=True)
     return
 
 
