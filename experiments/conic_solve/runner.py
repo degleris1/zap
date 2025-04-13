@@ -114,9 +114,14 @@ def solve(problem: cp.Problem, solver_name: str, solver_args):
         solve_time = end_time - start_time
 
     else:
+        start_time = time.time()
         problem.solve(solver=solver_name, **solver_args)
+        end_time = time.time()
         pobj = problem.value
-        solve_time = problem.solver_stats.solve_time
+        if solver_name.lower() == "pdlp":
+            solve_time = end_time - start_time
+        else:
+            solve_time = problem.solver_stats.solve_time
     return pobj, solve_time
 
 

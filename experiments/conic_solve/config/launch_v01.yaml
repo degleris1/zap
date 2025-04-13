@@ -1,16 +1,27 @@
 system:
-  runtime: 60
+  runtime: 600
   gpu: 1
   partition: "serc"
 
 solvers:
   - "expand"
+  - name: SCS
+    args:
+      time_limit_secs: 300
+      use_indirect: True
+      verbose: True
+  - name: OSQP
+    args:
+      time_limit: 300
+      verbose: True
   - name: CLARABEL
     args:
       time_limit: 300
+      verbose: True
   - name: PDLP
     args: 
       time_limit_sec: 300
+      verbose: True
   - name: ZAP
     args:
       machine: cuda
@@ -28,19 +39,33 @@ benchmark_sets:
     data_dir: "data/conic_benchmarks/netlib"
   lasso_small:
     type: lasso
-    num_problems: 1
-    n: 8
-    m: 400
+    num_problems: 3
+    n: 10000
+    m: 2000
+    density: 0.01
+    base_seed: 0
+  lasso_small_sparser:
+    type: lasso
+    num_problems: 3
+    n: 30000
+    m: 6000
+    density: 0.01
+    base_seed: 0
+  lasso_small_denser:
+    type: lasso
+    num_problems: 3
+    n: 30000
+    m: 6000
     density: 0.1
     base_seed: 0
   sparse_cone_lp:
     type: sparse_cone
-    num_problems: 1
-    n: 500
+    num_problems: 3
+    n: 10000
     p_f: 0.5
     p_l: 0.5
   sparse_cone_socp:
     type: sparse_cone
-    num_problems: 1
-    n: 500
+    num_problems: 3
+    n: 10000
 
