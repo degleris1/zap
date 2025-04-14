@@ -100,7 +100,7 @@ def solve(problem: cp.Problem, solver_name: str, solver_args):
     so that we can also support ZAP which is not a CVXPY solver
     (and possibly others in the future).
     """
-    if solver_name.lower() == "zap":
+    if solver_name.lower() == "admm":
         cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.SCS)
         cone_bridge = ConeBridge(cone_params)
         machine = solver_args.get("machine", "cpu")
@@ -115,7 +115,7 @@ def solve(problem: cp.Problem, solver_name: str, solver_args):
 
     else:
         start_time = time.time()
-        problem.solve(solver=solver_name, **solver_args)
+        problem.solve(solver=solver_name.upper(), **solver_args)
         end_time = time.time()
         pobj = problem.value
         if solver_name.lower() == "pdlp":
@@ -125,18 +125,16 @@ def solve(problem: cp.Problem, solver_name: str, solver_args):
     return pobj, solve_time
 
 
-def run_benchmark_set(benchmark_set, solver_dict, bs_name):
+def run_benchmark_set(benchmark_set, solver_params, bs_name, solver_name):
     """
     Runs a given benchmark set using the specified solver and its args.
     Returns a list of results (as dictionaries).
     """
     results = []
-    solver_name = solver_dict.get("name")
-    solver_args = solver_dict.get("args", {})
     for idx, problem in enumerate(benchmark_set):
         print(f"Running problem {idx + 1} from {bs_name} with {solver_name}...")
         try:
-            pobj, solve_time = solve(problem, solver_name, solver_args)
+            pobj, solve_time = solve(problem, solver_name, solver_params)
         except Exception as e:
             pobj = float("nan")
             solve_time = float("nan")
@@ -155,15 +153,23 @@ def run_benchmark_set(benchmark_set, solver_dict, bs_name):
 
 def run_benchmarks(config: dict):
     all_results = []
-    solver_list = [config.get("solvers")]
+    solver_list = config.get("solver")
+    benchmark_list = config.get("benchmarks")
+    if type(benchmark_list) is not list:
+        benchmark_list = [benchmark_list]
+    if type(solver_list) is not list:
+        solver_list = [solver_list]
 
-    benchmark_sets_config = config.get("benchmark_sets")
-    for bs_name, bs_params in benchmark_sets_config.items():
+    for bs_name in benchmark_list:
         print(f"Instantiating benchmark set: {bs_name}")
+        bs_params = config.get(f"{bs_name}_args", {})
         bench_set = instantiate_benchmark_set(bs_params)
-        for solver_dict in solver_list:
-            print(f"Running {bs_name} with solver {solver_dict['name']}...")
-            res = run_benchmark_set(bench_set, solver_dict=solver_dict, bs_name=bs_name)
+        for solver_name in solver_list:
+            print(f"Running {bs_name} with solver {solver_name}...")
+            solver_params = config.get(f"{solver_name}_args", {})
+            res = run_benchmark_set(
+                bench_set, solver_params=solver_params, bs_name=bs_name, solver_name=solver_name
+            )
             all_results.extend(res)
     return all_results
 
