@@ -4,12 +4,11 @@ system:
   partition: "serc"
 
 
-solver: [pdlp]
+solver: [osqp]
 benchmarks: [expand, maros, netlib, lasso_small, lasso_small_sparser, sparse_cone_lp, sparse_cone_socp]
  
 # Solver Args
 osqp_args:
-  time_limit: 300
   verbose: True
 
 # Benchmark Args 

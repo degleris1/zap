@@ -4,12 +4,11 @@ system:
   partition: "serc"
 
 
-solver: [pdlp]
+solver: [clarabel]
 benchmarks: [expand, maros, netlib, lasso_small, lasso_small_sparser, sparse_cone_lp, sparse_cone_socp]
  
 # Solver Args
 clarabel_args:
-  time_limit: 300
   verbose: True
 
 # Benchmark Args 
