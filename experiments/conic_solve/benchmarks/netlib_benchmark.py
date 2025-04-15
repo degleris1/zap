@@ -4,7 +4,7 @@ import scipy.io as spio
 from scipy.sparse import csc_matrix
 from typing import Tuple
 
-from benchmarks.abstract_benchmark import AbstractBenchmarkSet
+from .abstract_benchmark import AbstractBenchmarkSet
 
 
 class NetlibBenchmarkSet(AbstractBenchmarkSet):
