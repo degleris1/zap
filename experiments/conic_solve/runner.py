@@ -2,7 +2,6 @@ import os
 import time
 import csv
 import yaml
-import torch
 import cvxpy as cp
 import sys
 import zap
@@ -12,9 +11,12 @@ from benchmarks.netlib_benchmark import NetlibBenchmarkSet
 from benchmarks.lasso_benchmark import LassoBenchmarkSet
 from pathlib import Path
 from benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
-from zap.admm import ADMMSolver
-from zap.conic.cone_bridge import ConeBridge
-from zap.conic.cone_utils import get_standard_conic_problem
+from zap.conic.cone_utils import (
+    solve_admm,
+    solve_cuclarabel,
+    solve_cuosqp,
+    solve_cupdlp,
+)
 
 # Reference from .yaml type to get the right class
 BENCHMARK_CLASSES = {
@@ -101,18 +103,13 @@ def solve(problem: cp.Problem, solver_name: str, solver_args):
     (and possibly others in the future).
     """
     if solver_name.lower() == "admm":
-        cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.SCS)
-        cone_bridge = ConeBridge(cone_params)
-        machine = solver_args.get("machine", "cpu")
-        dtype = torch.float32
-        admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
-        admm = ADMMSolver(**solver_args)
-        start_time = time.time()
-        solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
-        end_time = time.time()
-        pobj = solution_admm.objective
-        solve_time = end_time - start_time
-
+        p_obj, solve_time = solve_admm(problem, solver_args)
+    elif solver_name.lower() == "cuclarabel":
+        p_obj, solve_time = solve_cuclarabel(problem, solver_args)
+    elif solver_name.lower() == "cuosqp":
+        p_obj, solve_time = solve_cuosqp(problem, solver_args)
+    elif solver_name.lower() == "cupdlp":
+        p_obj, solve_time = solve_cupdlp(problem, solver_args)
     else:
         start_time = time.time()
         problem.solve(solver=solver_name.upper(), **solver_args)
