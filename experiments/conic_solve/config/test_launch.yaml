@@ -1,0 +1,46 @@
+system:
+  runtime: 60
+  gpu: 1
+  partition: "serc"
+
+solvers:
+  - "expand"
+  - name: CLARABEL
+    args:
+      time_limit: 300
+  - name: PDLP
+    args: 
+      time_limit_sec: 300
+  - name: ZAP
+    args:
+      machine: cuda
+      atol: 1.0e-6
+      rtol: 1.0e-6
+      num_iterations: 7500
+      
+  
+benchmark_sets:
+  maros:
+    type: maros
+    data_dir: "data/conic_benchmarks/maros"
+  netlib:
+    type: netlib
+    data_dir: "data/conic_benchmarks/netlib"
+  lasso_small:
+    type: lasso
+    num_problems: 1
+    n: 8
+    m: 400
+    density: 0.1
+    base_seed: 0
+  sparse_cone_lp:
+    type: sparse_cone
+    num_problems: 1
+    n: 500
+    p_f: 0.5
+    p_l: 0.5
+  sparse_cone_socp:
+    type: sparse_cone
+    num_problems: 1
+    n: 500
+

@@ -1,0 +1,72 @@
+system:
+  runtime: 600
+  gpu: 1
+  partition: "serc"
+
+solver: [expand, scs, osqp, clarabel, pdlp, admm]
+benchmarks: [netlib, lasso_small, lasso_small_sparser, lasso_smaller_denser, sparse_cone_lp, sparse_cone_socp]
+
+# Solver Args
+scs_args:
+  time_limit_secs: 300
+  use_indirect: True
+  verbose: True
+
+osqp_args:
+  time_limit: 300
+  verbose: True
+
+clarabel_args:
+  time_limit: 300
+  verbose: True
+
+pdlp_args:
+  time_limit_sec: 300
+  verbose: True
+
+zap_args:
+  machine: cuda
+  atol: 1.0e-6
+  rtol: 1.0e-6
+  num_iterations: 7500
+
+# Benchmark Args
+netlib_args:
+  type: netlib
+  data_dir: "data/conic_benchmarks/netlib"
+
+lasso_small_args:
+  type: lasso
+  num_problems: 3
+  n: 10000
+  m: 2000
+  density: 0.01
+  base_seed: 0
+
+lasso_small_sparser_args:
+  type: lasso
+  num_problems: 3
+  n: 30000
+  m: 6000
+  density: 0.01
+  base_seed: 0
+
+lasso_small_denser_args:
+  type: lasso
+  num_problems: 3
+  n: 30000
+  m: 6000
+  density: 0.1
+  base_seed: 0
+
+sparse_cone_lp_args:
+  type: sparse_cone
+  num_problems: 3
+  n: 10000
+  p_f: 0.5
+  p_l: 0.5
+
+sparse_cone_socp_args:
+  type: sparse_cone
+  num_problems: 3
+  n: 10000
