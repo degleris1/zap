@@ -11,6 +11,7 @@ from benchmarks.netlib_benchmark import NetlibBenchmarkSet
 from benchmarks.lasso_benchmark import LassoBenchmarkSet
 from pathlib import Path
 from benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
+from benchmarks.max_flow_benchmark import MaxFlowBenchmarkSet
 from zap.conic.cone_utils import (
     solve_admm,
     solve_cuclarabel,
@@ -24,6 +25,7 @@ BENCHMARK_CLASSES = {
     "netlib": NetlibBenchmarkSet,
     "lasso": LassoBenchmarkSet,
     "sparse_cone": SparseConeBenchmarkSet,
+    "max_flow": MaxFlowBenchmarkSet,
 }
 
 RESULTS_DIR = "results/benchmark"
@@ -103,13 +105,15 @@ def solve(problem: cp.Problem, solver_name: str, solver_args):
     (and possibly others in the future).
     """
     if solver_name.lower() == "admm":
-        p_obj, solve_time = solve_admm(problem, solver_args)
+        pobj, solve_time = solve_admm(problem, solver_args)
+        print(f"  ADMM pobj: {pobj:.4f}")
+        print(f"  ADMM solve time: {solve_time:.4f} seconds")
     elif solver_name.lower() == "cuclarabel":
-        p_obj, solve_time = solve_cuclarabel(problem, solver_args)
+        pobj, solve_time = solve_cuclarabel(problem, solver_args)
     elif solver_name.lower() == "cuosqp":
-        p_obj, solve_time = solve_cuosqp(problem, solver_args)
+        pobj, solve_time = solve_cuosqp(problem, solver_args)
     elif solver_name.lower() == "cupdlp":
-        p_obj, solve_time = solve_cupdlp(problem, solver_args)
+        pobj, solve_time = solve_cupdlp(problem, solver_args)
     else:
         start_time = time.time()
         problem.solve(solver=solver_name.upper(), **solver_args)

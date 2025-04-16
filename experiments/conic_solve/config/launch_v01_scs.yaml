@@ -5,7 +5,7 @@ system:
 
 
 solver: [scs]
-benchmarks: [expand, maros, netlib, lasso_small, lasso_small_sparser, sparse_cone_lp, sparse_cone_socp]
+benchmarks: [expand, maros, netlib, lasso_small, lasso_small_sparser, sparse_cone_lp, sparse_cone_socp, max_flow]
  
 # Solver Args
 scs_args:
@@ -56,3 +56,9 @@ sparse_cone_socp_args:
   type: sparse_cone
   num_problems: 3
   n: 10000
+
+max_flow_args:
+  type: max_flow
+  num_problems: 3
+  n: 10000
+  base_seed: 42
