@@ -5,7 +5,8 @@ system:
 
 
 solver: [osqp]
-benchmarks: [expand, maros, netlib, lasso_small, lasso_small_sparser, sparse_cone_lp, sparse_cone_socp, max_flow]
+# benchmarks: [expand, maros, netlib, lasso_small, lasso_small_sparser, sparse_cone_lp, sparse_cone_socp, max_flow]
+benchmarks: [max_flow]
  
 # Solver Args
 osqp_args:

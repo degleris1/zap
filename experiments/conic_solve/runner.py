@@ -106,8 +106,8 @@ def solve(problem: cp.Problem, solver_name: str, solver_args):
     """
     if solver_name.lower() == "admm":
         pobj, solve_time = solve_admm(problem, solver_args)
-        print(f"  ADMM pobj: {pobj:.4f}")
-        print(f"  ADMM solve time: {solve_time:.4f} seconds")
+        print(f"  ADMM pobj: {pobj:.4f}", flush=True)
+        print(f"  ADMM solve time: {solve_time:.4f} seconds", flush=True)
     elif solver_name.lower() == "cuclarabel":
         pobj, solve_time = solve_cuclarabel(problem, solver_args)
     elif solver_name.lower() == "cuosqp":

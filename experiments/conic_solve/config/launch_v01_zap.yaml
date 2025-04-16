@@ -5,8 +5,10 @@ system:
 
 
 solver: [admm]
-benchmarks: [expand, maros, netlib, lasso_small, lasso_small_sparser, sparse_cone_lp, sparse_cone_socp, max_flow]
- 
+# benchmarks: [expand, maros, netlib, lasso_small, lasso_small_sparser, sparse_cone_lp, sparse_cone_socp, max_flow]
+ # benchmarks: [expand, maros, netlib, lasso_small, lasso_small_sparser, sparse_cone_lp, sparse_cone_socp, max_flow]
+benchmarks: [expand, maros, lasso_small_sparser, sparse_cone_socp, max_flow]
+
 # Solver Args
 admm_args:
   machine: cuda
