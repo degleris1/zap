@@ -12,15 +12,108 @@ def _():
     import scipy.io
     import sys
     import os
+    import zap
+    import pandas as pd
     from scipy.sparse import csc_matrix
-    # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
     from experiments.conic_solve.benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
-    return SparseConeBenchmarkSet, cp, csc_matrix, mo, np, os, scipy, sys
+    from experiments.conic_solve.benchmarks.lasso_benchmark import LassoBenchmarkSet
+    from experiments.conic_solve.benchmarks.maros_benchmark import MarosBenchmarkSet
+    from experiments.conic_solve.benchmarks.netlib_benchmark import NetlibBenchmarkSet
+    from experiments.conic_solve.benchmarks.max_flow_benchmark import MaxFlowBenchmarkSet
+    from zap.conic.cone_utils import get_problem_structure
+    return (
+        LassoBenchmarkSet,
+        MarosBenchmarkSet,
+        MaxFlowBenchmarkSet,
+        NetlibBenchmarkSet,
+        SparseConeBenchmarkSet,
+        cp,
+        csc_matrix,
+        get_problem_structure,
+        mo,
+        np,
+        os,
+        pd,
+        scipy,
+        sys,
+        zap,
+    )
 
 
 @app.cell
-def _(os):
-    os.getcwd()
+def _(
+    LassoBenchmarkSet,
+    MarosBenchmarkSet,
+    MaxFlowBenchmarkSet,
+    NetlibBenchmarkSet,
+    SparseConeBenchmarkSet,
+):
+    ## Initialize test problem benchmarks (and also that Max flow problem)
+    maros_benchmark = MarosBenchmarkSet(data_dir="data/conic_benchmarks/maros")
+    netlib_benchmark = NetlibBenchmarkSet(data_dir="data/conic_benchmarks/netlib")
+    lasso_small_benchmark = LassoBenchmarkSet(num_problems=3, n=10000, m=2000, density=0.01, base_seed=0)
+    lasso_small_sparser_benchmark = LassoBenchmarkSet(num_problems=3, n=30000, m=6000, density=0.01, base_seed=0)
+    lasso_small_denser_benchmark = LassoBenchmarkSet(num_problems=3, n=30000, m=6000, density=0.1, base_seed=0)
+    sparse_cone_lp_benchmark = SparseConeBenchmarkSet(num_problems=3, n=10000, p_f=0.5, p_l=0.5)
+    sparse_cone_socp_benchmark = SparseConeBenchmarkSet(num_problems=3, n=10000)
+    max_flow_benchmark = MaxFlowBenchmarkSet(num_problems=3, n=10000, base_seed=42)
+
+    # all_benchmarks = [maros_benchmark, netlib_benchmark, lasso_small_benchmark, lasso_small_sparser_benchmark, lasso_small_denser_benchmark, sparse_cone_lp_benchmark, sparse_cone_socp_benchmark]
+    # all_benchmark_names = ["maros", "netlib", "lasso_small", "lasso_small_sparser", "lasso_small_denser", "sparse_cone_lp", "sparse_cone_socp"]
+
+    all_benchmarks = [netlib_benchmark, lasso_small_benchmark, lasso_small_sparser_benchmark, lasso_small_denser_benchmark, sparse_cone_lp_benchmark, sparse_cone_socp_benchmark, max_flow_benchmark]
+    all_benchmark_names = ["netlib", "lasso_small", "lasso_small_sparser", "lasso_small_denser", "sparse_cone_lp", "sparse_cone_socp", "max_flow"]
+    return (
+        all_benchmark_names,
+        all_benchmarks,
+        lasso_small_benchmark,
+        lasso_small_denser_benchmark,
+        lasso_small_sparser_benchmark,
+        maros_benchmark,
+        max_flow_benchmark,
+        netlib_benchmark,
+        sparse_cone_lp_benchmark,
+        sparse_cone_socp_benchmark,
+    )
+
+
+@app.cell
+def _(all_benchmark_names, all_benchmarks, get_problem_structure, pd):
+    rows = []
+    for idx, benchmark in enumerate(all_benchmarks):
+        benchmark_name = all_benchmark_names[idx]
+        for i, prob in enumerate(benchmark):
+            structure = get_problem_structure(prob)
+            row = {
+                "benchmark_name": benchmark_name,
+                "problem_index": i
+            }
+            row.update(structure)
+            rows.append(row)
+
+    benchmark_probs_structure = pd.DataFrame(rows)
+    return (
+        benchmark,
+        benchmark_name,
+        benchmark_probs_structure,
+        i,
+        idx,
+        prob,
+        row,
+        rows,
+        structure,
+    )
+
+
+@app.cell
+def _(all_benchmarks):
+    all_benchmarks
+    return
+
+
+@app.cell
+def _(benchmark_probs_structure):
+    benchmark_probs_structure.head(20)
     return
 
 

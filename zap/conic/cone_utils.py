@@ -2,11 +2,13 @@ import numpy as np
 import cvxpy as cp
 import torch
 import time
+import json
 from zap.conic.variable_device import VariableDevice
 from zap.conic.slack_device import SecondOrderConeSlackDevice
 from cvxpy.reductions.dcp2cone.dcp2cone import Dcp2Cone
 from zap.conic.cone_bridge import ConeBridge
 from zap.admm import ADMMSolver
+from scipy.sparse.linalg import svds
 
 
 def get_standard_conic_problem(problem, solver=cp.SCS):
@@ -88,15 +90,47 @@ def get_problem_structure(problem):
     structure["m"] = A.shape[0]
     structure["n"] = A.shape[1]
     structure["density"] = A.nnz / (A.shape[0] * A.shape[1])
+    structure["cond_number"] = estimate_condition_number_sparse(A)
     structure["z"] = z
     structure["l"] = l
     structure["q"] = q  # this is a list of the sizes of all the SOC cones
-    structure["var_devices"] = A.getnnz(axis=0)
-    structure["unique_var_device_groups"] = np.unique(structure["var_devices"])
+
+    var_devices = A.getnnz(axis=0)
+    unique, counts = np.unique(var_devices, return_counts=True)
+    var_devices_dict = {int(k): int(v) for k, v in zip(unique, counts)}
+
+    structure["var_devices"] = var_devices
+    structure["var_devices_dict"] = json.dumps(var_devices_dict)
     structure["num_soc_devices"] = len(np.unique(np.array(q)))
-    structure["num_var_devices"] = len(structure["unique_var_device_groups"])
+    structure["num_var_devices"] = len(unique)
 
     return structure
+
+
+def estimate_condition_number_sparse(A, fallback_tol=1e-12):
+    try:
+        _, s_max, _ = svds(A, k=1, which="LM", tol=1e-3)
+        sigma_max = s_max[0]
+
+        _, s_min, _ = svds(A, k=1, which="SM", tol=1e-2, maxiter=5000)
+        sigma_min = s_min[0]
+
+        if sigma_min < fallback_tol:
+            raise ValueError("σ_min too small, possibly unstable")
+
+        return sigma_max / sigma_min
+
+    except Exception as e:
+        print(f"Falling back on rough estimate for cond(A): {e}")
+
+        fro_norm = fro_norm = np.sqrt((A.data**2).sum())
+        m, n = A.shape
+        approx_sigma_min = fro_norm / np.sqrt(min(m, n))
+
+        if approx_sigma_min < fallback_tol:
+            return np.inf
+
+        return sigma_max / approx_sigma_min
 
 
 ### Calling Custom Solvers (i.e. anything not via CVXPY, basically GPU accelerated solvers) ###
