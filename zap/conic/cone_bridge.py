@@ -27,7 +27,7 @@ class ConeBridge:
 
     def _transform(self):
         self._build_network()
-        self._group_variable_devices()
+        self._group_variable_devices(strategy="binned_terminal_groups")
         self._create_variable_devices()
         self._group_slack_devices()
         self._create_slack_devices()
@@ -35,12 +35,54 @@ class ConeBridge:
     def _build_network(self):
         self.net = PowerNetwork(self.A.shape[0])
 
-    def _group_variable_devices(self):
+    def _group_variable_devices(
+        self, strategy="binned_terminal_groups", bin_edges=(0, 10, 100, 1000)
+    ):
         """
-        Figure out the appropriate grouping of variable devices based on the number of terminals they have
+        Figure out the appropriate grouping of variable devices based on the number of terminals they have.
         """
-        ## TODO: Expand this to other potential grouping strategies
+        if strategy == "discrete_terminal_groups":
+            # Each group consists of devices with exactly the same number of terminals
+            self._compute_discrete_terminal_groups()
+        elif strategy == "binned_terminal_groups":
+            # Each group consists of devices with a number of terminals in the same bin
+            self._compute_binned_terminal_groups(bin_edges)
 
+    def _compute_binned_terminal_groups(self, bin_edges):
+        """
+        This function makes a separate group for each set of devices with a number of terminals in the same bin.
+        """
+        self.device_group_map_list = []
+        self.terminal_groups = []
+
+        num_terminals_per_device_list = np.diff(self.A.indptr)
+        positive_mask = num_terminals_per_device_list > 0
+        filtered_counts = num_terminals_per_device_list[positive_mask]
+        # counts = num_terminals_per_device_list[positive_mask]
+        device_idxs = np.nonzero(positive_mask)[0]
+
+        # Account for upper bound bin (last bin takes everything else)
+        edges = np.asarray(bin_edges, dtype=np.int64)
+        edges = np.concatenate(
+            [edges, [np.iinfo(np.int64).max]]
+        )  # Do this instead of np.inf to keep it in int
+
+        # Bin the devices using np.digitize
+        bin_idx = np.digitize(filtered_counts, edges, right=True) - 1
+
+        for bin in range(edges.size - 1):
+            bin_device_idxs = device_idxs[bin_idx == bin]
+            if bin_device_idxs.size:  # Only care about non-empty bins
+                self.device_group_map_list.append(bin_device_idxs)
+
+    def _compute_discrete_terminal_groups(self):
+        """
+        This function makes a separate group for each set of devices with exactly the same number of terminals.
+        For example, if we have 3 devices with 2 terminals and 4 devices with 3 terminals, we will have two groups:
+        - Group 1: 3 devices with 2 terminals
+        - Group 2: 4 devices with 3 terminals
+        Importantly, assigns self.terminal_grupps and self.device_group_map_list
+        """
         num_terminals_per_device_list = np.diff(self.A.indptr)
 
         # Tells you what are the distinct number of terminals a device could have (ignore devices with 0 terminals)
@@ -53,29 +95,38 @@ class ConeBridge:
         ]
 
     def _create_variable_devices(self):
-        for group_idx, num_terminals_per_device in enumerate(self.terminal_groups):
-            # Retrieve relevant columns of A
-            device_idxs = self.device_group_map_list[group_idx]
+        for group_idx, device_idxs in enumerate(self.device_group_map_list):
             num_devices = len(device_idxs)
+            if num_devices == 0:
+                continue
 
-            A_devices = self.A[:, device_idxs]
+            A_sub = self.A[:, device_idxs]  # Still sparse representation
+            nnz_per_col = np.diff(A_sub.indptr)
+            # We don't pad to the bin edge, but to the max number of terminals in the bin group
+            k_max = nnz_per_col.max()
 
-            # (i) A_v is a submatrix of A: (num_terminals, num_devices)
-            A_v = A_devices.data.reshape((num_devices, num_terminals_per_device)).T
+            # A_v is a submatrix of A: (num (max) terminals i.e. k_max, num_devices)
+            A_v = np.zeros((k_max, num_devices), dtype=A_sub.data.dtype)
+            terms = -np.ones(
+                (num_devices, k_max), dtype=np.int64
+            )  # We use -1 for padding here (because 0 is an actual terminal)
 
-            # (ii) terminal_device_array: (num_devices, num_terminals_per_device)
-            terminal_device_array = A_devices.indices.reshape(
-                (num_devices, num_terminals_per_device)
-            )
+            # Populate the padded matrix A_v column by column using sparse info from A_sub
+            for j, col_idx in enumerate(range(num_devices)):
+                start, end = A_sub.indptr[j : j + 2]
+                k = end - start  # Number of terminals (non-zero entries) in this column
+                if k == 0:
+                    continue
+                A_v[:k, j] = A_sub.data[start:end]
+                terms[j, :k] = A_sub.indices[start:end]
 
-            # (iii) cost vector (subvector of c taking the corresponding device elements)
-            cost_vector = self.c[device_idxs]
+            cost_vec = self.c[device_idxs]
 
             device = VariableDevice(
                 num_nodes=self.net.num_nodes,
-                terminals=terminal_device_array,
+                terminals=terms,
                 A_v=A_v,
-                cost_vector=cost_vector,
+                cost_vector=cost_vec,
             )
             self.devices.append(device)
 

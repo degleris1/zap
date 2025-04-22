@@ -1,9 +1,13 @@
 import torch
 import numpy as np
 import cvxpy as cp
+import scipy.sparse as sp
+
 from attrs import define
 from typing import List
+from functools import cached_property
 from numpy.typing import NDArray
+from zap.util import infer_machine
 
 from ..devices.abstract import AbstractDevice
 
@@ -25,6 +29,62 @@ class VariableDevice(AbstractDevice):
     @property
     def time_horizon(self) -> int:
         return 1
+
+    @cached_property
+    def incidence_matrix(self):
+        dimensions = (self.num_nodes, self.num_devices)
+
+        matrices = []
+        for terminal_index in range(self.num_terminals_per_device):
+            if len(self.terminals.shape) == 1:
+                rows = self.terminals
+            else:
+                rows = self.terminals[:, terminal_index]
+
+            # We must ignore the -1 padded rows (these are not real terminals)
+            mask = rows >= 0
+            rows = rows[mask]
+            cols = np.flatnonzero(mask)
+            vals = np.ones(len(rows))
+
+            matrices.append(sp.csc_matrix((vals, (rows, cols)), shape=dimensions))
+
+        return matrices
+
+    def torch_terminals(self, time_horizon, machine=None) -> list[torch.Tensor]:
+        machine = infer_machine() if machine is None else machine
+
+        # Effectively caching manually
+        if (
+            hasattr(self, "_torch_terminals")
+            and self._torch_terminal_time_horizon == time_horizon
+            and self._torch_terminal_machine == machine
+        ):
+            return self._torch_terminals
+
+        tt = self.terminals
+        torch_terminals = []
+        if isinstance(tt, np.ndarray):
+            tt = torch.tensor(tt, device=machine)
+
+        if len(self.terminals.shape) == 1:
+            torch_terminals = [tt.reshape(-1, 1).expand(-1, time_horizon)]
+        else:
+            for i in range(self.num_terminals_per_device):
+                rows = tt[:, i]
+                mask = rows >= 0
+                terminal_vector = (
+                    rows.clone().masked_fill(~mask, 0).reshape(-1, 1)
+                )  # Reshape tensor and replace -1 pads with 0
+                torch_terminals.append(
+                    terminal_vector.expand(-1, time_horizon)
+                )  # This won't do anything when time_horizion is just 1
+
+        self._torch_terminals = torch_terminals
+        self._torch_terminal_time_horizon = time_horizon
+        self._torch_terminal_machine = machine
+
+        return torch_terminals
 
     def model_local_variables(self, time_horizon: int) -> List[cp.Variable]:
         return [cp.Variable((self.num_devices, time_horizon))]
@@ -56,7 +116,7 @@ class VariableDevice(AbstractDevice):
         return _admm_prox_update(self.A_v, self.cost_vector, power, rho_power)
 
 
-# @torch.jit.script
+@torch.jit.script
 def _admm_prox_update(A_v, c_bv, power: list[torch.Tensor], rho: float):
     """
     See Overleaf on Conic Translation Sec. 4.1.1 for full details (will update the comments here eventually)
