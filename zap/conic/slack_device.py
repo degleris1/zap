@@ -1,9 +1,12 @@
 import torch
 import numpy as np
 import cvxpy as cp
+import scipy.sparse as sp
 from attrs import define
 from typing import List
 from numpy.typing import NDArray
+from functools import cached_property
+from zap.util import infer_machine
 from attrs import field
 from ..devices.abstract import AbstractDevice, make_dynamic
 
@@ -121,6 +124,64 @@ class SecondOrderConeSlackDevice(SlackDevice):
     Slack device that enforces p_d + b_d in the second order cone.
     """
 
+    terminals_per_device: NDArray
+
+    @cached_property
+    def incidence_matrix(self):
+        dimensions = (self.num_nodes, self.num_devices)
+
+        matrices = []
+        for terminal_index in range(self.num_terminals_per_device):
+            if len(self.terminals.shape) == 1:
+                rows = self.terminals
+            else:
+                rows = self.terminals[:, terminal_index]
+
+            # We must ignore the -1 padded rows (these are not real terminals)
+            mask = rows >= 0
+            rows = rows[mask]
+            cols = np.flatnonzero(mask)
+            vals = np.ones(len(rows))
+
+            matrices.append(sp.csc_matrix((vals, (rows, cols)), shape=dimensions))
+
+        return matrices
+
+    def torch_terminals(self, time_horizon, machine=None) -> list[torch.Tensor]:
+        machine = infer_machine() if machine is None else machine
+
+        # Effectively caching manually
+        if (
+            hasattr(self, "_torch_terminals")
+            and self._torch_terminal_time_horizon == time_horizon
+            and self._torch_terminal_machine == machine
+        ):
+            return self._torch_terminals
+
+        tt = self.terminals
+        torch_terminals = []
+        if isinstance(tt, np.ndarray):
+            tt = torch.tensor(tt, device=machine)
+
+        if len(self.terminals.shape) == 1:
+            torch_terminals = [tt.reshape(-1, 1).expand(-1, time_horizon)]
+        else:
+            for i in range(self.num_terminals_per_device):
+                rows = tt[:, i]
+                mask = rows >= 0
+                terminal_vector = (
+                    rows.clone().masked_fill(~mask, 0).reshape(-1, 1)
+                )  # Reshape tensor and replace -1 pads with 0
+                torch_terminals.append(
+                    terminal_vector.expand(-1, time_horizon)
+                )  # This won't do anything when time_horizion is just 1
+
+        self._torch_terminals = torch_terminals
+        self._torch_terminal_time_horizon = time_horizon
+        self._torch_terminal_machine = machine
+
+        return torch_terminals
+
     def equality_constraints(self, _power, _angle, _local_variables, **kwargs):
         return []
 
@@ -136,11 +197,13 @@ class SecondOrderConeSlackDevice(SlackDevice):
         """
         ADMM projection for second order cone:
         """
-        return _admm_prox_update_soc(power, self.b_d)
+        return _admm_prox_update_soc(power, self.b_d, self.terminals_per_device)
 
 
 @torch.jit.script
-def _admm_prox_update_soc(power: list[torch.Tensor], b_d: torch.Tensor):
+def _admm_prox_update_soc(
+    power: list[torch.Tensor], b_d: torch.Tensor, terminals_per_device: torch.Tensor
+):
     """
     ADMM projection for second order cone:
     See overleaf for details. Variable notation follows the Overleaf.
@@ -150,7 +213,15 @@ def _admm_prox_update_soc(power: list[torch.Tensor], b_d: torch.Tensor):
     s = z + b_d
     k = s[0, :]
     u = s[1:, :]
-    r = torch.norm(u, 2, dim=0)
+
+    # Gets which entries of s are valid (i.e. not padded to 0)
+    # Valid is a boolean of the same shape as s, with True for valid entries
+    # and False for padded entries
+    rows = torch.arange(u.shape[0]).unsqueeze(1)
+    valid = rows < (terminals_per_device - 1).unsqueeze(0)
+
+    u_masked = u * valid
+    r = torch.norm(u_masked, 2, dim=0)
 
     proj = torch.zeros_like(s)
 
@@ -166,7 +237,7 @@ def _admm_prox_update_soc(power: list[torch.Tensor], b_d: torch.Tensor):
     # Case 2: Project onto the boundary
     r_boundary = r[boundary_projection_mask]
     k_boundary = k[boundary_projection_mask]
-    u_boundary = u[:, boundary_projection_mask]
+    u_boundary = u_masked[:, boundary_projection_mask]
 
     scale_factor = (r_boundary + k_boundary) / (2 * r_boundary)
     x_star = scale_factor.unsqueeze(0) * u_boundary

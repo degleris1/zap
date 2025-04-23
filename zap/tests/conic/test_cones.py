@@ -8,6 +8,7 @@ from zap.conic.cone_utils import get_standard_conic_problem
 from zap.tests.conic.examples import (
     create_simple_problem_zero_nonneg_cones,
     create_simple_problem_soc,
+    create_simple_multi_block_problem_soc,
 )
 from zap.importers.toy import load_test_network
 
@@ -114,6 +115,44 @@ class TestConeBridge(unittest.TestCase):
 
     def test_soc_cvxpy(self):
         problem, cone_params = create_simple_problem_soc()
+        problem.solve(solver=cp.CLARABEL)
+        ref_obj = problem.value
+
+        cone_bridge = ConeBridge(cone_params)
+        outcome = cone_bridge.solve()
+
+        self.assertAlmostEqual(
+            outcome.problem.value,
+            ref_obj,
+            delta=TOL,
+            msg=f"CVXPY objective {outcome.problem.value} differs from reference {ref_obj}",
+        )
+
+    def test_multi_block_soc_admm(self):
+        problem, cone_params = create_simple_multi_block_problem_soc()
+        problem.solve(solver=cp.CLARABEL)
+        ref_obj = problem.value
+
+        cone_bridge = ConeBridge(cone_params)
+        machine = "cpu"
+        dtype = torch.float32
+        admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
+        admm = ADMMSolver(
+            machine=machine,
+            dtype=dtype,
+            atol=1e-6,
+            rtol=1e-6,
+        )
+        solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
+        self.assertAlmostEqual(
+            solution_admm.objective,
+            ref_obj,
+            delta=TOL,
+            msg=f"ADMM objective {solution_admm.objective} differs from reference {ref_obj}",
+        )
+
+    def test_multi_block_soc_cvxpy(self):
+        problem, cone_params = create_simple_multi_block_problem_soc()
         problem.solve(solver=cp.CLARABEL)
         ref_obj = problem.value
 

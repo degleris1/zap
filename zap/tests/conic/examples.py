@@ -2,6 +2,7 @@ import numpy as np
 import cvxpy as cp
 import scipy.sparse as sp
 from zap.conic.cone_utils import get_standard_conic_problem
+from experiments.conic_solve.benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
 
 
 def create_simple_problem_zero_nonneg_cones(m=2, n=5, density=0.3, seed=42):
@@ -49,4 +50,13 @@ def create_simple_problem_soc(n=3, m=8, density=0.3, seed=42):
 
     # Convert to conic form
     cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.CLARABEL)
+    return problem, cone_params
+
+
+def create_simple_multi_block_problem_soc():
+    sparse_cone_socp_benchmark = SparseConeBenchmarkSet(num_problems=1, n=15)
+    for i, prob in enumerate(sparse_cone_socp_benchmark):
+        problem = prob
+        cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.CLARABEL)
+
     return problem, cone_params
