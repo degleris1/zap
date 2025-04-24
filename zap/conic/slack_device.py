@@ -217,7 +217,7 @@ def _admm_prox_update_soc(
     # Gets which entries of s are valid (i.e. not padded to 0)
     # Valid is a boolean of the same shape as s, with True for valid entries
     # and False for padded entries
-    rows = torch.arange(u.shape[0]).unsqueeze(1)
+    rows = torch.arange(u.shape[0], device=u.device).unsqueeze(1)
     valid = rows < (terminals_per_device - 1).unsqueeze(0)
 
     u_masked = u * valid
