@@ -1,9 +1,12 @@
 import unittest
 import cvxpy as cp
+import numpy as np
+import numpy.testing as npt
 import torch
 import scs
 from zap.admm import ADMMSolver
 from zap.conic.cone_bridge import ConeBridge
+
 from zap.conic.cone_utils import get_standard_conic_problem
 from zap.tests.conic.examples import (
     create_simple_problem_zero_nonneg_cones,
@@ -24,6 +27,7 @@ class TestConeBridge(unittest.TestCase):
         ref_obj = problem.value
 
         cone_bridge = ConeBridge(cone_params)
+        conic_ruiz_sigma = cone_bridge.sigma
         machine = "cpu"
         dtype = torch.float32
         admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
@@ -35,7 +39,7 @@ class TestConeBridge(unittest.TestCase):
         )
         solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
         self.assertAlmostEqual(
-            solution_admm.objective,
+            solution_admm.objective / (conic_ruiz_sigma**2),
             ref_obj,
             delta=TOL,
             msg=f"ADMM objective {solution_admm.objective} differs from reference {ref_obj}",
@@ -46,10 +50,11 @@ class TestConeBridge(unittest.TestCase):
         problem.solve(solver=cp.CLARABEL)
         ref_obj = problem.value
         cone_bridge = ConeBridge(cone_params)
+        conic_ruiz_sigma = cone_bridge.sigma
         outcome = cone_bridge.solve()
 
         self.assertAlmostEqual(
-            outcome.problem.value,
+            outcome.problem.value / (conic_ruiz_sigma**2),
             ref_obj,
             delta=TOL,
             msg=f"CVXPY objective {outcome.problem.value} differs from reference {ref_obj}",
@@ -70,6 +75,7 @@ class TestConeBridge(unittest.TestCase):
 
         # Build ConeBridge and ADMM solver
         cone_bridge = ConeBridge(cone_params)
+        conic_ruiz_sigma = cone_bridge.sigma
         cone_admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
         cone_admm = ADMMSolver(
             machine=machine,
@@ -83,7 +89,7 @@ class TestConeBridge(unittest.TestCase):
             net=cone_bridge.net, devices=cone_admm_devices, time_horizon=cone_bridge.time_horizon
         )
 
-        pct_diff = abs((solution_admm.objective - ref_obj) / ref_obj)
+        pct_diff = abs((solution_admm.objective / (conic_ruiz_sigma**2) - ref_obj) / ref_obj)
         self.assertLess(
             pct_diff,
             REL_TOL_PCT,
@@ -96,6 +102,7 @@ class TestConeBridge(unittest.TestCase):
         ref_obj = problem.value
 
         cone_bridge = ConeBridge(cone_params)
+        conic_ruiz_sigma = cone_bridge.sigma
         machine = "cpu"
         dtype = torch.float32
         admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
@@ -107,7 +114,7 @@ class TestConeBridge(unittest.TestCase):
         )
         solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
         self.assertAlmostEqual(
-            solution_admm.objective,
+            solution_admm.objective / (conic_ruiz_sigma**2),
             ref_obj,
             delta=TOL,
             msg=f"ADMM objective {solution_admm.objective} differs from reference {ref_obj}",
@@ -119,10 +126,11 @@ class TestConeBridge(unittest.TestCase):
         ref_obj = problem.value
 
         cone_bridge = ConeBridge(cone_params)
+        conic_ruiz_sigma = cone_bridge.sigma
         outcome = cone_bridge.solve()
 
         self.assertAlmostEqual(
-            outcome.problem.value,
+            outcome.problem.value / (conic_ruiz_sigma**2),
             ref_obj,
             delta=TOL,
             msg=f"CVXPY objective {outcome.problem.value} differs from reference {ref_obj}",
@@ -134,6 +142,7 @@ class TestConeBridge(unittest.TestCase):
         ref_obj = problem.value
 
         cone_bridge = ConeBridge(cone_params)
+        conic_ruiz_sigma = cone_bridge.sigma
         machine = "cpu"
         dtype = torch.float32
         admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
@@ -145,7 +154,7 @@ class TestConeBridge(unittest.TestCase):
         )
         solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
         self.assertAlmostEqual(
-            solution_admm.objective,
+            solution_admm.objective / (conic_ruiz_sigma**2),
             ref_obj,
             delta=TOL,
             msg=f"ADMM objective {solution_admm.objective} differs from reference {ref_obj}",
@@ -157,11 +166,33 @@ class TestConeBridge(unittest.TestCase):
         ref_obj = problem.value
 
         cone_bridge = ConeBridge(cone_params)
+        conic_ruiz_sigma = cone_bridge.sigma
         outcome = cone_bridge.solve()
 
         self.assertAlmostEqual(
-            outcome.problem.value,
+            outcome.problem.value / (conic_ruiz_sigma**2),
             ref_obj,
             delta=TOL,
             msg=f"CVXPY objective {outcome.problem.value} differs from reference {ref_obj}",
         )
+
+    def test_ruiz_equilibration(self):
+        problem, cone_params = create_simple_multi_block_problem_soc()
+        A_orig = cone_params["A"]
+        b_orig = cone_params["b"]
+        c_orig = cone_params["c"]
+        cone_bridge = ConeBridge(cone_params, ruiz_iters=25)
+        D_vec = cone_bridge.D_vec
+        E_vec = cone_bridge.E_vec
+        c_hat = cone_bridge.c
+        b_hat = cone_bridge.b
+        A_hat = cone_bridge.A.toarray()
+        sigma = cone_bridge.sigma
+
+        A_hat_recon = np.diag(D_vec) @ A_orig @ np.diag(E_vec)
+        b_hat_recon = sigma * np.diag(D_vec) @ b_orig
+        c_hat_recon = sigma * np.diag(E_vec) @ c_orig
+
+        npt.assert_allclose(A_hat, A_hat_recon)
+        npt.assert_allclose(b_hat, b_hat_recon)
+        npt.assert_allclose(c_hat, c_hat_recon)
