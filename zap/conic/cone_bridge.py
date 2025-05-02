@@ -112,12 +112,23 @@ class ConeBridge:
             # Scaling factor sigma
             # TODO: Change sigma when we support QPs
             c_inf_norm = np.max(np.abs(c))
-            if c_inf_norm == 0:
-                continue
-            sigma = 1 / c_inf_norm
-            sigma = np.clip(sigma, 1e-2 / self.sigma, 1e4 / self.sigma)
-            self.sigma = self.sigma * sigma
-            c = c * sigma
+            sigma_step = 1 / c_inf_norm
+            proposed_sigma = self.sigma * sigma_step
+
+            if proposed_sigma <= 1e-2:
+                sigma_step = 1.0
+            else:
+                proposed_sigma = np.clip(proposed_sigma, None, 1e4)
+                sigma_step = proposed_sigma / self.sigma
+
+            self.sigma *= sigma_step
+            c = c * sigma_step
+            # if c_inf_norm == 0:
+            #     continue
+            # sigma = 1 / c_inf_norm
+            # sigma = np.clip(sigma, 1e-2 / self.sigma, 1e4 / self.sigma)
+            # self.sigma = self.sigma * sigma
+            # c = c * sigma
 
         # Update the cone parameters
         self.A = A

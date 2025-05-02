@@ -7,6 +7,9 @@ import scs
 from zap.admm import ADMMSolver
 from zap.conic.cone_bridge import ConeBridge
 from experiments.conic_solve.benchmarks.max_flow_benchmark import MaxFlowBenchmarkSet
+from experiments.conic_solve.benchmarks.netlib_benchmark import NetlibBenchmarkSet
+from experiments.conic_solve.benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
+
 
 from zap.conic.cone_utils import get_standard_conic_problem
 from zap.tests.conic.examples import (
@@ -201,7 +204,63 @@ class TestConeBridge(unittest.TestCase):
     def test_max_flow(self):
         benchmark = MaxFlowBenchmarkSet(num_problems=1, n=100, base_seed=42)
         for i, prob in enumerate(benchmark):
-            if i == 0:
+            if i == 2:
+                problem = prob
+                cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.CLARABEL)
+        problem.solve(solver=cp.CLARABEL)
+        ref_obj = problem.value
+
+        cone_bridge = ConeBridge(cone_params, ruiz_iters=5)
+        conic_ruiz_sigma = cone_bridge.sigma
+        machine = "cpu"
+        dtype = torch.float32
+        admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
+        admm = ADMMSolver(
+            machine=machine,
+            dtype=dtype,
+            atol=1e-6,
+            rtol=1e-6,
+        )
+        solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
+        self.assertAlmostEqual(
+            solution_admm.objective / (conic_ruiz_sigma),
+            ref_obj,
+            delta=TOL,
+            msg=f"CVXPY objective {solution_admm.objective} differs from reference {ref_obj}",
+        )
+
+    def test_netlib(self):
+        benchmark = NetlibBenchmarkSet(data_dir="data/conic_benchmarks/netlib")
+        for i, prob in enumerate(benchmark):
+            if i == 2:
+                problem = prob
+                cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.CLARABEL)
+        problem.solve(solver=cp.CLARABEL)
+        ref_obj = problem.value
+
+        cone_bridge = ConeBridge(cone_params, ruiz_iters=5)
+        conic_ruiz_sigma = cone_bridge.sigma
+        machine = "cpu"
+        dtype = torch.float32
+        admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
+        admm = ADMMSolver(
+            machine=machine,
+            dtype=dtype,
+            atol=1e-6,
+            rtol=1e-6,
+        )
+        solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
+        self.assertAlmostEqual(
+            solution_admm.objective / (conic_ruiz_sigma),
+            ref_obj,
+            delta=TOL,
+            msg=f"CVXPY objective {solution_admm.objective} differs from reference {ref_obj}",
+        )
+
+    def test_sparse_cone_lp(self):
+        benchmark = SparseConeBenchmarkSet(num_problems=3, n=100, p_f=0.5, p_l=0.5)
+        for i, prob in enumerate(benchmark):
+            if i == 2:
                 problem = prob
                 cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.CLARABEL)
         problem.solve(solver=cp.CLARABEL)
