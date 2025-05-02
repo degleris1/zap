@@ -180,6 +180,7 @@ def solve_admm(problem, solver_args):
     """
     cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.SCS)
     cone_bridge = ConeBridge(cone_params)
+    print("sigma:", cone_bridge.sigma)
     machine = solver_args.get("machine", "cpu")
     dtype = torch.float32
     admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]

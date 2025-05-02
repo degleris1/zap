@@ -57,7 +57,7 @@ class ConeBridge:
 
     def _equilibrate_ruiz(self):
         """
-        Follows Ruiz Equilibration from SCS papers.
+        Follows Ruiz Equilibration from Clarabel and OSQP.
         Builds the symmetric matrix M = [[P, A.T], [A, 0]]
         SCS: https://www.cvxgrp.org/scs/algorithm/equilibration.html, https://github.com/cvxgrp/scs
         """
