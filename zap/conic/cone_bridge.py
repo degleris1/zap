@@ -69,6 +69,7 @@ class ConeBridge:
         m, n = A.shape
         self.D_vec = np.ones(m)
         self.E_vec = np.ones(n)
+        self.sigma = 1
         num_zero_cone = self.K["z"]
         num_nonneg_cone = self.K["l"]
         soc_sizes = self.K.get("q", [])
@@ -108,12 +109,15 @@ class ConeBridge:
 
             A = A_csr.tocsc()
 
-        # Scaling factor sigma
-        c_inf_norm = np.max(np.abs(c))
-        b_inf_norm = np.max(np.abs(b))
-        self.sigma = 1 / np.max([1, c_inf_norm, b_inf_norm])
-        c = self.sigma * c
-        b = self.sigma * b
+            # Scaling factor sigma
+            # TODO: Change sigma when we support QPs
+            c_inf_norm = np.max(np.abs(c))
+            if c_inf_norm == 0:
+                continue
+            sigma = 1 / c_inf_norm
+            sigma = np.clip(sigma, 1e-2 / self.sigma, 1e4 / self.sigma)
+            self.sigma = self.sigma * sigma
+            c = c * sigma
 
         # Update the cone parameters
         self.A = A
