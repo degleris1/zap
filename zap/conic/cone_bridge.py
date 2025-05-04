@@ -9,10 +9,12 @@ from .slack_device import (
     SecondOrderConeSlackDevice,
 )
 from scipy.sparse import csc_matrix, isspmatrix_csc
+from zap.conic.cone_utils import build_symmetric_M, scale_cols_csc, scale_rows_csr
+from copy import deepcopy
 
 
 class ConeBridge:
-    def __init__(self, cone_params: dict, grouping_params: dict | None = None):
+    def __init__(self, cone_params: dict, grouping_params: dict | None = None, ruiz_iters: int = 5):
         self.A = cone_params["A"]
         self.b = cone_params["b"]
         self.c = cone_params["c"]
@@ -20,6 +22,11 @@ class ConeBridge:
         self.net = None
         self.time_horizon = 1
         self.devices = []
+
+        self.ruiz_iters = ruiz_iters
+        self.D_vec = None
+        self.E_vec = None
+        self.sigma = 1
 
         if not isspmatrix_csc(self.A):
             self.A = csc_matrix(self.A)
@@ -40,11 +47,87 @@ class ConeBridge:
         self._transform()
 
     def _transform(self):
+        if self.ruiz_iters > 0:
+            self._equilibrate_ruiz()
         self._build_network()
         self._group_variable_devices()
         self._create_variable_devices()
         self._group_slack_devices()
         self._create_slack_devices()
+
+    def _equilibrate_ruiz(self):
+        """
+        Follows Ruiz Equilibration from Clarabel and OSQP.
+        Builds the symmetric matrix M = [[P, A.T], [A, 0]]
+        SCS: https://www.cvxgrp.org/scs/algorithm/equilibration.html, https://github.com/cvxgrp/scs
+        """
+        ## TODO: This function needs to change when we add QP support
+        A = deepcopy(self.A)
+        c = deepcopy(self.c)
+        b = deepcopy(self.b)
+
+        m, n = A.shape
+        self.D_vec = np.ones(m)
+        self.E_vec = np.ones(n)
+        self.sigma = 1
+        num_zero_cone = self.K["z"]
+        num_nonneg_cone = self.K["l"]
+        soc_sizes = self.K.get("q", [])
+        soc_starts = np.cumsum([0] + soc_sizes[:-1]) + (num_zero_cone + num_nonneg_cone)
+
+        for i in range(self.ruiz_iters):
+            # Compute scale factors
+            M = build_symmetric_M(A_csc=A, P=None)
+            col_inf_norms = np.abs(M).max(axis=0).toarray().ravel()
+            delta = np.ones_like(col_inf_norms)
+            delta[col_inf_norms > 0] = 1 / np.sqrt(col_inf_norms[col_inf_norms > 0])
+            delta_cols = delta[:n]
+            delta_rows = delta[n:]
+
+            # Column scaling as part of M equilibration
+            c = delta_cols * c
+            self.E_vec = self.E_vec * delta_cols
+            A = scale_cols_csc(A, delta_cols)
+
+            # Row scaling as part of M equilibration
+            b = delta_rows * b
+            self.D_vec = self.D_vec * delta_rows
+            A_csr = A.tocsr()
+            A_csr = scale_rows_csr(A_csr, delta_rows)
+
+            # Preserve cone membership
+            for s, sz in zip(soc_starts, soc_sizes):
+                block_idxs = slice(s, s + sz)
+                g = np.exp(np.mean(np.log(self.D_vec[block_idxs])))
+                correction_factors = np.ones(m)
+                correction_factors[block_idxs] = g / self.D_vec[block_idxs]
+
+                if not np.allclose(correction_factors, 1):
+                    A_csr = scale_rows_csr(A_csr, correction_factors)
+                    b = b * correction_factors
+                    self.D_vec[block_idxs] = g
+
+            A = A_csr.tocsc()
+
+            # Scaling factor sigma
+            # TODO: Change sigma when we support QPs
+            c_inf_norm = np.max(np.abs(c))
+            sigma_step = 1 / c_inf_norm
+            proposed_sigma = self.sigma * sigma_step
+
+            if proposed_sigma <= 1e-2:
+                sigma_step = 1.0
+            else:
+                proposed_sigma = np.clip(proposed_sigma, None, 1e4)
+                sigma_step = proposed_sigma / self.sigma
+
+            self.sigma *= sigma_step
+            c = c * sigma_step
+
+        # Update the cone parameters
+        self.A = A
+        self.b = b
+        self.c = c
 
     def _build_network(self):
         self.net = PowerNetwork(self.A.shape[0])

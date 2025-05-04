@@ -5,19 +5,17 @@ import yaml
 import cvxpy as cp
 import sys
 import zap
+import torch
 from copy import deepcopy
+from zap.conic.cone_bridge import ConeBridge
+from zap.admm import ADMMSolver
+from zap.conic.cone_utils import get_standard_conic_problem
 from benchmarks.maros_benchmark import MarosBenchmarkSet
 from benchmarks.netlib_benchmark import NetlibBenchmarkSet
 from benchmarks.lasso_benchmark import LassoBenchmarkSet
 from pathlib import Path
 from benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
 from benchmarks.max_flow_benchmark import MaxFlowBenchmarkSet
-from zap.conic.cone_utils import (
-    solve_admm,
-    solve_cuclarabel,
-    solve_cuosqp,
-    solve_cupdlp,
-)
 
 # Reference from .yaml type to get the right class
 BENCHMARK_CLASSES = {
@@ -173,6 +171,51 @@ def run_benchmarks(config: dict):
             )
             all_results.extend(res)
     return all_results
+
+
+# Zap
+def solve_admm(problem, solver_args):
+    """
+    Call conic zap on a CVXPY problem.
+    """
+    cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.SCS)
+    cone_bridge = ConeBridge(cone_params)
+    print("sigma:", cone_bridge.sigma)
+    machine = solver_args.get("machine", "cpu")
+    dtype = torch.float32
+    admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
+    admm = ADMMSolver(**solver_args)
+    start_time = time.time()
+    solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
+    end_time = time.time()
+    pobj = solution_admm.objective
+    solve_time = end_time - start_time
+
+    return pobj, solve_time
+
+
+# CuClarabel
+def solve_cuclarabel(problem, solver_args):
+    """
+    Call CuClarabel on a CVXPY problem.
+    """
+    raise NotImplementedError
+
+
+# CuOSQP
+def solve_cuosqp(problem, solver_args):
+    """
+    Call CuOSQP on a CVXPY problem.
+    """
+    raise NotImplementedError
+
+
+# CuPDLP
+def solve_cupdlp(problem, solver_args):
+    """
+    Call CuPDLP on a CVXPY problem.
+    """
+    raise NotImplementedError
 
 
 def write_results_to_csv(results, output_file: str):

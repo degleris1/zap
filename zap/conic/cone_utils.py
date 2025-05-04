@@ -1,13 +1,11 @@
 import numpy as np
 import cvxpy as cp
+import scipy.sparse as sp
 import torch
-import time
 import json
 from zap.conic.variable_device import VariableDevice
 from zap.conic.slack_device import SecondOrderConeSlackDevice
 from cvxpy.reductions.dcp2cone.dcp2cone import Dcp2Cone
-from zap.conic.cone_bridge import ConeBridge
-from zap.admm import ADMMSolver
 from scipy.sparse.linalg import svds
 
 
@@ -133,49 +131,34 @@ def estimate_condition_number_sparse(A, fallback_tol=1e-12):
         return sigma_max / approx_sigma_min
 
 
-### Calling Custom Solvers (i.e. anything not via CVXPY, basically GPU accelerated solvers) ###
-#######
-
-
-# Zap
-def solve_admm(problem, solver_args):
+### Utilities to Perform Ruiz Equilibration ###
+def build_symmetric_M(A_csc: sp.csc_matrix, P: sp.csc_matrix | None = None) -> sp.csc_matrix:
     """
-    Call conic zap on a CVXPY problem.
+    Build the symmetric matrix M = [[P, A.T], [A, 0]]
     """
-    cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.SCS)
-    cone_bridge = ConeBridge(cone_params)
-    machine = solver_args.get("machine", "cpu")
-    dtype = torch.float32
-    admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
-    admm = ADMMSolver(**solver_args)
-    start_time = time.time()
-    solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
-    end_time = time.time()
-    pobj = solution_admm.objective
-    solve_time = end_time - start_time
-
-    return pobj, solve_time
+    m, n = A_csc.shape
+    if P is None:
+        P = sp.csc_matrix((n, n))
+    zero_block = sp.csc_matrix((m, m))
+    M = sp.bmat([[P, A_csc.T], [A_csc, zero_block]], format="csc")
+    return M
 
 
-# CuClarabel
-def solve_cuclarabel(problem, solver_args):
+def scale_cols_csc(A_csc: sp.csc_matrix, scale: np.ndarray):
     """
-    Call CuClarabel on a CVXPY problem.
+    This is an efficient way to do A@E where E is a diagonal matrix
+    (i.e. E = diag(scale)).
     """
-    raise NotImplementedError
+    A_csc.data *= np.repeat(scale, np.diff(A_csc.indptr))
+
+    return A_csc
 
 
-# CuOSQP
-def solve_cuosqp(problem, solver_args):
+def scale_rows_csr(A_csr: sp.csr_matrix, scale: np.ndarray):
     """
-    Call CuOSQP on a CVXPY problem.
+    This is an efficient way to do D@A where D is a diagonal matrix.
+    (i.e. D = diag(scale)).
     """
-    raise NotImplementedError
+    A_csr.data *= np.repeat(scale, np.diff(A_csr.indptr))
 
-
-# CuPDLP
-def solve_cupdlp(problem, solver_args):
-    """
-    Call CuPDLP on a CVXPY problem.
-    """
-    raise NotImplementedError
+    return A_csr
