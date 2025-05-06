@@ -3,7 +3,7 @@
 import zap.devices.dual
 
 from zap.devices.abstract import AbstractDevice
-from zap.devices.injector import Injector, Generator, Load
+from zap.devices.injector import Injector, Generator, Load, DataCenterLoad
 from zap.devices.store import Battery
 from zap.devices.transporter import DCLine, ACLine
 from zap.devices.ground import Ground
