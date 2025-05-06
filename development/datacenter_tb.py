@@ -82,6 +82,47 @@ def _(dc_cap0, dc_profile, outcome):
 
 
 @app.cell
+def _(T, cp, dc_cap0, devices, net, np, zap):
+    ## Try to write a simple exmaple of a planning problem 
+    xstar = zap.DispatchLayer(
+        net,
+        devices,
+        parameter_names={"dc_capacity": (0, "nominal_capacity")},
+        time_horizon=T,
+        solver=cp.CLARABEL,
+    ) # Constuct a DispatchLayer
+
+    eta = {"dc_capacity": np.array(dc_cap0)} # Parameter
+
+    op_obj  = zap.planning.DispatchCostObjective(net, devices)
+    inv_obj = zap.planning.InvestmentObjective(devices, xstar)
+
+    P = zap.planning.PlanningProblem(
+        operation_objective=op_obj,
+        investment_objective=inv_obj,
+        layer=xstar
+    )
+
+    # Add in simplex constraint
+    P.extra_projections = {
+        'dc_capacity': zap.planning.SimplexBudgetProjection(budget=4, strict=True)
+    }
+
+
+    cost = P(**eta, requires_grad=True)
+    grad = P.backward()
+
+    state = P.solve(num_iterations=50)
+    return P, cost, eta, grad, inv_obj, op_obj, state, xstar
+
+
+@app.cell
+def _(state):
+    state
+    return
+
+
+@app.cell
 def _():
     return
 
