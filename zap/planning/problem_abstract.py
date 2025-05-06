@@ -23,12 +23,14 @@ class AbstractPlanningProblem:
         layer: DispatchLayer,
         lower_bounds: dict = None,
         upper_bounds: dict = None,
+        extra_projections: dict[str, callable] = None,
     ):
         self.operation_objective = operation_objective
         self.investment_objective = investment_objective
         self.layer = layer
         self.lower_bounds = lower_bounds
         self.upper_bounds = upper_bounds
+        self.extra_projections = extra_projections
 
         if self.lower_bounds is None:
             self.lower_bounds = {
@@ -233,6 +235,11 @@ class AbstractPlanningProblem:
             state[param] = self.la.clip(
                 state[param], self.lower_bounds[param], self.upper_bounds[param]
             )
+        # Perform extra projections (like simplex budget projection)
+        proj = getattr(self, "extra_projections", {}).get(param)
+        if proj is not None:
+            state[param] = proj(state[param])
+            return state
         return state
 
     def get_state(self):
