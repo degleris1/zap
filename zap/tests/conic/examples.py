@@ -5,7 +5,7 @@ from zap.conic.cone_utils import get_standard_conic_problem
 from experiments.conic_solve.benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
 
 
-def create_simple_problem_zero_nonneg_cones(m=2, n=5, density=0.3, seed=42):
+def create_simple_problem_zero_nonneg_cones(m=2, n=5, density=0.3, seed=42, quad_obj=False):
     """
     This problem has only zero and nonnegative cone constraints.
     """
@@ -17,7 +17,12 @@ def create_simple_problem_zero_nonneg_cones(m=2, n=5, density=0.3, seed=42):
     x = cp.Variable(n)
     s = cp.Variable(m)
     constraints = [A @ x + s == b, s >= 0, x >= -5, x <= 5]
-    objective = cp.Minimize(c.T @ x)
+    if quad_obj:
+        L = np.random.randn(n, n)
+        P = L.T @ L
+        objective = cp.Minimize(0.5 * cp.quad_form(x, P) + c.T @ x)
+    else:
+        objective = cp.Minimize(c.T @ x)
     problem = cp.Problem(objective, constraints)
 
     # Convert to conic form

@@ -4,16 +4,21 @@ import scipy.sparse as sp
 import torch
 import json
 from zap.conic.variable_device import VariableDevice
-from zap.conic.slack_device import SecondOrderConeSlackDevice
-from cvxpy.reductions.dcp2cone.dcp2cone import Dcp2Cone
+from zap.conic.slack_device import (
+    SecondOrderConeSlackDevice,
+    ZeroConeSlackDevice,
+    NonNegativeConeSlackDevice,
+)
+from zap.conic.quadratic_device import QuadraticDevice
 from scipy.sparse.linalg import svds
 
 
-def get_standard_conic_problem(problem, solver=cp.SCS):
-    reducer = Dcp2Cone(problem=problem, quad_obj=False)
-    conic_problem, _ = reducer.apply(problem)
-    probdata, _, _ = conic_problem.get_problem_data(solver)
+def get_standard_conic_problem(problem, solver=cp.CLARABEL):
+    # reducer = Dcp2Cone(problem=problem, quad_obj=False)
+    # conic_problem, _ = reducer.apply(problem)
+    probdata, _, _ = problem.get_problem_data(solver)
     data = {
+        "P": probdata.get("P", None),
         "A": probdata["A"],
         "b": probdata["b"],
         "c": probdata["c"],
@@ -27,6 +32,7 @@ def get_standard_conic_problem(problem, solver=cp.SCS):
         "s": cone_dims.psd,
     }
     cone_params = {
+        "P": probdata.get("P", None),
         "A": probdata["A"],
         "b": probdata["b"],
         "c": probdata["c"],
@@ -42,6 +48,7 @@ def get_conic_solution(solution, cone_bridge):
     """
     x = []
     s = []
+    y = []
     for idx, device in enumerate(cone_bridge.devices):
         # Parse Variable Devices
         if type(device) is VariableDevice:
@@ -60,11 +67,17 @@ def get_conic_solution(solution, cone_bridge):
 
             s.extend(soc_slacks + device.b_d.flatten())
         # Parse Zero Cone and Nonnegative Slacks
-        else:
+        elif type(device) in [ZeroConeSlackDevice, NonNegativeConeSlackDevice]:
             cone_slacks = solution.power[idx][0].flatten()
             s.extend(cone_slacks + device.b_d.flatten())
 
-    return x, s
+        elif type(device) is QuadraticDevice:
+            # Parse Quadratic Device
+            tesnor_list = [t.squeeze() for t in solution.power[idx]]
+            p_tensor = torch.stack(tesnor_list, dim=0).flatten()
+            y.extend(p_tensor.tolist())
+
+    return x, s, y
 
 
 def get_problem_structure(problem):

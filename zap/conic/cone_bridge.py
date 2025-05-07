@@ -1,5 +1,7 @@
 import numpy as np
 import cvxpy as cp
+import scipy.sparse as sp
+import sksparse.cholmod as cholmod
 
 from zap.network import PowerNetwork
 from .variable_device import VariableDevice
@@ -8,17 +10,20 @@ from .slack_device import (
     NonNegativeConeSlackDevice,
     SecondOrderConeSlackDevice,
 )
-from scipy.sparse import csc_matrix, isspmatrix_csc
+from .quadratic_device import QuadraticDevice
+from scipy.sparse import csc_matrix, isspmatrix_csc, vstack
 from zap.conic.cone_utils import build_symmetric_M, scale_cols_csc, scale_rows_csr
 from copy import deepcopy
 
 
 class ConeBridge:
-    def __init__(self, cone_params: dict, grouping_params: dict | None = None, ruiz_iters: int = 5):
+    def __init__(self, cone_params: dict, grouping_params: dict | None = None, ruiz_iters: int = 0):
+        self.P = cone_params["P"]
         self.A = cone_params["A"]
         self.b = cone_params["b"]
         self.c = cone_params["c"]
         self.K = cone_params["K"]
+        self.G = self.A
         self.net = None
         self.time_horizon = 1
         self.devices = []
@@ -30,6 +35,9 @@ class ConeBridge:
 
         if not isspmatrix_csc(self.A):
             self.A = csc_matrix(self.A)
+
+        if self.P is not None and not isspmatrix_csc(self.P):
+            self.P = csc_matrix(self.P)
 
         grouping_params = grouping_params or {}
         self.variable_grouping_strategy = grouping_params.get(
@@ -47,6 +55,8 @@ class ConeBridge:
         self._transform()
 
     def _transform(self):
+        # Conic QP
+        self._factorize_P()
         if self.ruiz_iters > 0:
             self._equilibrate_ruiz()
         self._build_network()
@@ -54,6 +64,40 @@ class ConeBridge:
         self._create_variable_devices()
         self._group_slack_devices()
         self._create_slack_devices()
+        self._create_quadratic_devices()
+
+    def _factorize_P(self):
+        """
+        Sparse LDLT factorization of P.
+        First permutes P by a permutation matrix Q and then computes LDL.T.
+        Also returns permutation of A, c, and forms the stacked network matrix G = [A;B]
+        """
+        if self.P is None:
+            self.Q = None
+            self.G = self.A
+            return
+
+        # Perform sparse LDLT factorization after adding epsilon to ensure positive definiteness
+        n = self.P.shape[0]
+        factor = cholmod.cholesky(
+            self.P + 1e-12 * sp.eye(n, format="csc"), mode="simplicial", ordering_method="amd"
+        )
+        self.Q = factor.P()
+        L, D = factor.L_D()
+
+        # Permute A and c
+        self.A = self.A[:, self.Q]  # A_perm = AQ.T
+        self.c = self.c[self.Q]  # c_perm = Qc
+
+        # Construct B
+        sqrtD = np.sqrt(D.diagonal())
+        L_T_csr = L.T.tocsr()
+        B = scale_rows_csr(L_T_csr, sqrtD)
+        nz_rows = np.nonzero(sqrtD > 0)[0]
+        self.B = (B[nz_rows, :]).tocsc()
+
+        # Construct G
+        self.G = vstack([self.A, self.B], format="csc")
 
     def _equilibrate_ruiz(self):
         """
@@ -130,7 +174,7 @@ class ConeBridge:
         self.c = c
 
     def _build_network(self):
-        self.net = PowerNetwork(self.A.shape[0])
+        self.net = PowerNetwork(self.G.shape[0])
 
     def _group_variable_devices(self):
         """
@@ -150,7 +194,7 @@ class ConeBridge:
         self.device_group_map_list = []
         self.terminal_groups = []
 
-        num_terminals_per_device_list = np.diff(self.A.indptr)
+        num_terminals_per_device_list = np.diff(self.G.indptr)
         positive_mask = num_terminals_per_device_list > 0
         filtered_counts = num_terminals_per_device_list[positive_mask]
         device_idxs = np.nonzero(positive_mask)[0]
@@ -177,7 +221,7 @@ class ConeBridge:
         - Group 2: 4 devices with 3 terminals
         Importantly, assigns self.terminal_grupps and self.device_group_map_list
         """
-        num_terminals_per_device_list = np.diff(self.A.indptr)
+        num_terminals_per_device_list = np.diff(self.G.indptr)
 
         # Tells you what are the distinct number of terminals a device could have (ignore devices with 0 terminals)
         filtered_counts = num_terminals_per_device_list[num_terminals_per_device_list > 0]
@@ -194,7 +238,7 @@ class ConeBridge:
             if num_devices == 0:
                 continue
 
-            A_sub = self.A[:, device_idxs]  # Still sparse representation
+            A_sub = self.G[:, device_idxs]  # Still sparse representation
             nnz_per_col = np.diff(A_sub.indptr)
             # We don't pad to the bin edge, but to the max number of terminals in the bin group
             k_max = nnz_per_col.max()
@@ -344,6 +388,17 @@ class ConeBridge:
                 terminals_per_device=np.array([k for _, _, k in bin_blocks]),
             )
             self.devices.append(soc_cone_device)
+
+    def _create_quadratic_devices(self):
+        if self.P is None:
+            return
+        self.quadratic_indices = np.arange(len(self.b), self.G.shape[0])
+        quadratic_device = QuadraticDevice(
+            num_nodes=self.net.num_nodes,
+            terminals=np.array(self.quadratic_indices),
+        )
+
+        self.devices.append(quadratic_device)
 
     def solve(self, solver=cp.CLARABEL, **kwargs):
         return self.net.dispatch(
