@@ -12,12 +12,17 @@ from .slack_device import (
 )
 from .quadratic_device import QuadraticDevice
 from scipy.sparse import csc_matrix, isspmatrix_csc, vstack
-from zap.conic.cone_utils import build_symmetric_M, scale_cols_csc, scale_rows_csr
+from zap.conic.cone_utils import (
+    build_symmetric_M,
+    scale_cols_csc,
+    scale_rows_csr,
+    mean_column_inf_norm,
+)
 from copy import deepcopy
 
 
 class ConeBridge:
-    def __init__(self, cone_params: dict, grouping_params: dict | None = None, ruiz_iters: int = 0):
+    def __init__(self, cone_params: dict, grouping_params: dict | None = None, ruiz_iters: int = 5):
         self.P = cone_params["P"]
         self.A = cone_params["A"]
         self.b = cone_params["b"]
@@ -55,10 +60,9 @@ class ConeBridge:
         self._transform()
 
     def _transform(self):
-        # Conic QP
-        self._factorize_P()
         if self.ruiz_iters > 0:
             self._equilibrate_ruiz()
+        self._factorize_P()
         self._build_network()
         self._group_variable_devices()
         self._create_variable_devices()
@@ -97,15 +101,14 @@ class ConeBridge:
         self.B = (B[nz_rows, :]).tocsc()
 
         # Construct G
-        self.G = vstack([self.A, self.B], format="csc")
+        self.G = vstack([self.A, -1 * self.B], format="csc")
 
     def _equilibrate_ruiz(self):
         """
         Follows Ruiz Equilibration from Clarabel and OSQP.
         Builds the symmetric matrix M = [[P, A.T], [A, 0]]
-        SCS: https://www.cvxgrp.org/scs/algorithm/equilibration.html, https://github.com/cvxgrp/scs
         """
-        ## TODO: This function needs to change when we add QP support
+        P = deepcopy(self.P)
         A = deepcopy(self.A)
         c = deepcopy(self.c)
         b = deepcopy(self.b)
@@ -121,7 +124,7 @@ class ConeBridge:
 
         for i in range(self.ruiz_iters):
             # Compute scale factors
-            M = build_symmetric_M(A_csc=A, P=None)
+            M = build_symmetric_M(A_csc=A, P=P)
             col_inf_norms = np.abs(M).max(axis=0).toarray().ravel()
             delta = np.ones_like(col_inf_norms)
             delta[col_inf_norms > 0] = 1 / np.sqrt(col_inf_norms[col_inf_norms > 0])
@@ -153,10 +156,17 @@ class ConeBridge:
 
             A = A_csr.tocsc()
 
-            # Scaling factor sigma
-            # TODO: Change sigma when we support QPs
+            # Scaling factor sigma and P updates
+            if P is not None:
+                P_csr = scale_rows_csr(P.tocsr(), delta_cols)
+                P = scale_cols_csc(P_csr.tocsc(), delta_cols)
+                P_inf_norm_mean = np.abs(P).max(axis=0).mean()
+
+            else:
+                P_inf_norm_mean = -np.inf
+
             c_inf_norm = np.max(np.abs(c))
-            sigma_step = 1 / c_inf_norm
+            sigma_step = 1 / max(c_inf_norm, P_inf_norm_mean)
             proposed_sigma = self.sigma * sigma_step
 
             if proposed_sigma <= 1e-2:
@@ -167,8 +177,11 @@ class ConeBridge:
 
             self.sigma *= sigma_step
             c = c * sigma_step
+            if P is not None:
+                P = P * sigma_step
 
         # Update the cone parameters
+        self.P = P
         self.A = A
         self.b = b
         self.c = c

@@ -238,7 +238,7 @@ class TestConeBridge(unittest.TestCase):
         problem.solve(solver=cp.CLARABEL)
         ref_obj = problem.value
 
-        cone_bridge = ConeBridge(cone_params, ruiz_iters=0)
+        cone_bridge = ConeBridge(cone_params, ruiz_iters=5)
         conic_ruiz_sigma = cone_bridge.sigma
         machine = "cpu"
         dtype = torch.float32
@@ -290,7 +290,7 @@ class TestConeBridge(unittest.TestCase):
         problem.solve(solver=cp.CLARABEL)
         ref_obj = problem.value
 
-        cone_bridge = ConeBridge(cone_params, ruiz_iters=0)
+        cone_bridge = ConeBridge(cone_params, ruiz_iters=5)
         conic_ruiz_sigma = cone_bridge.sigma
         machine = "cpu"
         dtype = torch.float32
@@ -314,7 +314,7 @@ class TestConeBridge(unittest.TestCase):
         problem.solve(solver=cp.CLARABEL)
         ref_obj = problem.value
 
-        cone_bridge = ConeBridge(cone_params, ruiz_iters=0)
+        cone_bridge = ConeBridge(cone_params, ruiz_iters=5)
         conic_ruiz_sigma = cone_bridge.sigma
         outcome = cone_bridge.solve()
 
