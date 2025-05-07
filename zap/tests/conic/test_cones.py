@@ -232,7 +232,7 @@ class TestConeBridge(unittest.TestCase):
     def test_netlib(self):
         benchmark = NetlibBenchmarkSet(data_dir="data/conic_benchmarks/netlib")
         for i, prob in enumerate(benchmark):
-            if i == 2:
+            if i == 0:
                 problem = prob
                 cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.CLARABEL)
         problem.solve(solver=cp.CLARABEL)
@@ -250,11 +250,11 @@ class TestConeBridge(unittest.TestCase):
             rtol=1e-6,
         )
         solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
-        self.assertAlmostEqual(
-            solution_admm.objective / (conic_ruiz_sigma),
-            ref_obj,
-            delta=TOL,
-            msg=f"CVXPY objective {solution_admm.objective} differs from reference {ref_obj}",
+        pct_diff = abs((solution_admm.objective / (conic_ruiz_sigma) - ref_obj) / ref_obj)
+        self.assertLess(
+            pct_diff,
+            REL_TOL_PCT,
+            msg=f"ADMM objective {solution_admm.objective / (conic_ruiz_sigma)} differs from reference objective {ref_obj} by more than {REL_TOL_PCT * 100:.2f}%",
         )
 
     def test_sparse_cone_lp(self):
@@ -266,7 +266,7 @@ class TestConeBridge(unittest.TestCase):
         problem.solve(solver=cp.CLARABEL)
         ref_obj = problem.value
 
-        cone_bridge = ConeBridge(cone_params, ruiz_iters=0)
+        cone_bridge = ConeBridge(cone_params, ruiz_iters=5)
         conic_ruiz_sigma = cone_bridge.sigma
         machine = "cpu"
         dtype = torch.float32
