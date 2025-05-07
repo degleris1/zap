@@ -20,6 +20,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # Install system dependencies
+      - name: Install SuiteSparse
+        run: sudo apt-get update && sudo apt-get install -y libsuitesparse-dev
       - name: Setup Poetry
         uses: snok/install-poetry@v1
       - name: Install Dependencies
