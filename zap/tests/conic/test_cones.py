@@ -11,7 +11,7 @@ from experiments.conic_solve.benchmarks.netlib_benchmark import NetlibBenchmarkS
 from experiments.conic_solve.benchmarks.sparse_cone_benchmark import SparseConeBenchmarkSet
 
 
-from zap.conic.cone_utils import get_standard_conic_problem
+from zap.conic.cone_utils import get_standard_conic_problem, get_conic_solution
 from zap.tests.conic.examples import (
     create_simple_problem_zero_nonneg_cones,
     create_simple_problem_soc,
@@ -204,7 +204,7 @@ class TestConeBridge(unittest.TestCase):
     def test_max_flow(self):
         benchmark = MaxFlowBenchmarkSet(num_problems=1, n=100, base_seed=42)
         for i, prob in enumerate(benchmark):
-            if i == 2:
+            if i == 0:
                 problem = prob
                 cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.CLARABEL)
         problem.solve(solver=cp.CLARABEL)
@@ -232,7 +232,7 @@ class TestConeBridge(unittest.TestCase):
     def test_netlib(self):
         benchmark = NetlibBenchmarkSet(data_dir="data/conic_benchmarks/netlib")
         for i, prob in enumerate(benchmark):
-            if i == 2:
+            if i == 0:
                 problem = prob
                 cone_params, _, _ = get_standard_conic_problem(problem, solver=cp.CLARABEL)
         problem.solve(solver=cp.CLARABEL)
@@ -250,11 +250,11 @@ class TestConeBridge(unittest.TestCase):
             rtol=1e-6,
         )
         solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
-        self.assertAlmostEqual(
-            solution_admm.objective / (conic_ruiz_sigma),
-            ref_obj,
-            delta=TOL,
-            msg=f"CVXPY objective {solution_admm.objective} differs from reference {ref_obj}",
+        pct_diff = abs((solution_admm.objective / (conic_ruiz_sigma) - ref_obj) / ref_obj)
+        self.assertLess(
+            pct_diff,
+            REL_TOL_PCT,
+            msg=f"ADMM objective {solution_admm.objective / (conic_ruiz_sigma)} differs from reference objective {ref_obj} by more than {REL_TOL_PCT * 100:.2f}%",
         )
 
     def test_sparse_cone_lp(self):
@@ -283,4 +283,44 @@ class TestConeBridge(unittest.TestCase):
             ref_obj,
             delta=TOL,
             msg=f"CVXPY objective {solution_admm.objective} differs from reference {ref_obj}",
+        )
+
+    def test_conic_qp_admm(self):
+        problem, cone_params = create_simple_problem_zero_nonneg_cones(quad_obj=True)
+        problem.solve(solver=cp.CLARABEL)
+        ref_obj = problem.value
+
+        cone_bridge = ConeBridge(cone_params, ruiz_iters=5)
+        conic_ruiz_sigma = cone_bridge.sigma
+        machine = "cpu"
+        dtype = torch.float32
+        admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in cone_bridge.devices]
+        admm = ADMMSolver(
+            machine=machine,
+            dtype=dtype,
+            atol=1e-6,
+            rtol=1e-6,
+        )
+        solution_admm, _ = admm.solve(cone_bridge.net, admm_devices, cone_bridge.time_horizon)
+        self.assertAlmostEqual(
+            solution_admm.objective / (conic_ruiz_sigma),
+            ref_obj,
+            delta=TOL,
+            msg=f"ADMM objective {solution_admm.objective} differs from reference {ref_obj}",
+        )
+
+    def test_conic_qp_cvxpy(self):
+        problem, cone_params = create_simple_problem_zero_nonneg_cones(quad_obj=True)
+        problem.solve(solver=cp.CLARABEL)
+        ref_obj = problem.value
+
+        cone_bridge = ConeBridge(cone_params, ruiz_iters=5)
+        conic_ruiz_sigma = cone_bridge.sigma
+        outcome = cone_bridge.solve()
+
+        self.assertAlmostEqual(
+            outcome.problem.value / (conic_ruiz_sigma),
+            ref_obj,
+            delta=TOL,
+            msg=f"CVXPY objective {outcome.problem.value} differs from reference {ref_obj}",
         )

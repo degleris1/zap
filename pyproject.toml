@@ -21,10 +21,12 @@ attrs = "^24.2.0"
 marimo = "^0.11.21"
 cvxpy = "^1.6.4"
 ortools = "9.11.4210"
+scikit-sparse = { version = "^0.4.16", optional = true }
 
 [tool.poetry.extras]
 pypsa = ["pypsa"]
 mkl = ["sparse-dot-mkl"]
+cholmod = ["scikit-sparse"]
 
 [tool.poetry.group.dev.dependencies]
 matplotlib = "^3.9.2"

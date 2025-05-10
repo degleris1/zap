@@ -1,5 +1,7 @@
 import numpy as np
 import cvxpy as cp
+import scipy.sparse as sp
+import sksparse.cholmod as cholmod
 
 from zap.network import PowerNetwork
 from .variable_device import VariableDevice
@@ -8,17 +10,24 @@ from .slack_device import (
     NonNegativeConeSlackDevice,
     SecondOrderConeSlackDevice,
 )
-from scipy.sparse import csc_matrix, isspmatrix_csc
-from zap.conic.cone_utils import build_symmetric_M, scale_cols_csc, scale_rows_csr
+from .quadratic_device import QuadraticDevice
+from scipy.sparse import csc_matrix, isspmatrix_csc, vstack
+from zap.conic.cone_utils import (
+    build_symmetric_M,
+    scale_cols_csc,
+    scale_rows_csr,
+)
 from copy import deepcopy
 
 
 class ConeBridge:
     def __init__(self, cone_params: dict, grouping_params: dict | None = None, ruiz_iters: int = 5):
+        self.P = cone_params["P"]
         self.A = cone_params["A"]
         self.b = cone_params["b"]
         self.c = cone_params["c"]
         self.K = cone_params["K"]
+        self.G = self.A
         self.net = None
         self.time_horizon = 1
         self.devices = []
@@ -30,6 +39,9 @@ class ConeBridge:
 
         if not isspmatrix_csc(self.A):
             self.A = csc_matrix(self.A)
+
+        if self.P is not None and not isspmatrix_csc(self.P):
+            self.P = csc_matrix(self.P)
 
         grouping_params = grouping_params or {}
         self.variable_grouping_strategy = grouping_params.get(
@@ -49,19 +61,53 @@ class ConeBridge:
     def _transform(self):
         if self.ruiz_iters > 0:
             self._equilibrate_ruiz()
+        self._factorize_P()
         self._build_network()
         self._group_variable_devices()
         self._create_variable_devices()
         self._group_slack_devices()
         self._create_slack_devices()
+        self._create_quadratic_devices()
+
+    def _factorize_P(self):
+        """
+        Sparse LDLT factorization of P.
+        First permutes P by a permutation matrix Q and then computes LDL.T.
+        Also returns permutation of A, c, and forms the stacked network matrix G = [A;B]
+        """
+        if self.P is None:
+            self.Q = None
+            self.G = self.A
+            return
+
+        # Perform sparse LDLT factorization after adding epsilon to ensure positive definiteness
+        n = self.P.shape[0]
+        factor = cholmod.cholesky(
+            self.P + 1e-12 * sp.eye(n, format="csc"), mode="simplicial", ordering_method="amd"
+        )
+        self.Q = factor.P()
+        L, D = factor.L_D()
+
+        # Permute A and c
+        self.A = self.A[:, self.Q]  # A_perm = AQ.T
+        self.c = self.c[self.Q]  # c_perm = Qc
+
+        # Construct B
+        sqrtD = np.sqrt(D.diagonal())
+        L_T_csr = L.T.tocsr()
+        B = scale_rows_csr(L_T_csr, sqrtD)
+        nz_rows = np.nonzero(sqrtD > 0)[0]
+        self.B = (B[nz_rows, :]).tocsc()
+
+        # Construct G
+        self.G = vstack([self.A, -1 * self.B], format="csc")
 
     def _equilibrate_ruiz(self):
         """
         Follows Ruiz Equilibration from Clarabel and OSQP.
         Builds the symmetric matrix M = [[P, A.T], [A, 0]]
-        SCS: https://www.cvxgrp.org/scs/algorithm/equilibration.html, https://github.com/cvxgrp/scs
         """
-        ## TODO: This function needs to change when we add QP support
+        P = deepcopy(self.P)
         A = deepcopy(self.A)
         c = deepcopy(self.c)
         b = deepcopy(self.b)
@@ -77,7 +123,7 @@ class ConeBridge:
 
         for i in range(self.ruiz_iters):
             # Compute scale factors
-            M = build_symmetric_M(A_csc=A, P=None)
+            M = build_symmetric_M(A_csc=A, P=P)
             col_inf_norms = np.abs(M).max(axis=0).toarray().ravel()
             delta = np.ones_like(col_inf_norms)
             delta[col_inf_norms > 0] = 1 / np.sqrt(col_inf_norms[col_inf_norms > 0])
@@ -109,10 +155,17 @@ class ConeBridge:
 
             A = A_csr.tocsc()
 
-            # Scaling factor sigma
-            # TODO: Change sigma when we support QPs
+            # Scaling factor sigma and P updates
+            if P is not None:
+                P_csr = scale_rows_csr(P.tocsr(), delta_cols)
+                P = scale_cols_csc(P_csr.tocsc(), delta_cols)
+                P_inf_norm_mean = np.abs(P).max(axis=0).mean()
+
+            else:
+                P_inf_norm_mean = -np.inf
+
             c_inf_norm = np.max(np.abs(c))
-            sigma_step = 1 / c_inf_norm
+            sigma_step = 1 / max(c_inf_norm, P_inf_norm_mean)
             proposed_sigma = self.sigma * sigma_step
 
             if proposed_sigma <= 1e-2:
@@ -123,14 +176,17 @@ class ConeBridge:
 
             self.sigma *= sigma_step
             c = c * sigma_step
+            if P is not None:
+                P = P * sigma_step
 
         # Update the cone parameters
+        self.P = P
         self.A = A
         self.b = b
         self.c = c
 
     def _build_network(self):
-        self.net = PowerNetwork(self.A.shape[0])
+        self.net = PowerNetwork(self.G.shape[0])
 
     def _group_variable_devices(self):
         """
@@ -150,7 +206,7 @@ class ConeBridge:
         self.device_group_map_list = []
         self.terminal_groups = []
 
-        num_terminals_per_device_list = np.diff(self.A.indptr)
+        num_terminals_per_device_list = np.diff(self.G.indptr)
         positive_mask = num_terminals_per_device_list > 0
         filtered_counts = num_terminals_per_device_list[positive_mask]
         device_idxs = np.nonzero(positive_mask)[0]
@@ -177,7 +233,7 @@ class ConeBridge:
         - Group 2: 4 devices with 3 terminals
         Importantly, assigns self.terminal_grupps and self.device_group_map_list
         """
-        num_terminals_per_device_list = np.diff(self.A.indptr)
+        num_terminals_per_device_list = np.diff(self.G.indptr)
 
         # Tells you what are the distinct number of terminals a device could have (ignore devices with 0 terminals)
         filtered_counts = num_terminals_per_device_list[num_terminals_per_device_list > 0]
@@ -194,7 +250,7 @@ class ConeBridge:
             if num_devices == 0:
                 continue
 
-            A_sub = self.A[:, device_idxs]  # Still sparse representation
+            A_sub = self.G[:, device_idxs]  # Still sparse representation
             nnz_per_col = np.diff(A_sub.indptr)
             # We don't pad to the bin edge, but to the max number of terminals in the bin group
             k_max = nnz_per_col.max()
@@ -344,6 +400,17 @@ class ConeBridge:
                 terminals_per_device=np.array([k for _, _, k in bin_blocks]),
             )
             self.devices.append(soc_cone_device)
+
+    def _create_quadratic_devices(self):
+        if self.P is None:
+            return
+        self.quadratic_indices = np.arange(len(self.b), self.G.shape[0])
+        quadratic_device = QuadraticDevice(
+            num_nodes=self.net.num_nodes,
+            terminals=np.array(self.quadratic_indices),
+        )
+
+        self.devices.append(quadratic_device)
 
     def solve(self, solver=cp.CLARABEL, **kwargs):
         return self.net.dispatch(

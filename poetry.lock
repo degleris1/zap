@@ -3835,6 +3835,22 @@ files = [
 ]
 
 [[package]]
+name = "scikit-sparse"
+version = "0.4.16"
+description = "Scikit sparse matrix package"
+optional = true
+python-versions = ">=3.6"
+groups = ["main"]
+markers = "extra == \"cholmod\""
+files = [
+    {file = "scikit_sparse-0.4.16.tar.gz", hash = "sha256:3baf49ac98ae8cc4357005af49a0df93a6a53f4e61708705da2942ea4fa61a56"},
+]
+
+[package.dependencies]
+numpy = ">=1.13.3"
+scipy = ">=0.19"
+
+[[package]]
 name = "scipy"
 version = "1.14.1"
 description = "Fundamental algorithms for scientific computing in Python"
@@ -4987,10 +5003,11 @@ test = ["big-O", "importlib-resources ; python_version < \"3.9\"", "jaraco.funct
 type = ["pytest-mypy"]
 
 [extras]
+cholmod = ["scikit-sparse"]
 mkl = ["sparse-dot-mkl"]
 pypsa = ["pypsa"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.13"
-content-hash = "75e14eef7e8c37d1f76c985256f4c534db2d00eca068e15e9ff1a72767946210"
+content-hash = "da2252ffdfeaa9cd669a639cde21be3ae5dd5367171815f887de25c85f48daf0"
