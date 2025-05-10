@@ -16,7 +16,6 @@ from zap.conic.cone_utils import (
     build_symmetric_M,
     scale_cols_csc,
     scale_rows_csr,
-    mean_column_inf_norm,
 )
 from copy import deepcopy
 

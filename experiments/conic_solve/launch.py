@@ -41,6 +41,13 @@ for i, config in enumerate(config_list):
 {gpu_line}
 #SBATCH --time={system["runtime"]}
 
+module load cuda/12.2.0
+module load openblas/0.3.20
+module load suitesparse/7.4.0
+
+LD_LIBRARY_PATH=$(echo $LD_LIBRARY_PATH | tr ':' '\n' | grep -v "$HOME/.local/cuda-stubs" | paste -sd ':' -)
+export LD_LIBRARY_PATH
+
 poetry run python3 -u experiments/conic_solve/runner.py {config_path} {i}
 """
 
