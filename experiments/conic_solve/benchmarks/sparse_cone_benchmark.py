@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.sparse as sp
 import cvxpy as cp
+from typing import Tuple, Union, Sequence
 from .abstract_benchmark import AbstractBenchmarkSet
 
 
@@ -17,6 +18,10 @@ class SparseConeBenchmarkSet(AbstractBenchmarkSet):
         p_l: float = 0.3,  # fraction of nonneg cone
         factor: int = 4,  # factor to multiply n by to get m
         base_seed: int = 0,
+        quad_obj: bool = False,
+        psd_rank: int = 5,
+        col_nnz: Union[int, tuple[int, int]] = None,
+        nnz_per_vec: int = 10,
     ):
         super().__init__(data_dir=None, num_problems=num_problems)
         self.n = n
@@ -24,6 +29,11 @@ class SparseConeBenchmarkSet(AbstractBenchmarkSet):
         self.p_l = p_l
         self.factor = factor
         self.base_seed = base_seed
+
+        self.quad_obj = quad_obj
+        self.psd_rank = psd_rank
+        self.col_nnz = col_nnz
+        self.nnz_per_vec = nnz_per_vec
 
     def _partition_rows_into_cones(self, m: int, rng: np.random.Generator):
         # Basic counts for zero, linear, and leftover (SOC)
@@ -48,12 +58,22 @@ class SparseConeBenchmarkSet(AbstractBenchmarkSet):
         Build a sparse matrix A of dimension (m,n) in CSC format with ~sqrt(n) non-zero entries
         per column.
         """
-        col_nnz = int(np.ceil(np.sqrt(n)))
+
+        if self.col_nnz is None:
+            col_nnz = int(np.ceil(np.sqrt(n)))
+        else:
+            # This could potentially be a tuple
+            col_nnz_spec = self.col_nnz
         data_vals = []
         row_indices = []
         col_ptrs = [0]
 
         for col in range(n):
+            if isinstance(col_nnz_spec, int):
+                col_nnz = col_nnz_spec
+            elif isinstance(col_nnz_spec, tuple):
+                col_nnz = rng.integers(low=col_nnz_spec[0], high=col_nnz_spec[1] + 1)
+
             rows_for_col = rng.choice(m, size=col_nnz, replace=False)
             vals_for_col = rng.normal(loc=0.0, scale=1.0, size=col_nnz)
 
@@ -70,6 +90,18 @@ class SparseConeBenchmarkSet(AbstractBenchmarkSet):
 
         A = sp.csc_matrix((data_vals, row_indices, col_ptrs), shape=(m, n))
         return A
+
+    def _sparse_psd(self, n, rng):
+        """
+        Build sparse PSD matrix as sum of outer products of random vectors.
+        """
+        P = sp.csc_matrix((n, n))
+        for _ in range(self.psd_rank):
+            idx = rng.choice(n, size=self.nnz_per_vec, replace=False)
+            data = rng.normal(size=self.nnz_per_vec)
+            r = sp.csc_matrix((data, (idx, np.zeros_like(idx))), shape=(n, 1))
+            P += r @ r.T
+        return P
 
     def _make_feasible_x_and_b(
         self, A: sp.csc_matrix, z: int, l: int, soc_sizes: list, rng: np.random.Generator
@@ -125,8 +157,15 @@ class SparseConeBenchmarkSet(AbstractBenchmarkSet):
         A = self._build_sparse_A(m, n, rng)
         x_feas, b = self._make_feasible_x_and_b(A, z, l, soc_sizes, rng)
         c = rng.normal(loc=0.0, scale=1.0, size=n)
+
+        if self.quad_obj:
+            R = rng.normal(size=(self.psd_rank, n))
+            P = sp.csc_matrix(R.T @ R)
+        else:
+            P = None
+
         cone_partitions = {"z": z, "l": l, "soc_sizes": soc_sizes}
-        return (A, b, c, cone_partitions)
+        return (A, b, c, P, cone_partitions)
 
     def create_problem(self, data):
         """
@@ -135,7 +174,7 @@ class SparseConeBenchmarkSet(AbstractBenchmarkSet):
           minimize    c^T x
           subject to  Ax - b in K (product of cones)
         """
-        A, b, c, cone_partitions = data
+        A, b, c, P, cone_partitions = data
         z = cone_partitions["z"]
         l = cone_partitions["l"]
         soc_sizes = cone_partitions["soc_sizes"]
@@ -165,6 +204,9 @@ class SparseConeBenchmarkSet(AbstractBenchmarkSet):
                 constraints.append(cp.SOC(t, x_block))
             start_soc = end_soc
 
-        objective = cp.Minimize(c @ x)
+        if P is not None:
+            objective = cp.Minimize(0.5 * cp.quad_form(x, P) + c @ x)
+        else:
+            objective = cp.Minimize(c @ x)
         problem = cp.Problem(objective, constraints)
         return problem
