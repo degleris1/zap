@@ -6,35 +6,39 @@ app = marimo.App(width="full")
 
 @app.cell
 def __():
+    import importlib
+    import json
+    from copy import deepcopy
+    from pathlib import Path
+
     import marimo as mo
     import numpy as np
     import torch
-    import importlib
-    import json
 
-    from pathlib import Path
-    from copy import deepcopy
     return Path, deepcopy, importlib, json, mo, np, torch
 
 
 @app.cell
 def __():
     import zap
-    return zap,
+
+    return (zap,)
 
 
 @app.cell
 def __(importlib):
     from experiments.plan import runner
+
     _ = importlib.reload(runner)
-    return runner,
+    return (runner,)
 
 
 @app.cell
 def __(importlib):
     from experiments.plan import plotter
+
     _ = importlib.reload(plotter)
-    return plotter,
+    return (plotter,)
 
 
 @app.cell
@@ -51,7 +55,7 @@ def __(runner):
     # Load config data
 
     config = runner.load_config("experiments/plan/config/demo_small_v01.yaml")
-    return config,
+    return (config,)
 
 
 @app.cell
@@ -99,13 +103,13 @@ def __(carbon_input, config, deepcopy, devices, net, runner):
 @app.cell
 def __(layer):
     baseline_params = layer.initialize_parameters()
-    return baseline_params,
+    return (baseline_params,)
 
 
 @app.cell
 def __():
     init_state_file = "demo_small_v01/000/model_00300"
-    return init_state_file,
+    return (init_state_file,)
 
 
 @app.cell
@@ -149,10 +153,18 @@ def __(
 ):
     _col1 = mo.vstack(
         [
-            mo.md(f"Carbon Penalty: &nbsp;&nbsp; {carbon_input} {carbon_input.value} \$ / mTCO$_2$"),
-            mo.md(f"Solar Cost: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {solar_cost_input} {100.0 * solar_cost_input.value} % of projected"),
-            mo.md(f"Wind Cost: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {wind_cost_input} {100.0 * wind_cost_input.value} % of projected"),
-            mo.md(f"Battery Cost: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {battery_cost_input} {100.0 * battery_cost_input.value} % of projected"),
+            mo.md(
+                f"Carbon Penalty: &nbsp;&nbsp; {carbon_input} {carbon_input.value} \$ / mTCO$_2$"
+            ),
+            mo.md(
+                f"Solar Cost: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {solar_cost_input} {100.0 * solar_cost_input.value} % of projected"
+            ),
+            mo.md(
+                f"Wind Cost: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {wind_cost_input} {100.0 * wind_cost_input.value} % of projected"
+            ),
+            mo.md(
+                f"Battery Cost: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {battery_cost_input} {100.0 * battery_cost_input.value} % of projected"
+            ),
         ]
     )
     _col2 = mo.vstack(
@@ -179,7 +191,7 @@ def __(mo):
         value="Reference Solution",
         label="Initial State",
     )
-    return radiogroup,
+    return (radiogroup,)
 
 
 @app.cell
@@ -193,33 +205,37 @@ def __(mo):
 @app.cell
 def __(mo):
     carbon_input = mo.ui.slider(1.0, 500.0, value=100.0)
-    return carbon_input,
+    return (carbon_input,)
 
 
 @app.cell
 def __(mo):
     load_input = mo.ui.dropdown(
-        options={"Medium": "load_medium", "High": "load_high"}, value="Medium", label="<Load Intensity>"
+        options={"Medium": "load_medium", "High": "load_high"},
+        value="Medium",
+        label="<Load Intensity>",
     )
-    return load_input,
+    return (load_input,)
 
 
 @app.cell
 def __(mo):
-    run_button = mo.ui.run_button(label="Update Plan!", tooltip="Press to start computation.")
-    return run_button,
+    run_button = mo.ui.run_button(
+        label="Update Plan!", tooltip="Press to start computation."
+    )
+    return (run_button,)
 
 
 @app.cell
 def __():
     refresh_interval = 2
-    return refresh_interval,
+    return (refresh_interval,)
 
 
 @app.cell
 def __():
     total_update_iterations = 4
-    return total_update_iterations,
+    return (total_update_iterations,)
 
 
 @app.cell
@@ -253,7 +269,7 @@ def __(
         set_solution((0, last_opt_state))
     else:
         set_solution((0, initial_state))
-    return last_opt_state,
+    return (last_opt_state,)
 
 
 @app.cell
@@ -299,7 +315,7 @@ def __(mo):
 @app.cell
 def __():
     mosek_tol = 1e-8
-    return mosek_tol,
+    return (mosek_tol,)
 
 
 @app.cell
@@ -327,18 +343,11 @@ def __(
     _fig1.suptitle("Capacity Investments", fontsize=10)
     _fig1.tight_layout()
 
-
     # Stack plot
     _layer = J_stoch.subproblems[0].layer
-    _layer.solver_kwargs["mosek_params"][
-        "MSK_DPAR_INTPNT_TOL_REL_GAP"
-    ] = mosek_tol
-    _layer.solver_kwargs["mosek_params"][
-        "MSK_DPAR_INTPNT_TOL_DFEAS"
-    ] = mosek_tol
-    _layer.solver_kwargs["mosek_params"][
-        "MSK_DPAR_INTPNT_TOL_PFEAS"
-    ] = mosek_tol
+    _layer.solver_kwargs["mosek_params"]["MSK_DPAR_INTPNT_TOL_REL_GAP"] = mosek_tol
+    _layer.solver_kwargs["mosek_params"]["MSK_DPAR_INTPNT_TOL_DFEAS"] = mosek_tol
+    _layer.solver_kwargs["mosek_params"]["MSK_DPAR_INTPNT_TOL_PFEAS"] = mosek_tol
     # _y0 = getattr(J_stoch.subproblems[0], "state", None)
 
     _fig2, _ax2 = plt.subplots(figsize=(6.5, 2))
@@ -368,7 +377,10 @@ def __(
         # link_widths=0,
     )
     pypsa.plot.add_legend_patches(
-        plt.gca(), gc_vals, gc_names, legend_kw={"fontsize": 10, "loc": "upper right", "bbox_to_anchor": (1.5, 1.0)}
+        plt.gca(),
+        gc_vals,
+        gc_names,
+        legend_kw={"fontsize": 10, "loc": "upper right", "bbox_to_anchor": (1.5, 1.0)},
     )
     plt.tight_layout()
     _fig3 = plt.gca()
@@ -380,7 +392,9 @@ def __(
     else:
         output_string += " Algorithm complete!"
 
-    mo.hstack([mo.vstack([output_string, _fig2, _fig1], gap=2.0), _fig3], align="center")
+    mo.hstack(
+        [mo.vstack([output_string, _fig2, _fig1], gap=2.0), _fig3], align="center"
+    )
     return output_string, theta_opt, total_iter
 
 
@@ -392,7 +406,8 @@ def __():
 @app.cell
 def __():
     import pypsa
-    return pypsa,
+
+    return (pypsa,)
 
 
 @app.cell
@@ -413,7 +428,7 @@ def __(config, np, pypsa, runner):
     pn.import_from_csv_folder(runner.DATA_PATH / "pypsa/western/" / _csv_dir)
 
     pn.lines = pn.lines[~np.isinf(pn.lines.x)]
-    return pn,
+    return (pn,)
 
 
 @app.cell

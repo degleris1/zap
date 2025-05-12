@@ -1,16 +1,16 @@
 import time
-import torch
-import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 
+import numpy as np
+import torch
+
 from zap.layer import DispatchLayer
-from zap.planning.operation_objectives import AbstractOperationObjective
 from zap.planning.investment_objectives import AbstractInvestmentObjective
+from zap.planning.operation_objectives import AbstractOperationObjective
 
-from .trackers import DEFAULT_TRACKERS, TRACKER_MAPS, LOSS
 from .solvers import GradientDescent
-
-from concurrent.futures import ThreadPoolExecutor
+from .trackers import DEFAULT_TRACKERS, LOSS, TRACKER_MAPS
 
 
 class AbstractPlanningProblem:
@@ -52,7 +52,9 @@ class AbstractPlanningProblem:
             # Fallback: set to infinity
             for p, (ind, pname) in self.parameter_names.items():
                 if self.upper_bounds[p] is None:
-                    self.upper_bounds[p] = np.inf * self.la.ones_like(self.lower_bounds[p])
+                    self.upper_bounds[p] = np.inf * self.la.ones_like(
+                        self.lower_bounds[p]
+                    )
 
     @property
     def parameter_names(self):
@@ -184,7 +186,15 @@ class AbstractPlanningProblem:
         return {k: [] for k in trackers}
 
     def update_history(
-        self, history: dict, trackers: dict, J, grad, state, last_state, wandb, log_wandb_every
+        self,
+        history: dict,
+        trackers: dict,
+        J,
+        grad,
+        state,
+        last_state,
+        wandb,
+        log_wandb_every,
     ):
         for tracker in trackers:
             f = TRACKER_MAPS[tracker]
@@ -196,7 +206,9 @@ class AbstractPlanningProblem:
 
         if isinstance(self, StochasticPlanningProblem):
             if len(history[LOSS]) > 0:
-                history["rolling_loss"] += [np.mean(history[LOSS][-self.num_subproblems :])]
+                history["rolling_loss"] += [
+                    np.mean(history[LOSS][-self.num_subproblems :])
+                ]
             else:
                 history["rolling_loss"] += [np.mean(history[LOSS])]
         else:
@@ -215,9 +227,11 @@ class AbstractPlanningProblem:
                     if k in ["grad", "param"]:
                         # Convert to histogram
                         wand_data[k] = {
-                            kk: wandb.Histogram(vv)
-                            if isinstance(vv, np.ndarray)
-                            else wandb.Histogram(vv.cpu())
+                            kk: (
+                                wandb.Histogram(vv)
+                                if isinstance(vv, np.ndarray)
+                                else wandb.Histogram(vv.cpu())
+                            )
                             for kk, vv in v.items()
                         }
 
@@ -264,7 +278,9 @@ class AbstractPlanningProblem:
 class StochasticPlanningProblem(AbstractPlanningProblem):
     """Weighted mixture of planning problems."""
 
-    def __init__(self, subproblems: list[AbstractPlanningProblem], weights: list[float] = None):
+    def __init__(
+        self, subproblems: list[AbstractPlanningProblem], weights: list[float] = None
+    ):
         la = subproblems[0].la
 
         if weights is None:
@@ -304,13 +320,19 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
         else:  # torch
             self.lower_bounds = {
                 k: torch.max(
-                    torch.stack([sub.lower_bounds[k] for sub in self.subproblems], dim=0), dim=0
+                    torch.stack(
+                        [sub.lower_bounds[k] for sub in self.subproblems], dim=0
+                    ),
+                    dim=0,
                 )[0]
                 for k in subproblems[0].lower_bounds.keys()
             }
             self.upper_bounds = {
                 k: torch.min(
-                    torch.stack([sub.upper_bounds[k] for sub in self.subproblems], dim=0), dim=0
+                    torch.stack(
+                        [sub.upper_bounds[k] for sub in self.subproblems], dim=0
+                    ),
+                    dim=0,
                 )[0]
                 for k in subproblems[0].upper_bounds.keys()
             }
@@ -319,11 +341,15 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
 
     @property
     def inv_cost(self):
-        return sum([w * sub.get_inv_cost() for w, sub in zip(self.weights, self.subproblems)])
+        return sum(
+            [w * sub.get_inv_cost() for w, sub in zip(self.weights, self.subproblems)]
+        )
 
     @property
     def op_cost(self):
-        return sum([w * sub.get_op_cost() for w, sub in zip(self.weights, self.subproblems)])
+        return sum(
+            [w * sub.get_op_cost() for w, sub in zip(self.weights, self.subproblems)]
+        )
 
     @property
     def num_subproblems(self):
@@ -348,7 +374,9 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
         self.batch = batch
 
         if self.num_workers == 1:
-            sub_costs = [self.subproblems[b].forward(requires_grad, **kwargs) for b in batch]
+            sub_costs = [
+                self.subproblems[b].forward(requires_grad, **kwargs) for b in batch
+            ]
         else:
             # Developer Note
             # Normally, multi-threading doesn't gain any performance in Python because of the GIL.
