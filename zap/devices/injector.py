@@ -344,6 +344,25 @@ class Load(AbstractInjector):
         return dev
 
 
+@define(kw_only=True, slots=False)
+class DataCenterLoad(AbstractInjector):
+    """Currently only represents fixed‑profile load whose size (nominal_capacity) is optimized."""
+
+    profile: NDArray = field(converter=make_dynamic)
+    linear_cost: NDArray = field(converter=make_dynamic)
+    quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    nominal_capacity: NDArray = field(converter=make_dynamic)
+    capital_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
+
+    @property
+    def min_power(self):
+        return -self.profile
+
+    @property
+    def max_power(self):
+        return 0.0 * self.profile
+
+
 @torch.jit.script
 def _admm_prox_update(power: list[torch.Tensor], rho: float, lin_cost, quad_cost, pmin, pmax):
     # Problem is
