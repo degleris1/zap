@@ -28,8 +28,6 @@ class DataCenter(AbstractDevice):
     )
     min_power: NDArray = field(init=False)
     max_power: NDArray = field(init=False)
-    linear_cost: NDArray = field(converter=make_dynamic)
-    quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     capital_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     emission_rates: Optional[NDArray] = field(default=None, converter=make_dynamic)
     nominal_capacity: NDArray = field(
