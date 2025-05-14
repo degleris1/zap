@@ -76,7 +76,7 @@ class WeightedADMMSolver(ADMMSolver):
         # Set weight-related quantities
         inv_sq_power_weights = nested_map(lambda x: torch.pow(x, -2), _power_weights)
         avg_inv_sq_power_weights = dc_average(
-            inv_sq_power_weights, net, devices, time_horizon, st.num_terminals
+            inv_sq_power_weights, net, devices, time_horizon, st.num_terminals, machine=self.machine,
         )
 
         full_dual_power = nested_map(lambda x: torch.zeros_like(x, device=self.machine), st.power)
@@ -182,7 +182,7 @@ class WeightedADMMSolver(ADMMSolver):
         )
         # Update average price dual, used for tracking LMPs
         st = st.update(
-            dual_power=dc_average(st.full_dual_power, net, devices, time_horizon, st.num_terminals)
+            dual_power=dc_average(st.full_dual_power, net, devices, time_horizon, st.num_terminals, machine=self.machine)
         )
         return st
 
@@ -208,9 +208,9 @@ class WeightedADMMSolver(ADMMSolver):
         # Get p + omega and avg(p + omega)
         # power_dual_plus_primal = nested_add(st.full_dual_power, st.power)
         power_dual_plus_primal = nested_add(
-            st.full_dual_power, nested_a1bpa2x(st.power, st.clone_power, self.alpha, 1 - self.alpha)
+            st.full_dual_power, nested_a1bpa2x(st.power, st.clone_power, self.alpha, (1 - self.alpha))
         )
-        avg_pdpp = dc_average(power_dual_plus_primal, net, devices, time_horizon, st.num_terminals)
+        avg_pdpp = dc_average(power_dual_plus_primal, net, devices, time_horizon, st.num_terminals, machine=self.machine)
 
         # Get weighted term
         weight_scaling = avg_pdpp / st.avg_inv_sq_power_weights
@@ -239,15 +239,18 @@ class WeightedADMMSolver(ADMMSolver):
         # (2) Update phase
         # ====
 
-        avg_dual_phase = ac_average(st.dual_phase, net, devices, time_horizon, st.num_ac_terminals)
+        avg_dual_phase = ac_average(st.dual_phase, net, devices, time_horizon, st.num_ac_terminals, machine=self.machine)
 
-        st = st.update(
-            # copy_power=nested_add(st.resid_power, resid_dual_power),
-            copy_phase=[
-                [Ai.T @ (st.avg_phase + avg_dual_phase) for Ai in dev.incidence_matrix]
-                for dev in devices
-            ],
-        )
+        # st = st.update(
+        #     # copy_power=nested_add(st.resid_power, resid_dual_power),
+        #     copy_phase=[
+        #         [Ai.T @ (st.avg_phase + avg_dual_phase) for Ai in dev.incidence_matrix]
+        #         for dev in devices
+        #     ],
+        # )
+
+        copy_phase = [apply_incidence_transpose(dev, st.avg_phase + avg_dual_phase) for dev in devices]
+        st = st.update(copy_phase=copy_phase)
 
         # Resid dual power should be zero, let's check
         if self.safe_mode:
