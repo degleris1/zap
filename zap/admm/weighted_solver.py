@@ -12,6 +12,8 @@ from zap.admm.util import (
     dc_average,
     ac_average,
     apply_incidence_transpose,
+    nested_a1bpa2x,
+    nested_ax,
 )
 
 
@@ -24,6 +26,7 @@ class ExtendedADMMState(ADMMState):
     _angle_weights: object = None
     inv_sq_power_weights: object = None
     avg_inv_sq_power_weights: object = None
+    scaled_weights: object = None
 
     @property
     def power_weights(self):
@@ -77,6 +80,8 @@ class WeightedADMMSolver(ADMMSolver):
         )
 
         full_dual_power = nested_map(lambda x: torch.zeros_like(x, device=self.machine), st.power)
+        scaled_weights = nested_map(lambda x: torch.zeros_like(x, device=self.machine), st.power)
+        # full_dual_power = st.dual_power.clone().detach()
 
         return ExtendedADMMState(
             copy_power=st.power.copy(),
@@ -86,6 +91,7 @@ class WeightedADMMSolver(ADMMSolver):
             _angle_weights=_angle_weights,
             inv_sq_power_weights=inv_sq_power_weights,
             avg_inv_sq_power_weights=avg_inv_sq_power_weights,
+            scaled_weights=scaled_weights,
             **st.__dict__,
         )
 
@@ -170,9 +176,8 @@ class WeightedADMMSolver(ADMMSolver):
     def price_updates(self, st: ExtendedADMMState, net, devices, time_horizon):
         # Update duals
         st = st.update(
-            full_dual_power=nested_add(
-                st.full_dual_power, nested_subtract(st.power, st.copy_power)
-            ),
+            # full_dual_power = st.full_dual_power, nested_subtract(st.power, st.copy_power) # w/o over relaxation
+            full_dual_power=st.scaled_weights,
             dual_phase=nested_add(st.dual_phase, nested_subtract(st.phase, st.copy_phase)),
         )
         # Update average price dual, used for tracking LMPs
@@ -201,7 +206,10 @@ class WeightedADMMSolver(ADMMSolver):
         # )
 
         # Get p + omega and avg(p + omega)
-        power_dual_plus_primal = nested_add(st.full_dual_power, st.power)
+        # power_dual_plus_primal = nested_add(st.full_dual_power, st.power)
+        power_dual_plus_primal = nested_add(
+            st.full_dual_power, nested_a1bpa2x(st.power, st.clone_power, self.alpha, 1 - self.alpha)
+        )
         avg_pdpp = dc_average(power_dual_plus_primal, net, devices, time_horizon, st.num_terminals)
 
         # Get weighted term
@@ -222,7 +230,10 @@ class WeightedADMMSolver(ADMMSolver):
         #     for dev, D_dev in zip(devices, st.inv_sq_power_weights)
         # ]
 
-        st = st.update(copy_power=nested_add(power_dual_plus_primal, scaled_weights))
+        st = st.update(
+            copy_power=nested_add(power_dual_plus_primal, scaled_weights),
+            scaled_weights=nested_ax(scaled_weights, -1),
+        )
 
         # ====
         # (2) Update phase
