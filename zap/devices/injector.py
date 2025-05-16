@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Optional
 
 import numpy as np
@@ -356,21 +357,126 @@ class Load(AbstractInjector):
 
 @define(kw_only=True, slots=False)
 class DataCenterLoad(AbstractInjector):
-    """Currently only represents fixed‑profile load whose size (nominal_capacity) is optimized."""
+    """
+    A data center device that can have different load profiles.
 
-    profile: NDArray = field(converter=make_dynamic)
+    By default, it has a base load that is 20% of its nominal capacity at all times,
+    and follows a diurnal pattern that peaks around 1:30pm.
+
+    This device represents a data center load with dynamic capacity planning capabilities,
+    allowing for optimization of both capacity and energy consumption.
+    """
+
+    class ProfileType(str, Enum):
+        DIURNAL = "diurnal"
+        CONSTANT = "constant"
+        CUSTOM = "custom"
+
+    profile_types: list[ProfileType] = field(
+        default=Factory(lambda: [DataCenterLoad.ProfileType.DIURNAL])
+    )
+    peak_hours: NDArray = field(default=Factory(lambda: [13.5]))
+    base_load_fractions: NDArray = field(default=Factory(lambda: [0.2]))
+    time_resolution_hours: float = field(default=0.25)
+    profiles: Optional[NDArray] = field(default=None)
+    min_power: NDArray = field(init=False)
+    max_power: NDArray = field(init=False)
+    capital_cost: Optional[NDArray] = field(default=None)
+    emission_rates: Optional[NDArray] = field(default=None)
+    nominal_capacity: NDArray = field(converter=make_dynamic)
     linear_cost: NDArray = field(converter=make_dynamic)
     quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
-    nominal_capacity: NDArray = field(converter=make_dynamic)
-    capital_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    settime_horizon: float = field(default=3.0)
 
-    @property
-    def min_power(self):
-        return -self.profile
+    def __attrs_post_init__(self):
+        num_dcs = len(self.nominal_capacity)
+        if len(self.profile_types) != num_dcs:
+            self.profile_types = [self.profile_types[0]] * num_dcs
+        if len(self.peak_hours) != num_dcs:
+            self.peak_hours = [self.peak_hours[0]] * num_dcs
+        if len(self.base_load_fractions) != num_dcs:
+            self.base_load_fractions = [self.base_load_fractions[0]] * num_dcs
+        if self.profiles is not None and len(self.profiles) != num_dcs:
+            self.profiles = [self.profiles[0]] * num_dcs
+        if self.capital_cost is not None and len(self.capital_cost) != num_dcs:
+            self.capital_cost = [self.capital_cost[0]] * num_dcs
+        if self.emission_rates is not None and len(self.emission_rates) != num_dcs:
+            self.emission_rates = [self.emission_rates[0]] * num_dcs
+        if len(self.linear_cost) != num_dcs:
+            self.linear_cost = [self.linear_cost[0]] * num_dcs
+        if self.quadratic_cost is not None and len(self.quadratic_cost) != num_dcs:
+            self.quadratic_cost = [self.quadratic_cost[0]] * num_dcs
 
-    @property
-    def max_power(self):
-        return 0.0 * self.profile
+        all_profiles = []
+        for i in range(num_dcs):
+            if self.profiles is not None and self.profiles[i] is not None:
+                time_horizon = len(self.profiles[i])
+                profile = self._process_custom_profile(
+                    self.profiles[i], time_horizon, i
+                )
+            else:
+                time_horizon = self.settime_horizon
+                profile = self._create_load_profile(time_horizon, i)
+            all_profiles.append(profile)
+
+        self.profile = np.vstack(all_profiles)
+        self.min_power = -self.profile
+        self.max_power = np.zeros_like(self.profile)
+
+        super_class = super()
+        if hasattr(super_class, "__attrs_post_init__"):
+            super_class.__attrs_post_init__()
+
+    def _create_diurnal_profile(self, time_horizon: int, dc_idx: int) -> NDArray:
+        """Create a noisy diurnal load profile for a specific data center."""
+        time_steps = self.time_resolution_hours
+        t = np.arange(time_horizon) * time_steps
+        hours = t % 24
+        A = 1.0 - self.base_load_fractions[dc_idx]
+        freq1 = 2 * np.pi / 24
+        freq2 = 4 * np.pi / 24
+        daily = 0.6 * (1 + np.sin((hours - self.peak_hours[dc_idx]) * freq1)) / 2
+        half_day = 0.4 * (1 + np.sin((hours - self.peak_hours[dc_idx]) * freq2)) / 2
+        base = self.base_load_fractions[dc_idx] + A * (daily + half_day)
+        noise = np.random.randn(time_horizon) * 1e-2
+        for i in range(1, time_horizon):
+            noise[i] += 0.5 * noise[i - 1]
+        profile = base + noise
+        window = max(2, int(1.0 / time_steps))
+        kernel = np.ones(window) / window
+        profile = np.convolve(profile, kernel, mode="same")
+        profile = np.clip(profile, self.base_load_fractions[dc_idx], 1.0)
+        return profile
+
+    def _create_constant_profile(self, time_horizon: int, dc_idx: int) -> NDArray:
+        """Create a constant load profile for a specific data center."""
+        constant_profile = np.ones(time_horizon) * self.base_load_fractions[dc_idx]
+        return constant_profile
+
+    def _process_custom_profile(
+        self, profile: NDArray, time_horizon: int, dc_idx: int
+    ) -> NDArray:
+        """Process and validate a custom profile for a specific data center."""
+        if len(profile.shape) == 1:
+            profile = profile.reshape(1, -1)
+        return profile
+
+    def _create_load_profile(self, time_horizon: int, dc_idx: int) -> NDArray:
+        """Create a load profile for a specific data center."""
+        if self.profile_types[dc_idx] == self.ProfileType.CONSTANT:
+            return self._create_constant_profile(time_horizon, dc_idx)
+        else:
+            return self._create_diurnal_profile(time_horizon, dc_idx)
+
+    def get_emissions(self, power, nominal_capacity=None, la=np):
+        if self.emission_rates is None:
+            return 0.0
+
+        total_emissions = 0.0
+        for i in range(len(self.emission_rates)):
+            total_emissions += la.sum(la.multiply(self.emission_rates[i], power[0][i]))
+
+        return total_emissions
 
 
 @torch.jit.script
