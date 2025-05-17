@@ -177,9 +177,7 @@ class AbstractInjector(AbstractDevice):
         if self.quadratic_cost is None:
             return hessians
 
-        hessians[0] += 2 * sp.diags(
-            (self.quadratic_cost * np.ones_like(power[0])).ravel()
-        )
+        hessians[0] += 2 * sp.diags((self.quadratic_cost * np.ones_like(power[0])).ravel())
         return hessians
 
     # ====
@@ -209,9 +207,7 @@ class AbstractInjector(AbstractDevice):
 
         if self.has_changed:
             quadratic_cost = (
-                0.0 * linear_cost
-                if self.quadratic_cost is None
-                else self.quadratic_cost
+                0.0 * linear_cost if self.quadratic_cost is None else self.quadratic_cost
             )
             pmax = torch.multiply(max_power, nominal_capacity)
             pmin = torch.multiply(min_power, nominal_capacity)
@@ -220,9 +216,7 @@ class AbstractInjector(AbstractDevice):
 
         quadratic_cost, pmax, pmin = self.admm_data
 
-        return _admm_prox_update(
-            power, rho_power, linear_cost, quadratic_cost, pmin, pmax
-        )
+        return _admm_prox_update(power, rho_power, linear_cost, quadratic_cost, pmin, pmax)
 
     def get_admm_power_weights(
         self,
@@ -270,12 +264,8 @@ class Generator(AbstractInjector):
     quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     capital_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     emission_rates: Optional[NDArray] = field(default=None, converter=make_dynamic)
-    min_nominal_capacity: Optional[NDArray] = field(
-        default=None, converter=make_dynamic
-    )
-    max_nominal_capacity: Optional[NDArray] = field(
-        default=None, converter=make_dynamic
-    )
+    min_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    max_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
 
     # TODO - Add dimension checks
 
@@ -411,9 +401,7 @@ class DataCenterLoad(AbstractInjector):
         for i in range(num_dcs):
             if self.profiles is not None and self.profiles[i] is not None:
                 time_horizon = len(self.profiles[i])
-                profile = self._process_custom_profile(
-                    self.profiles[i], time_horizon, i
-                )
+                profile = self._process_custom_profile(self.profiles[i], time_horizon, i)
             else:
                 time_horizon = self.settime_horizon
                 profile = self._create_load_profile(time_horizon, i)
@@ -453,9 +441,7 @@ class DataCenterLoad(AbstractInjector):
         constant_profile = np.ones(time_horizon) * self.base_load_fractions[dc_idx]
         return constant_profile
 
-    def _process_custom_profile(
-        self, profile: NDArray, time_horizon: int, dc_idx: int
-    ) -> NDArray:
+    def _process_custom_profile(self, profile: NDArray, time_horizon: int, dc_idx: int) -> NDArray:
         """Process and validate a custom profile for a specific data center."""
         if len(profile.shape) == 1:
             profile = profile.reshape(1, -1)
@@ -478,11 +464,22 @@ class DataCenterLoad(AbstractInjector):
 
         return total_emissions
 
+    def get_investment_cost(self, nominal_capacity=None, la=np):
+        if nominal_capacity is None:
+            return 0.0
+
+        capital_cost = 10.0
+        pnom_min = self.nominal_capacity
+        # print(f"nominal_capacity: {nominal_capacity}")
+        terminal_reshape = self.terminals.flatten()
+        # print(f"pnom_min: {pnom_min}")
+        # print(f"terminals: {self.terminals}")
+
+        return la.sum(la.multiply(terminal_reshape**2, (nominal_capacity - pnom_min).flatten()))
+
 
 @torch.jit.script
-def _admm_prox_update(
-    power: list[torch.Tensor], rho: float, lin_cost, quad_cost, pmin, pmax
-):
+def _admm_prox_update(power: list[torch.Tensor], rho: float, lin_cost, quad_cost, pmin, pmax):
     # Problem is
     #     min_p    a (p - pmin)^2 + b (p - pmin) + (rho / 2) || (p - power) ||_2^2 + {box constraints}
     # Objective derivative is

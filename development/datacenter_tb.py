@@ -11,9 +11,52 @@ def _():
     import matplotlib.pyplot as plt
     import numpy as np
     import seaborn as sns
+    import os
+    import pypsa
 
     import zap
-    return cp, mo, np, plt, sns, zap
+    from zap.importers.pypsa import load_pypsa_network
+    return cp, load_pypsa_network, mo, np, os, plt, pypsa, sns, zap
+
+
+@app.cell
+def _(os, pypsa):
+    HOME_PATH = os.environ.get('HOME')
+    PYPSA_NETW0RK_PATH = HOME_PATH + '/zap_data/pypsa-networks/western_small/network_2021.nc'
+    pn = pypsa.Network(PYPSA_NETW0RK_PATH)
+    snapshots = pn.generators_t.p_max_pu.index
+    snapshot_data = snapshots[5616:5640] # 8/23/21
+    return HOME_PATH, PYPSA_NETW0RK_PATH, pn, snapshot_data, snapshots
+
+
+@app.cell
+def _(snapshot_data):
+    snapshot_data
+    return
+
+
+@app.cell
+def _(load_pypsa_network, pn, snapshot_data):
+    pypsa_kwargs = {}
+    pypsa_net, pypsa_devices = load_pypsa_network(pn, snapshot_data, power_unit=1.0e3, cost_unit=100.0, **pypsa_kwargs)
+    return pypsa_devices, pypsa_kwargs, pypsa_net
+
+
+@app.cell
+def _(pypsa_devices):
+    pypsa_devices
+    return
+
+
+@app.cell
+def _(pypsa_net):
+    pypsa_net
+    return
+
+
+@app.cell
+def _():
+    return
 
 
 @app.cell
