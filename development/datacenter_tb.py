@@ -20,13 +20,13 @@ def _():
 
 
 @app.cell
-def _(os, pypsa):
-    HOME_PATH = os.environ.get('HOME')
-    PYPSA_NETW0RK_PATH = HOME_PATH + '/zap_data/pypsa-networks/western_small/network_2021.nc'
-    pn = pypsa.Network(PYPSA_NETW0RK_PATH)
-    snapshots = pn.generators_t.p_max_pu.index
-    snapshot_data = snapshots[5616:5640] # 8/23/21
-    return HOME_PATH, PYPSA_NETW0RK_PATH, pn, snapshot_data, snapshots
+def _():
+    # HOME_PATH = os.environ.get('HOME')
+    # PYPSA_NETW0RK_PATH = HOME_PATH + '/zap_data/pypsa-networks/western_small/network_2021.nc'
+    # pn = pypsa.Network(PYPSA_NETW0RK_PATH)
+    # snapshots = pn.generators_t.p_max_pu.index
+    # snapshot_data = snapshots[5616:5640] # 8/23/21
+    return
 
 
 @app.cell
@@ -60,7 +60,7 @@ def _():
 
 
 @app.cell
-def _(np, zap):
+def _(zap):
     net = zap.PowerNetwork(num_nodes=4)
     T = 3
 
@@ -125,25 +125,25 @@ def _(np, zap):
     #     settime_horizon=T
     # )
 
-    net = zap.PowerNetwork(num_nodes=3)
-    T = 3
-    dc_profile = np.array([
-        [0.7, 0.6, 0.8],
-        [0.5, 0.9, 0.4],
-        [0.4, 0.4, 0.6],
-    ])
-    dc_cap0 = np.array([2.0, 1.50, 1.0])
+    # net = zap.PowerNetwork(num_nodes=3)
+    # T = 3
+    # dc_profile = np.array([
+    #     [0.7, 0.6, 0.8],
+    #     [0.5, 0.9, 0.4],
+    #     [0.4, 0.4, 0.6],
+    # ])
+    # dc_cap0 = np.array([2.0, 1.50, 1.0])
 
-    dcloads = zap.DataCenterLoad(
-        num_nodes=net.num_nodes,
-        terminal=np.array([0, 1, 2]),
-        profiles=dc_profile,
-        profile_types=[zap.DataCenterLoad.ProfileType.CUSTOM, zap.DataCenterLoad.ProfileType.CUSTOM, zap.DataCenterLoad.ProfileType.CUSTOM],
-        nominal_capacity=dc_cap0,
-        linear_cost=np.array([600.0, 100, 100]),
-        settime_horizon=T
-    )
-    return T, dc_cap0, dc_profile, dcloads, net
+    # dcloads = zap.DataCenterLoad(
+    #     num_nodes=net.num_nodes,
+    #     terminal=np.array([0, 1, 2]),
+    #     profiles=dc_profile,
+    #     profile_types=[zap.DataCenterLoad.ProfileType.CUSTOM, zap.DataCenterLoad.ProfileType.CUSTOM, zap.DataCenterLoad.ProfileType.CUSTOM],
+    #     nominal_capacity=dc_cap0,
+    #     linear_cost=np.array([600.0, 100, 100]),
+    #     settime_horizon=T
+    # )
+    return T, net
 
 
 @app.cell

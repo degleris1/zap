@@ -373,10 +373,12 @@ class DataCenterLoad(AbstractInjector):
     max_power: NDArray = field(init=False)
     capital_cost: Optional[NDArray] = field(default=None)
     emission_rates: Optional[NDArray] = field(default=None)
-    nominal_capacity: NDArray = field(converter=make_dynamic)
+    nominal_capacity: NDArray
     linear_cost: NDArray = field(converter=make_dynamic)
     quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     settime_horizon: float = field(default=3.0)
+    min_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    max_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
 
     def __attrs_post_init__(self):
         num_dcs = len(self.nominal_capacity)
@@ -409,7 +411,8 @@ class DataCenterLoad(AbstractInjector):
 
         self.profile = np.vstack(all_profiles)
         self.min_power = -self.profile
-        self.max_power = np.zeros_like(self.profile)
+        self.max_power = -self.profile
+        # self.max_power = np.zeros_like(self.profile)
 
         super_class = super()
         if hasattr(super_class, "__attrs_post_init__"):
@@ -465,17 +468,21 @@ class DataCenterLoad(AbstractInjector):
         return total_emissions
 
     def get_investment_cost(self, nominal_capacity=None, la=np):
-        if nominal_capacity is None:
-            return 0.0
+        # return 0.0
+        # if nominal_capacity is None:
+        #     return 0.0
 
-        capital_cost = 10.0
-        pnom_min = self.nominal_capacity
-        # print(f"nominal_capacity: {nominal_capacity}")
-        terminal_reshape = self.terminals.flatten()
-        # print(f"pnom_min: {pnom_min}")
-        # print(f"terminals: {self.terminals}")
+        # capital_cost = 10.0
+        # pnom_min = self.nominal_capacity
+        # # print(f"nominal_capacity: {nominal_capacity}")
+        # terminal_reshape = self.terminals.flatten()
+        # # print(f"pnom_min: {pnom_min}")
+        # # print(f"terminals: {self.terminals}")
 
-        return la.sum(la.multiply(terminal_reshape**2, (nominal_capacity - pnom_min).flatten()))
+        # return la.sum(la.multiply(terminal_reshape**2, (nominal_capacity - pnom_min).flatten()))
+        return la.sum(
+            la.multiply(-5, (nominal_capacity - self.nominal_capacity))
+        )  # -5 for toy case
 
 
 @torch.jit.script
