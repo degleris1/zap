@@ -592,6 +592,8 @@ class ADMMSolver:
         history.objective += [st.objective]
         p = self.resid_norm
 
+        history.rho_power += [self.rho_power]
+
         # Primal/dual residuals
         history = self.update_primal_residuals(history, st)
         history = self.update_dual_residuals(history, st, last_resid_power, last_avg_phase)
@@ -652,6 +654,7 @@ class ADMMSolver:
             dual_power=[],
             dual_phase=[],
             objective=[],
+            rho_power = [],
         )
         history.price_error = []
         return history

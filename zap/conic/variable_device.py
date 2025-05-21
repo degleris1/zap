@@ -112,15 +112,19 @@ class VariableDevice(AbstractDevice):
     # ADMM Functions
     # ====
 
-    def admm_prox_update(self, rho_power, _rho_angle, power, _angle, **kwargs):
-        return _admm_prox_update(self.A_v, self.cost_vector, power, rho_power)
+    def admm_prox_update(self, rho_power, _rho_angle, power, _angle, power_weights, **kwargs):
+        return _admm_prox_update(self.A_v, self.cost_vector, power, rho_power, power_weights)
 
 
 @torch.jit.script
-def _admm_prox_update(A_v, c_bv, power: list[torch.Tensor], rho: float):
+def _admm_prox_update(A_v, c_bv, power: list[torch.Tensor], rho: float, w_p: list[torch.Tensor]):
     """
     See Overleaf on Conic Translation Sec. 4.1.1 for full details (will update the comments here eventually)
     """
+    # Weights are the same for all devices, so we can just take the first one
+    if w_p is not None:
+        rho = rho * (w_p[0][0])**2
+
     # (num_terminals_per_device, num_devices), now it's like A_v
     Z = torch.stack(power, dim=0).squeeze(-1)
 

@@ -79,9 +79,10 @@ class WeightedADMMSolver(ADMMSolver):
             inv_sq_power_weights, net, devices, time_horizon, st.num_terminals, machine=self.machine,
         )
 
-        full_dual_power = nested_map(lambda x: torch.zeros_like(x, device=self.machine), st.power)
         scaled_weights = nested_map(lambda x: torch.zeros_like(x, device=self.machine), st.power)
-        # full_dual_power = st.dual_power.clone().detach()
+        full_dual_power = [apply_incidence_transpose(dev, st.dual_power.clone().detach()) 
+            for dev in devices]
+
 
         return ExtendedADMMState(
             copy_power=st.power.copy(),
@@ -115,77 +116,6 @@ class WeightedADMMSolver(ADMMSolver):
         else:
             return [ksi - nu for ksi, nu in zip(st.copy_phase[dev_index], st.dual_phase[dev_index])]
 
-    def device_updates(
-        self,
-        st: ADMMState,
-        devices,
-        parameters,
-        num_contingencies,
-        contingency_device,
-        contingency_mask,
-    ):
-        for i, dev in enumerate(devices):
-            rho_power, rho_angle = self.get_rho()
-
-            D_dev = st.power_weights[i]
-            d_squared = torch.stack([d_i**2 for d_i in D_dev])
-            rho_prime = (rho_power * d_squared.mean()).item()
-
-            set_p = self.set_power(dev, i, st, num_contingencies)
-            set_v = self.set_phase(dev, i, st, num_contingencies, contingency_device)
-
-            w_p = st.power_weights[i]
-            w_v = st.angle_weights[i]
-
-            if isinstance(dev, Battery):
-                kwargs = {
-                    "window": self.battery_window,
-                    "inner_weight": self.battery_inner_weight,
-                    "inner_over_relaxation": self.battery_inner_over_relaxation,
-                    "inner_iterations": self.battery_inner_iterations,
-                }
-            else:
-                kwargs = {}
-
-            if num_contingencies > 0 and i == contingency_device:
-                # TODO Figure out this scaling
-                kwargs["contingency_mask"] = contingency_mask
-                # rho_power = rho_power / (num_contingencies + 1)
-                # rho_angle = rho_angle / (num_contingencies + 1)
-
-            if num_contingencies > 0 and i != contingency_device:
-                rho_power = rho_power * (num_contingencies + 1)
-                rho_angle = rho_angle * (num_contingencies + 1)
-
-            p, v, lv = dev.admm_prox_update(
-                rho_prime,
-                rho_angle,
-                set_p,
-                set_v,
-                power_weights=w_p,
-                angle_weights=w_v,
-                **parameters[i],
-                **kwargs,
-            )
-            st.power[i] = p
-            st.phase[i] = v
-            st.local_variables[i] = lv
-
-        return st
-
-    def price_updates(self, st: ExtendedADMMState, net, devices, time_horizon):
-        # Update duals
-        st = st.update(
-            # full_dual_power = st.full_dual_power, nested_subtract(st.power, st.copy_power) # w/o over relaxation
-            full_dual_power=st.scaled_weights,
-            dual_phase=nested_add(st.dual_phase, nested_subtract(st.phase, st.copy_phase)),
-        )
-        # Update average price dual, used for tracking LMPs
-        st = st.update(
-            dual_power=dc_average(st.full_dual_power, net, devices, time_horizon, st.num_terminals, machine=self.machine)
-        )
-        return st
-
     def update_averages_and_residuals(
         self, st: ExtendedADMMState, net, devices, time_horizon, num_contingencies
     ):
@@ -197,18 +127,9 @@ class WeightedADMMSolver(ADMMSolver):
         # (1) Update power
         # ====
 
-        # avg_dual_power = dc_average(
-        #     st.full_dual_power, net, devices, time_horizon, st.num_terminals
-        # )
-        # resid_dual_power = get_terminal_residual(st.full_dual_power, avg_dual_power, devices)
-        # st = st.update(
-        #     copy_power=nested_add(st.resid_power, resid_dual_power),
-        # )
-
         # Get p + omega and avg(p + omega)
-        # power_dual_plus_primal = nested_add(st.full_dual_power, st.power)
         power_dual_plus_primal = nested_add(
-            st.full_dual_power, nested_a1bpa2x(st.power, st.clone_power, self.alpha, (1 - self.alpha))
+            st.full_dual_power, nested_a1bpa2x(st.power, st.copy_power, self.alpha, (1 - self.alpha))
         )
         avg_pdpp = dc_average(power_dual_plus_primal, net, devices, time_horizon, st.num_terminals, machine=self.machine)
 
@@ -225,11 +146,6 @@ class WeightedADMMSolver(ADMMSolver):
             for dev, D_dev in zip(devices, st.inv_sq_power_weights)
         ]
 
-        # scaled_weights = [
-        #     [-(Ai.T @ weight_scaling) * D_dev_i for Ai, D_dev_i in zip(dev.incidence_matrix, D_dev)]
-        #     for dev, D_dev in zip(devices, st.inv_sq_power_weights)
-        # ]
-
         st = st.update(
             copy_power=nested_add(power_dual_plus_primal, scaled_weights),
             scaled_weights=nested_ax(scaled_weights, -1),
@@ -241,14 +157,6 @@ class WeightedADMMSolver(ADMMSolver):
 
         avg_dual_phase = ac_average(st.dual_phase, net, devices, time_horizon, st.num_ac_terminals, machine=self.machine)
 
-        # st = st.update(
-        #     # copy_power=nested_add(st.resid_power, resid_dual_power),
-        #     copy_phase=[
-        #         [Ai.T @ (st.avg_phase + avg_dual_phase) for Ai in dev.incidence_matrix]
-        #         for dev in devices
-        #     ],
-        # )
-
         copy_phase = [apply_incidence_transpose(dev, st.avg_phase + avg_dual_phase) for dev in devices]
         st = st.update(copy_phase=copy_phase)
 
@@ -257,6 +165,28 @@ class WeightedADMMSolver(ADMMSolver):
             # np.testing.assert_allclose(nested_norm(resid_dual_power), 0.0, atol=1e-6)
             np.testing.assert_allclose(avg_dual_phase, 0.0, atol=1e-8)
 
+        return st
+
+    def price_updates(self, st: ExtendedADMMState, net, devices, time_horizon):
+        # Update duals
+        st = st.update(
+            full_dual_power=st.scaled_weights,
+            dual_phase=nested_add(st.dual_phase, nested_subtract(st.phase, st.copy_phase)),
+        )
+        # Update average price dual, used for tracking LMPs
+        st = st.update(
+            dual_power=dc_average(st.full_dual_power, net, devices, time_horizon, st.num_terminals, machine=self.machine)
+        )
+        return st
+
+    def adjust_rho_power_and_angle(self, st, history):
+        old_rho = self.rho_power
+        st = super().adjust_rho_power_and_angle(st, history)
+        if self.rho_power != old_rho:
+            scale = old_rho / self.rho_power
+            st = st.update(
+                full_dual_power = nested_ax(st.full_dual_power, scale)
+            )
         return st
 
     def dimension_checks(self, st: ExtendedADMMState, net, devices, time_horizon):

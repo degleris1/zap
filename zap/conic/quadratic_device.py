@@ -32,12 +32,14 @@ class QuadraticDevice(AbstractDevice):
     def inequality_constraints(self, power, _angle, _local_variables, **kwargs):
         return []
 
-    def admm_prox_update(self, rho_power, _rho_angle, power, _angle, **kwargs):
-        return _admm_prox_update(power, rho_power)
+    def admm_prox_update(self, rho_power, _rho_angle, power, _angle, power_weights, **kwargs):
+        return _admm_prox_update(power, rho_power, power_weights)
 
 
 @torch.jit.script
-def _admm_prox_update(power: list[torch.Tensor], rho: float):
+def _admm_prox_update(power: list[torch.Tensor], rho: float, w_p: list[torch.Tensor]):
+    if w_p is not None:
+        rho = rho * (w_p[0][0])**2
     scaling = rho / (1 + rho)
     y_star = power[0] * scaling
     return [y_star], None, None
