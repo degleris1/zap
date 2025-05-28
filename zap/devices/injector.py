@@ -1,5 +1,5 @@
-from enum import Enum
-from typing import Optional
+from enum import Enum, auto
+from typing import Optional, TypedDict
 
 import numpy as np
 import scipy.sparse as sp
@@ -177,7 +177,9 @@ class AbstractInjector(AbstractDevice):
         if self.quadratic_cost is None:
             return hessians
 
-        hessians[0] += 2 * sp.diags((self.quadratic_cost * np.ones_like(power[0])).ravel())
+        hessians[0] += 2 * sp.diags(
+            (self.quadratic_cost * np.ones_like(power[0])).ravel()
+        )
         return hessians
 
     # ====
@@ -207,7 +209,9 @@ class AbstractInjector(AbstractDevice):
 
         if self.has_changed:
             quadratic_cost = (
-                0.0 * linear_cost if self.quadratic_cost is None else self.quadratic_cost
+                0.0 * linear_cost
+                if self.quadratic_cost is None
+                else self.quadratic_cost
             )
             pmax = torch.multiply(max_power, nominal_capacity)
             pmin = torch.multiply(min_power, nominal_capacity)
@@ -216,7 +220,9 @@ class AbstractInjector(AbstractDevice):
 
         quadratic_cost, pmax, pmin = self.admm_data
 
-        return _admm_prox_update(power, rho_power, linear_cost, quadratic_cost, pmin, pmax)
+        return _admm_prox_update(
+            power, rho_power, linear_cost, quadratic_cost, pmin, pmax
+        )
 
     def get_admm_power_weights(
         self,
@@ -264,8 +270,12 @@ class Generator(AbstractInjector):
     quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     capital_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     emission_rates: Optional[NDArray] = field(default=None, converter=make_dynamic)
-    min_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
-    max_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    min_nominal_capacity: Optional[NDArray] = field(
+        default=None, converter=make_dynamic
+    )
+    max_nominal_capacity: Optional[NDArray] = field(
+        default=None, converter=make_dynamic
+    )
 
     # TODO - Add dimension checks
 
@@ -345,6 +355,89 @@ class Load(AbstractInjector):
         return dev
 
 
+class DataCenterConstants:
+    """Constants related to data center infrastructure and costs."""
+
+    class RackDensity:
+        """Power density per rack type in kW."""
+
+        GPU = 100.0  # H100 / B100 racks
+        CPU = 20.0  # enterprise / cloud general purpose
+        STORAGE = 10.0  # disk / flash
+
+    class ITCosts:
+        """Cost per rack type in USD."""
+
+        GPU = 1_000_000.0  # H100 / B100 racks
+        CPU = 200_000.0  # enterprise / cloud general purpose
+        STORAGE = 100_000.0  # disk / flash
+
+    class SpaceRequirements:
+        """Space planning constants."""
+
+        SQFT_PER_ACRE = 43_560
+        FLOOR_SQFT_PER_RACK = 75
+        SITE_GROSS_MULTIPLIER = 2.5  # Total site area vs white space ratio
+
+    class CostFactors:
+        """Cost breakdown factors for infrastructure."""
+
+        ELECTRICAL = 0.53  # UPS, switchgear, gensets, PDUs
+        COOLING = 0.20  # chillers, CRAH/CRAC, pumps, piping
+        SHELL = 0.27  # walls, roof, steel, white-space fit-out
+
+
+class Location(Enum):
+    """Data center location types affecting costs."""
+
+    RURAL = auto()
+    SUBURBAN = auto()
+    URBAN = auto()
+
+    @property
+    def base_capex_per_mw(self) -> float:
+        """Baseline 2024-25 construction cost (millions $/MW)."""
+        return {
+            Location.RURAL: 9.5,
+            Location.SUBURBAN: 11.7,
+            Location.URBAN: 14.0,
+        }[self]
+
+    @property
+    def land_cost_per_acre(self) -> float:
+        """Land acquisition cost per acre."""
+        base_price = 244_000
+        multiplier = {
+            Location.RURAL: 0.4,
+            Location.SUBURBAN: 1.0,
+            Location.URBAN: 3.0,
+        }[self]
+        return multiplier * base_price
+
+
+class CostBreakdown(TypedDict):
+    """Detailed cost breakdown for a data center build."""
+
+    total_capex: float
+    electrical_infra: float  # UPS, switchgear, gensets, PDUs
+    cooling_infra: float  # chillers, CRAH/CRAC, pumps, piping
+    building_shell: float  # walls, roof, steel, white-space fit-out, back-of-house
+    land: float  # site acquisition
+    it_cost: float  # IT hardware (racks, servers, storage)
+    capex_per_mw: float  # effective $/MW after all modifiers
+    nominal_it_mw: float  # MW of critical IT load (UPS power)
+
+
+def _scale_factor(mw: float) -> float:
+    """Returns cost scaling factor based on data center size."""
+    if mw < 5:
+        return 1.15  # edge / micro DC premium
+    elif mw <= 20:
+        return 1.00  # mid-scale "standard"
+    else:
+        return 0.85
+
+
 @define(kw_only=True, slots=False)
 class DataCenterLoad(AbstractInjector):
     """
@@ -373,13 +466,30 @@ class DataCenterLoad(AbstractInjector):
     max_power: NDArray = field(init=False)
     capital_cost: Optional[NDArray] = field(default=None)
     emission_rates: Optional[NDArray] = field(default=None)
-    nominal_capacity: NDArray = field(converter=make_dynamic)
+    gpu_racks: NDArray = field(converter=make_dynamic)
+    cpu_racks: NDArray = field(converter=make_dynamic)
+    storage_racks: NDArray = field(converter=make_dynamic)
     linear_cost: NDArray = field(converter=make_dynamic)
     quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     settime_horizon: float = field(default=3.0)
+    nominal_capacity: NDArray = field(init=False)
+    locations: Optional[list[Location]] = field(
+        default=Factory(lambda: [Location.SUBURBAN]),
+        converter=lambda locs: [locs] if isinstance(locs, Location) else locs,
+    )
+
+    @property
+    def _nominal_capacity(self) -> NDArray:
+        """MW of critical IT load derived from rack counts."""
+        kw = (
+            self.gpu_racks * DataCenterConstants.RackDensity.GPU
+            + self.cpu_racks * DataCenterConstants.RackDensity.CPU
+            + self.storage_racks * DataCenterConstants.RackDensity.STORAGE
+        )
+        return kw / 1000.0
 
     def __attrs_post_init__(self):
-        num_dcs = len(self.nominal_capacity)
+        num_dcs = len(self.cpu_racks)
         if len(self.profile_types) != num_dcs:
             self.profile_types = [self.profile_types[0]] * num_dcs
         if len(self.peak_hours) != num_dcs:
@@ -396,12 +506,17 @@ class DataCenterLoad(AbstractInjector):
             self.linear_cost = [self.linear_cost[0]] * num_dcs
         if self.quadratic_cost is not None and len(self.quadratic_cost) != num_dcs:
             self.quadratic_cost = [self.quadratic_cost[0]] * num_dcs
+        if self.locations is not None and len(self.locations) != num_dcs:
+            self.locations = [self.locations[0]] * num_dcs
+        self.nominal_capacity = self._nominal_capacity
 
         all_profiles = []
         for i in range(num_dcs):
             if self.profiles is not None and self.profiles[i] is not None:
                 time_horizon = len(self.profiles[i])
-                profile = self._process_custom_profile(self.profiles[i], time_horizon, i)
+                profile = self._process_custom_profile(
+                    self.profiles[i], time_horizon, i
+                )
             else:
                 time_horizon = self.settime_horizon
                 profile = self._create_load_profile(time_horizon, i)
@@ -416,32 +531,78 @@ class DataCenterLoad(AbstractInjector):
             super_class.__attrs_post_init__()
 
     def _create_diurnal_profile(self, time_horizon: int, dc_idx: int) -> NDArray:
-        """Create a noisy diurnal load profile for a specific data center."""
-        time_steps = self.time_resolution_hours
-        t = np.arange(time_horizon) * time_steps
-        hours = t % 24
-        A = 1.0 - self.base_load_fractions[dc_idx]
-        freq1 = 2 * np.pi / 24
-        freq2 = 4 * np.pi / 24
-        daily = 0.6 * (1 + np.sin((hours - self.peak_hours[dc_idx]) * freq1)) / 2
-        half_day = 0.4 * (1 + np.sin((hours - self.peak_hours[dc_idx]) * freq2)) / 2
-        base = self.base_load_fractions[dc_idx] + A * (daily + half_day)
-        noise = np.random.randn(time_horizon) * 1e-2
+        """
+        Generic-dt hardware-aware diurnal profile (storage base, CPU cosine,
+        GPU cosine+half-day+AR(1) noise).  Works for any self.time_resolution_hours.
+        """
+        # ------------------------------------------------------------------
+        # 1. Time axis
+        # ------------------------------------------------------------------
+        dt = float(self.time_resolution_hours)  # hours / sample
+        t = np.arange(time_horizon) * dt
+        hour = t % 24.0
+        peak = float(self.peak_hours[dc_idx])  # desired daily peak hour
+
+        # ------------------------------------------------------------------
+        # 2. Rack mix
+        # ------------------------------------------------------------------
+        P_sto = self.storage_racks[dc_idx] * DataCenterConstants.RackDensity.STORAGE
+        P_cpu = self.cpu_racks[dc_idx] * DataCenterConstants.RackDensity.CPU
+        P_gpu = self.gpu_racks[dc_idx] * DataCenterConstants.RackDensity.GPU
+        P_tot = P_sto + P_cpu + P_gpu
+        if P_tot == 0:
+            return np.zeros(time_horizon)
+
+        f_sto, f_cpu, f_gpu = P_sto / P_tot, P_cpu / P_tot, P_gpu / P_tot
+
+        # ------------------------------------------------------------------
+        # 3. Deterministic components (periods in physical hours)
+        # ------------------------------------------------------------------
+        phase24 = 2 * np.pi * (hour - peak) / 24.0
+        phase12 = 2 * phase24  # 12-h harmonic
+
+        load_storage = np.full(time_horizon, f_sto)
+        load_cpu = f_cpu * (0.7 + 0.3 * np.cos(phase24))
+
+        gpu_shape = (
+            0.6 * (1 + np.cos(phase24)) / 2  # 24-h
+            + 0.4 * (1 + np.cos(phase12)) / 2  # 12-h
+        )
+
+        # ------------------------------------------------------------------
+        # 4. Correlated noise – time-resolution aware
+        # ------------------------------------------------------------------
+        rng = np.random.default_rng()
+        # variance ∝ dt so *power* stays constant
+        noise = rng.normal(scale=0.02 * np.sqrt(dt / 1.0), size=time_horizon)
+
+        # AR(1) coefficient chosen so correlation time ≈ 1 h
+        tau = 1.0  # correlation time in hours
+        rho = np.exp(-dt / tau)
         for i in range(1, time_horizon):
-            noise[i] += 0.5 * noise[i - 1]
-        profile = base + noise
-        window = max(2, int(1.0 / time_steps))
-        kernel = np.ones(window) / window
-        profile = np.convolve(profile, kernel, mode="same")
-        profile = np.clip(profile, self.base_load_fractions[dc_idx], 1.0)
+            noise[i] += rho * noise[i - 1]
+
+        # Smooth over one physical hour (or ≥1 point)
+        window_pts = max(1, int(round(1.0 / dt)))
+        kernel = np.ones(window_pts) / window_pts
+        noise = np.convolve(noise, kernel, mode="same")
+
+        load_gpu = f_gpu * np.clip(gpu_shape + noise, 0.0, 1.2)
+
+        # ------------------------------------------------------------------
+        # 5. Aggregate
+        # ------------------------------------------------------------------
+        profile = load_storage + load_cpu + load_gpu
+        profile = np.clip(profile, f_sto, 1.0)
         return profile
 
     def _create_constant_profile(self, time_horizon: int, dc_idx: int) -> NDArray:
         """Create a constant load profile for a specific data center."""
-        constant_profile = np.ones(time_horizon) * self.base_load_fractions[dc_idx]
-        return constant_profile
+        return np.ones(time_horizon) * 0.6
 
-    def _process_custom_profile(self, profile: NDArray, time_horizon: int, dc_idx: int) -> NDArray:
+    def _process_custom_profile(
+        self, profile: NDArray, time_horizon: int, dc_idx: int
+    ) -> NDArray:
         """Process and validate a custom profile for a specific data center."""
         if len(profile.shape) == 1:
             profile = profile.reshape(1, -1)
@@ -465,21 +626,55 @@ class DataCenterLoad(AbstractInjector):
         return total_emissions
 
     def get_investment_cost(self, nominal_capacity=None, la=np):
-        if nominal_capacity is None:
+        """Return total investment cost for data center devices.
+
+        Numbers are 2024-Q4 US dollars.
+        """
+        if self.capital_cost is None or nominal_capacity is None:
             return 0.0
 
-        capital_cost = 10.0
-        pnom_min = self.nominal_capacity
-        # print(f"nominal_capacity: {nominal_capacity}")
-        terminal_reshape = self.terminals.flatten()
-        # print(f"pnom_min: {pnom_min}")
-        # print(f"terminals: {self.terminals}")
+        total_cost = 0.0
 
-        return la.sum(la.multiply(terminal_reshape**2, (nominal_capacity - pnom_min).flatten()))
+        for i in range(self.num_devices):
+            gpu_racks = self.gpu_racks[i]
+            cpu_racks = self.cpu_racks[i]
+            storage_racks = self.storage_racks[i]
+            location = self.locations[i]
+
+            it_kw = (
+                gpu_racks * DataCenterConstants.RackDensity.GPU
+                + cpu_racks * DataCenterConstants.RackDensity.CPU
+                + storage_racks * DataCenterConstants.RackDensity.STORAGE
+            )
+            it_mw = it_kw / 1_000.0
+            it_cost = (
+                gpu_racks * DataCenterConstants.ITCosts.GPU
+                + cpu_racks * DataCenterConstants.ITCosts.CPU
+                + storage_racks * DataCenterConstants.ITCosts.STORAGE
+            )
+            capex_mw_nominal = location.base_capex_per_mw * _scale_factor(it_mw)
+            core_capex = capex_mw_nominal * it_mw
+            racks_total = gpu_racks + cpu_racks + storage_racks
+            white_space_sqft = (
+                racks_total * DataCenterConstants.SpaceRequirements.FLOOR_SQFT_PER_RACK
+            )
+            site_sqft = (
+                white_space_sqft
+                * DataCenterConstants.SpaceRequirements.SITE_GROSS_MULTIPLIER
+            )
+            site_acres = site_sqft / DataCenterConstants.SpaceRequirements.SQFT_PER_ACRE
+            land_cost = site_acres * location.land_cost_per_acre
+
+            device_total = core_capex + land_cost + it_cost
+            total_cost += la.sum(la.multiply(self.capital_cost[i], device_total))
+
+        return total_cost
 
 
 @torch.jit.script
-def _admm_prox_update(power: list[torch.Tensor], rho: float, lin_cost, quad_cost, pmin, pmax):
+def _admm_prox_update(
+    power: list[torch.Tensor], rho: float, lin_cost, quad_cost, pmin, pmax
+):
     # Problem is
     #     min_p    a (p - pmin)^2 + b (p - pmin) + (rho / 2) || (p - power) ||_2^2 + {box constraints}
     # Objective derivative is
