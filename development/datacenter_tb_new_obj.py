@@ -61,9 +61,9 @@ def _(pypsa_net):
 
 @app.cell
 def _(np, zap):
-    gpu0 = np.array([30, 15, 10])
-    cpu0 = np.array([10, 10,  5])
-    sto0 = np.array([ 5,  5,  2])
+    gpu0 = np.array([30., 15., 10.])
+    cpu0 = np.array([10., 10.,  5.])
+    sto0 = np.array([ 5.,  5.,  2.])
 
     T = 3
     dc_cap0 = np.array([2.0, 1.50, 1.0])
@@ -176,18 +176,16 @@ app._unparsable_cell(
         net,
         devices,
         parameter_names={
-            \"gpu_racks\":     (0, \"gpu_racks\"),      
-            \"cpu_racks\":     (0, \"cpu_racks\"),
-            \"storage_racks\": (0, \"storage_racks\"),
-        },,
+            \"nominal_capacity\": 
+        },
         time_horizon=T,
         solver=cp.CLARABEL,
     )  # Constuct a DispatchLayer
 
     eta = {
-        \"gpu_racks\":     gpu0.copy(),   # np.array, will be mutated by the optimiser
-        \"cpu_racks\":     cpu0.copy(),
-        \"storage_racks\": sto0.copy(),
+        \"gpu_racks\":     gpu0,   
+        \"cpu_racks\":     cpu0,
+        \"storage_racks\": sto0,
     }
 
     op_obj = zap.planning.DispatchCostObjective(net, devices)
@@ -198,9 +196,9 @@ app._unparsable_cell(
     )
 
     # Add in simplex constraint
-    P.extra_projections = {
-        \"dc_capacity\": zap.planning.SimplexBudgetProjection(budget=4, strict=True)
-    }
+    # P.extra_projections = {
+    #     \"dc_capacity\": zap.planning.SimplexBudgetProjection(budget=4, strict=True)
+    # }
 
     cost = P(**eta, requires_grad=True)
     grad = P.backward()

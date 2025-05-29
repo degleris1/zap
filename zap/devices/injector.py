@@ -466,30 +466,30 @@ class DataCenterLoad(AbstractInjector):
     max_power: NDArray = field(init=False)
     capital_cost: Optional[NDArray] = field(default=None)
     emission_rates: Optional[NDArray] = field(default=None)
-    gpu_racks: NDArray = field(converter=make_dynamic)
-    cpu_racks: NDArray = field(converter=make_dynamic)
-    storage_racks: NDArray = field(converter=make_dynamic)
+    # gpu_racks: NDArray = field(converter=make_dynamic)
+    # cpu_racks: NDArray = field(converter=make_dynamic)
+    # storage_racks: NDArray = field(converter=make_dynamic)
+    nominal_capacity: NDArray = field(default=None)
     linear_cost: NDArray = field(converter=make_dynamic)
     quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     settime_horizon: float = field(default=3.0)
-    nominal_capacity: NDArray = field(init=False)
     locations: Optional[list[Location]] = field(
         default=Factory(lambda: [Location.SUBURBAN]),
         converter=lambda locs: [locs] if isinstance(locs, Location) else locs,
     )
 
-    @property
-    def _nominal_capacity(self) -> NDArray:
-        """MW of critical IT load derived from rack counts."""
-        kw = (
-            self.gpu_racks * DataCenterConstants.RackDensity.GPU
-            + self.cpu_racks * DataCenterConstants.RackDensity.CPU
-            + self.storage_racks * DataCenterConstants.RackDensity.STORAGE
-        )
-        return kw / 1000.0
+    # @property
+    # def _nominal_capacity(self) -> NDArray:
+    #     """MW of critical IT load derived from rack counts."""
+    #     kw = (
+    #         self.gpu_racks * DataCenterConstants.RackDensity.GPU
+    #         + self.cpu_racks * DataCenterConstants.RackDensity.CPU
+    #         + self.storage_racks * DataCenterConstants.RackDensity.STORAGE
+    #     )
+    #     return kw / 1000.0
 
     def __attrs_post_init__(self):
-        num_dcs = len(self.cpu_racks)
+        num_dcs = len(self.nominal_capacity)
         if len(self.profile_types) != num_dcs:
             self.profile_types = [self.profile_types[0]] * num_dcs
         if len(self.peak_hours) != num_dcs:
@@ -508,7 +508,7 @@ class DataCenterLoad(AbstractInjector):
             self.quadratic_cost = [self.quadratic_cost[0]] * num_dcs
         if self.locations is not None and len(self.locations) != num_dcs:
             self.locations = [self.locations[0]] * num_dcs
-        self.nominal_capacity = self._nominal_capacity
+        # self.nominal_capacity = self._nominal_capacity
 
         all_profiles = []
         for i in range(num_dcs):
@@ -535,17 +535,10 @@ class DataCenterLoad(AbstractInjector):
         Generic-dt hardware-aware diurnal profile (storage base, CPU cosine,
         GPU cosine+half-day+AR(1) noise).  Works for any self.time_resolution_hours.
         """
-        # ------------------------------------------------------------------
-        # 1. Time axis
-        # ------------------------------------------------------------------
-        dt = float(self.time_resolution_hours)  # hours / sample
+        dt = float(self.time_resolution_hours)
         t = np.arange(time_horizon) * dt
         hour = t % 24.0
         peak = float(self.peak_hours[dc_idx])  # desired daily peak hour
-
-        # ------------------------------------------------------------------
-        # 2. Rack mix
-        # ------------------------------------------------------------------
         P_sto = self.storage_racks[dc_idx] * DataCenterConstants.RackDensity.STORAGE
         P_cpu = self.cpu_racks[dc_idx] * DataCenterConstants.RackDensity.CPU
         P_gpu = self.gpu_racks[dc_idx] * DataCenterConstants.RackDensity.GPU
@@ -555,9 +548,6 @@ class DataCenterLoad(AbstractInjector):
 
         f_sto, f_cpu, f_gpu = P_sto / P_tot, P_cpu / P_tot, P_gpu / P_tot
 
-        # ------------------------------------------------------------------
-        # 3. Deterministic components (periods in physical hours)
-        # ------------------------------------------------------------------
         phase24 = 2 * np.pi * (hour - peak) / 24.0
         phase12 = 2 * phase24  # 12-h harmonic
 
@@ -569,29 +559,20 @@ class DataCenterLoad(AbstractInjector):
             + 0.4 * (1 + np.cos(phase12)) / 2  # 12-h
         )
 
-        # ------------------------------------------------------------------
-        # 4. Correlated noise – time-resolution aware
-        # ------------------------------------------------------------------
         rng = np.random.default_rng()
         # variance ∝ dt so *power* stays constant
         noise = rng.normal(scale=0.02 * np.sqrt(dt / 1.0), size=time_horizon)
 
-        # AR(1) coefficient chosen so correlation time ≈ 1 h
         tau = 1.0  # correlation time in hours
         rho = np.exp(-dt / tau)
         for i in range(1, time_horizon):
             noise[i] += rho * noise[i - 1]
-
-        # Smooth over one physical hour (or ≥1 point)
         window_pts = max(1, int(round(1.0 / dt)))
         kernel = np.ones(window_pts) / window_pts
         noise = np.convolve(noise, kernel, mode="same")
 
         load_gpu = f_gpu * np.clip(gpu_shape + noise, 0.0, 1.2)
 
-        # ------------------------------------------------------------------
-        # 5. Aggregate
-        # ------------------------------------------------------------------
         profile = load_storage + load_cpu + load_gpu
         profile = np.clip(profile, f_sto, 1.0)
         return profile
@@ -630,31 +611,37 @@ class DataCenterLoad(AbstractInjector):
 
         Numbers are 2024-Q4 US dollars.
         """
-        if self.capital_cost is None or nominal_capacity is None:
-            return 0.0
-
-        total_cost = 0.0
+        # if self.capital_cost is None or nominal_capacity is None:
+        #     return 0.0
+        p_nom_min = self.nominal_capacity
+        device_total_cost = np.zeros(self.num_devices)
+        print(self.num_devices)
 
         for i in range(self.num_devices):
-            gpu_racks = self.gpu_racks[i]
-            cpu_racks = self.cpu_racks[i]
-            storage_racks = self.storage_racks[i]
+            # gpu_racks = self.gpu_racks[i]
+            # cpu_racks = self.cpu_racks[i]
+            # storage_racks = self.storage_racks[i]
             location = self.locations[i]
+            it_mw = self.nominal_capacity[i]
 
-            it_kw = (
-                gpu_racks * DataCenterConstants.RackDensity.GPU
-                + cpu_racks * DataCenterConstants.RackDensity.CPU
-                + storage_racks * DataCenterConstants.RackDensity.STORAGE
-            )
-            it_mw = it_kw / 1_000.0
-            it_cost = (
-                gpu_racks * DataCenterConstants.ITCosts.GPU
-                + cpu_racks * DataCenterConstants.ITCosts.CPU
-                + storage_racks * DataCenterConstants.ITCosts.STORAGE
-            )
+            # it_kw = (
+            #     gpu_racks * DataCenterConstants.RackDensity.GPU
+            #     + cpu_racks * DataCenterConstants.RackDensity.CPU
+            #     + storage_racks * DataCenterConstants.RackDensity.STORAGE
+            # )
+            # it_mw = it_kw / 1_000.0
+            # it_cost = (
+            #     gpu_racks * DataCenterConstants.ITCosts.GPU
+            #     + cpu_racks * DataCenterConstants.ITCosts.CPU
+            #     + storage_racks * DataCenterConstants.ITCosts.STORAGE
+            # )
             capex_mw_nominal = location.base_capex_per_mw * _scale_factor(it_mw)
             core_capex = capex_mw_nominal * it_mw
-            racks_total = gpu_racks + cpu_racks + storage_racks
+            racks_total = it_mw / (
+                DataCenterConstants.RackDensity.GPU
+                + DataCenterConstants.RackDensity.CPU
+                + DataCenterConstants.RackDensity.STORAGE
+            )
             white_space_sqft = (
                 racks_total * DataCenterConstants.SpaceRequirements.FLOOR_SQFT_PER_RACK
             )
@@ -665,10 +652,23 @@ class DataCenterLoad(AbstractInjector):
             site_acres = site_sqft / DataCenterConstants.SpaceRequirements.SQFT_PER_ACRE
             land_cost = site_acres * location.land_cost_per_acre
 
-            device_total = core_capex + land_cost + it_cost
-            total_cost += la.sum(la.multiply(self.capital_cost[i], device_total))
+            device_total_cost[i] = -100 * (core_capex + land_cost)  # + it_cost
+            print(f"Data Center {i} - Marginal cost: {device_total_cost[i]} $/MW")
+            print(
+                f"Data Center {i} - Location: {location.name}, IT MW: {nominal_capacity[i]}"
+            )
 
-        return total_cost
+        if hasattr(la, "from_numpy"):
+            device_total_cost_tensor = la.from_numpy(device_total_cost).float()
+        else:
+            device_total_cost_tensor = device_total_cost
+
+        if hasattr(la, "from_numpy") and isinstance(p_nom_min, np.ndarray):
+            p_nom_min_tensor = la.from_numpy(p_nom_min).float()
+        else:
+            p_nom_min_tensor = p_nom_min
+
+        return la.sum(device_total_cost_tensor * (nominal_capacity - p_nom_min_tensor))
 
 
 @torch.jit.script
