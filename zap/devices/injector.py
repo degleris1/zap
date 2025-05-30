@@ -411,8 +411,8 @@ class DataCenterLoad(AbstractInjector):
 
         self.profile = np.vstack(all_profiles)
         self.min_power = -self.profile
-        self.max_power = -self.profile
-        # self.max_power = np.zeros_like(self.profile)
+        # self.max_power = -self.profile
+        self.max_power = np.zeros_like(self.profile)
 
         super_class = super()
         if hasattr(super_class, "__attrs_post_init__"):
@@ -480,9 +480,31 @@ class DataCenterLoad(AbstractInjector):
         # # print(f"terminals: {self.terminals}")
 
         # return la.sum(la.multiply(terminal_reshape**2, (nominal_capacity - pnom_min).flatten()))
-        return la.sum(
-            la.multiply(-5, (nominal_capacity - self.nominal_capacity))
+
+        ## Actual investment cost
+        investment_cost = 0.0
+
+        ## Incentivier Cost
+        incentivizer_cost = la.sum(
+            la.multiply(
+                -11500.0 * 3,
+                (nominal_capacity - self.nominal_capacity),
+            )
         )  # -5 for toy case
+        # np.random.seed(0)  # For reproducibility in the toy case
+        # if la == np:
+        #     rand_weights = np.random.rand(*nominal_capacity.shape)
+        # else:  # assume torch
+        #     rand_weights = torch.rand_like(nominal_capacity)
+        # return la.sum(
+        #     la.multiply(
+        #         -11500.0 * rand_weights,
+        #         (nominal_capacity - self.nominal_capacity),
+        #     )
+        # )  # -5 for toy case
+
+        # return investment_cost + incentivizer_cost
+        return 0
 
 
 @torch.jit.script

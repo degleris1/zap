@@ -52,9 +52,7 @@ class AbstractPlanningProblem:
             # Fallback: set to infinity
             for p, (ind, pname) in self.parameter_names.items():
                 if self.upper_bounds[p] is None:
-                    self.upper_bounds[p] = np.inf * self.la.ones_like(
-                        self.lower_bounds[p]
-                    )
+                    self.upper_bounds[p] = np.inf * self.la.ones_like(self.lower_bounds[p])
 
     @property
     def parameter_names(self):
@@ -206,9 +204,7 @@ class AbstractPlanningProblem:
 
         if isinstance(self, StochasticPlanningProblem):
             if len(history[LOSS]) > 0:
-                history["rolling_loss"] += [
-                    np.mean(history[LOSS][-self.num_subproblems :])
-                ]
+                history["rolling_loss"] += [np.mean(history[LOSS][-self.num_subproblems :])]
             else:
                 history["rolling_loss"] += [np.mean(history[LOSS])]
         else:
@@ -254,6 +250,10 @@ class AbstractPlanningProblem:
         if proj is not None:
             state[param] = proj(state[param])
             return state
+        for param in state.keys():
+            state[param] = self.la.clip(
+                state[param], self.lower_bounds[param], self.upper_bounds[param]
+            )
         return state
 
     def get_state(self):
@@ -278,9 +278,7 @@ class AbstractPlanningProblem:
 class StochasticPlanningProblem(AbstractPlanningProblem):
     """Weighted mixture of planning problems."""
 
-    def __init__(
-        self, subproblems: list[AbstractPlanningProblem], weights: list[float] = None
-    ):
+    def __init__(self, subproblems: list[AbstractPlanningProblem], weights: list[float] = None):
         la = subproblems[0].la
 
         if weights is None:
@@ -320,18 +318,14 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
         else:  # torch
             self.lower_bounds = {
                 k: torch.max(
-                    torch.stack(
-                        [sub.lower_bounds[k] for sub in self.subproblems], dim=0
-                    ),
+                    torch.stack([sub.lower_bounds[k] for sub in self.subproblems], dim=0),
                     dim=0,
                 )[0]
                 for k in subproblems[0].lower_bounds.keys()
             }
             self.upper_bounds = {
                 k: torch.min(
-                    torch.stack(
-                        [sub.upper_bounds[k] for sub in self.subproblems], dim=0
-                    ),
+                    torch.stack([sub.upper_bounds[k] for sub in self.subproblems], dim=0),
                     dim=0,
                 )[0]
                 for k in subproblems[0].upper_bounds.keys()
@@ -341,15 +335,11 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
 
     @property
     def inv_cost(self):
-        return sum(
-            [w * sub.get_inv_cost() for w, sub in zip(self.weights, self.subproblems)]
-        )
+        return sum([w * sub.get_inv_cost() for w, sub in zip(self.weights, self.subproblems)])
 
     @property
     def op_cost(self):
-        return sum(
-            [w * sub.get_op_cost() for w, sub in zip(self.weights, self.subproblems)]
-        )
+        return sum([w * sub.get_op_cost() for w, sub in zip(self.weights, self.subproblems)])
 
     @property
     def num_subproblems(self):
@@ -374,9 +364,7 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
         self.batch = batch
 
         if self.num_workers == 1:
-            sub_costs = [
-                self.subproblems[b].forward(requires_grad, **kwargs) for b in batch
-            ]
+            sub_costs = [self.subproblems[b].forward(requires_grad, **kwargs) for b in batch]
         else:
             # Developer Note
             # Normally, multi-threading doesn't gain any performance in Python because of the GIL.
