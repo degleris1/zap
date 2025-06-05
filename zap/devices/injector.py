@@ -482,7 +482,12 @@ class DataCenterLoad(AbstractInjector):
         # return la.sum(la.multiply(terminal_reshape**2, (nominal_capacity - pnom_min).flatten()))
 
         ## Actual investment cost
-        investment_cost = 0.0
+        investment_cost = la.sum(
+            la.multiply(
+                self.capital_cost,
+                (nominal_capacity - self.nominal_capacity),
+            )
+        )
 
         ## Incentivier Cost
         incentivizer_cost = la.sum(
@@ -491,13 +496,15 @@ class DataCenterLoad(AbstractInjector):
                 (nominal_capacity - self.nominal_capacity),
             )
         )  # -5 for toy case
+
+        incentivizer_cost = 0.0
         # np.random.seed(0)  # For reproducibility in the toy case
         # if la == np:
         #     rand_weights = np.random.rand(*nominal_capacity.shape)
         # else:  # assume torch
         #     rand_weights = torch.rand_like(nominal_capacity)
         # return la.sum(
-        #     la.multiply(
+        #     la.multiply('
         #         -11500.0 * rand_weights,
         #         (nominal_capacity - self.nominal_capacity),
         #     )
@@ -507,7 +514,7 @@ class DataCenterLoad(AbstractInjector):
         return 0
 
 
-@torch.jit.script
+# @torch.jit.script
 def _admm_prox_update(power: list[torch.Tensor], rho: float, lin_cost, quad_cost, pmin, pmax):
     # Problem is
     #     min_p    a (p - pmin)^2 + b (p - pmin) + (rho / 2) || (p - power) ||_2^2 + {box constraints}
