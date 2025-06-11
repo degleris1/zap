@@ -144,6 +144,25 @@ def estimate_condition_number_sparse(A, fallback_tol=1e-12):
         return sigma_max / approx_sigma_min
 
 
+def stack_cvxpy_colwise(instance_list):
+    # grab one problem as template
+    base = get_standard_conic_problem(instance_list[0])[0]
+    m, n = base["A"].shape
+    T = len(instance_list)
+
+    b_mat = np.zeros((m, T))
+    c_mat = np.zeros((n, T))
+
+    for j, prob in enumerate(instance_list):
+        cone, *_ = get_standard_conic_problem(prob)
+        assert (cone["A"] != base["A"]).nnz == 0   # sparsity identical
+        b_mat[:, j] = cone["b"]                    # columns = scenarios
+        c_mat[:, j] = cone["c"]
+
+    cone_params = dict(P=base["P"], A=base["A"], b=b_mat, c=c_mat, K=base["K"])
+    return cone_params
+
+
 ### Utilities to Perform Ruiz Equilibration ###
 def build_symmetric_M(A_csc: sp.csc_matrix, P: sp.csc_matrix | None = None) -> sp.csc_matrix:
     """

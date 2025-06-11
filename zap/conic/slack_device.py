@@ -23,7 +23,7 @@ class SlackDevice(AbstractDevice):
 
     @property
     def time_horizon(self) -> int:
-        return 1
+        return self.b_d.shape[1]
 
     def model_local_variables(self, time_horizon: int) -> List[cp.Variable]:
         return None
@@ -95,12 +95,18 @@ class NonNegativeConeSlackDevice(SlackDevice):
         """
         return [-power[0] - self.b_d]  # <= 0
 
-    def admm_prox_update(self, _rho_power, _rho_angle, power, _angle, **kwargs):
+    def admm_prox_update(self, _rho_power, _rho_angle, power, _angle, b_d=None, **kwargs):
         """
         ADMM projection for non-negative cone:
         p_d^* = max(z_d, -b_d)
         """
-        return _admm_prox_update_nonneg(power, self.b_d)
+        if b_d is None:
+            b_vec = self.b_d
+        else:
+            b_vec = self.parameterize(b_d=b_d)
+
+
+        return _admm_prox_update_nonneg(power, b_vec)
 
 
 @torch.jit.script

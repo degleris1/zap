@@ -15,6 +15,7 @@ class QuadraticDevice(AbstractDevice):
 
     num_nodes: int
     terminals: NDArray
+    time_horizon: int
 
     @property
     def time_horizon(self) -> int:

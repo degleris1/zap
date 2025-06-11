@@ -435,6 +435,7 @@ class PowerNetwork:
         num_contingencies=0,
         contingency_device: Optional[int] = None,
         contingency_mask=None,
+        return_problem_only=False,
     ) -> DispatchOutcome:
         # Compute time horizon automatically
         if time_horizon is None:
@@ -492,6 +493,8 @@ class PowerNetwork:
         # Formulate and solve cvxpy problem
         objective = cp.Minimize(cp.sum(costs))
         problem = cp.Problem(objective, constraints)
+        if return_problem_only:
+            return problem
         problem.solve(solver=solver, **solver_kwargs)
         assert problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]
 

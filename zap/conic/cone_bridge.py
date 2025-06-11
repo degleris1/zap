@@ -29,7 +29,15 @@ class ConeBridge:
         self.K = cone_params["K"]
         self.G = self.A
         self.net = None
-        self.time_horizon = 1
+        # self.time_horizon = self.b.shape[1] # Batched case
+        if len(self.b.shape) == 1:
+            self.time_horizon = 1
+            self.b = self.b.reshape(-1,1)
+            self.c = self.c.reshape(-1,1)
+        else:
+            self.time_horizon = self.b.shape[1]
+            
+        # self.time_horizon = 1 # Unbatched case but will fix this
         self.devices = []
 
         self.ruiz_iters = ruiz_iters
@@ -271,11 +279,12 @@ class ConeBridge:
                 terms[j, :k] = A_sub.indices[start:end]
 
             cost_vec = self.c[device_idxs]
+            A_v_batched = np.repeat(A_v[:, :, None], self.time_horizon, axis=2)  # Batched Case
 
             device = VariableDevice(
                 num_nodes=self.net.num_nodes,
                 terminals=terms,
-                A_v=A_v,
+                A_v=A_v_batched,
                 cost_vector=cost_vec,
             )
             self.devices.append(device)
@@ -408,6 +417,7 @@ class ConeBridge:
         quadratic_device = QuadraticDevice(
             num_nodes=self.net.num_nodes,
             terminals=np.array(self.quadratic_indices),
+            time_horizion=self.time_horizon,
         )
 
         self.devices.append(quadratic_device)
