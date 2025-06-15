@@ -19,7 +19,7 @@ class QuadraticDevice(AbstractDevice):
 
     @property
     def time_horizon(self) -> int:
-        return 1
+        return self.time_horizon
 
     def model_local_variables(self, time_horizon: int) -> List[cp.Variable]:
         return None

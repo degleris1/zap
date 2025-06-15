@@ -26,6 +26,7 @@ juliacall = "^0.9.25"
 cmake = "^4.0.2"
 cupy-cuda12x = "^13.4.1"
 cvxpylayers = "^0.1.9"
+sparse = "^0.17.0"
 
 [tool.poetry.extras]
 pypsa = ["pypsa"]

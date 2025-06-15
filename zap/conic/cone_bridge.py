@@ -2,6 +2,7 @@ import numpy as np
 import cvxpy as cp
 import scipy.sparse as sp
 import sksparse.cholmod as cholmod
+import sparse
 
 from zap.network import PowerNetwork
 from .variable_device import VariableDevice
@@ -16,12 +17,14 @@ from zap.conic.cone_utils import (
     build_symmetric_M,
     scale_cols_csc,
     scale_rows_csr,
+    scale_cols,
+    scale_rows
 )
 from copy import deepcopy
 
 
 class ConeBridge:
-    def __init__(self, cone_params: dict, grouping_params: dict | None = None, ruiz_iters: int = 5):
+    def __init__(self, cone_params: dict, grouping_params: dict | None = None, ruiz_iters: int = 0):
         self.P = cone_params["P"]
         self.A = cone_params["A"]
         self.b = cone_params["b"]
@@ -29,7 +32,6 @@ class ConeBridge:
         self.K = cone_params["K"]
         self.G = self.A
         self.net = None
-        # self.time_horizon = self.b.shape[1] # Batched case
         if len(self.b.shape) == 1:
             self.time_horizon = 1
             self.b = self.b.reshape(-1,1)
@@ -37,16 +39,17 @@ class ConeBridge:
         else:
             self.time_horizon = self.b.shape[1]
             
-        # self.time_horizon = 1 # Unbatched case but will fix this
         self.devices = []
 
         self.ruiz_iters = ruiz_iters
         self.D_vec = None
         self.E_vec = None
         self.sigma = 1
+        self.is_batched = isinstance(self.A, sparse.GCXS)
 
         if not isspmatrix_csc(self.A):
-            self.A = csc_matrix(self.A)
+            if not isinstance(self.A, sparse.GCXS):
+                self.A = csc_matrix(self.A)
 
         if self.P is not None and not isspmatrix_csc(self.P):
             self.P = csc_matrix(self.P)
@@ -68,7 +71,10 @@ class ConeBridge:
 
     def _transform(self):
         if self.ruiz_iters > 0:
-            self._equilibrate_ruiz()
+            if self.is_batched:
+                self._equilibrate_ruiz_batched()
+            else:
+                self._equilibrate_ruiz()
         self._factorize_P()
         self._build_network()
         self._group_variable_devices()
@@ -97,7 +103,10 @@ class ConeBridge:
         L, D = factor.L_D()
 
         # Permute A and c
-        self.A = self.A[:, self.Q]  # A_perm = AQ.T
+        if self.is_batched:
+            self.A = self.A[:, self.Q, :]  # A_perm = AQ.T
+        else:
+            self.A = self.A[:, self.Q]  # A_perm = AQ.T
         self.c = self.c[self.Q]  # c_perm = Qc
 
         # Construct B
@@ -108,46 +117,67 @@ class ConeBridge:
         self.B = (B[nz_rows, :]).tocsc()
 
         # Construct G
-        self.G = vstack([self.A, -1 * self.B], format="csc")
+        if self.is_batched:
+            # We need to turn B into repeated GCXS so we can stack it along the batches in A
+            B_coo = sparse.COO.from_scipy_sparse(self.B)
+            B_rep = sparse.stack([B_coo] * self.time_horizon, axis=2).asformat("gcxs", compressed_axes=[1]) # Repeat across batch dim
+            # Stack B instead of -B because of sparse complaining about fill values. 
+            # It is mathematically equivalent to pick B or -B. 
+            self.G = sparse.concatenate((self.A, B_rep), axis=0) # stack along the rows for each batch
+        else:
+            self.G = vstack([self.A, -1 * self.B], format="csc")
 
     def _equilibrate_ruiz(self):
         """
         Follows Ruiz Equilibration from Clarabel and OSQP.
-        Builds the symmetric matrix M = [[P, A.T], [A, 0]]
+        Builds the symmetric matrix M = [[P, A.T], [A, 0]].
+        For a batched problem, this computes a global scaling. 
         """
         P = deepcopy(self.P)
         A = deepcopy(self.A)
         c = deepcopy(self.c)
         b = deepcopy(self.b)
 
-        m, n = A.shape
+        self.is_batched = isinstance(A, sparse.GCXS)
+
+        m, n = A.shape[:2]
         self.D_vec = np.ones(m)
         self.E_vec = np.ones(n)
-        self.sigma = 1
+        self.sigma = 1.0
         num_zero_cone = self.K["z"]
         num_nonneg_cone = self.K["l"]
         soc_sizes = self.K.get("q", [])
         soc_starts = np.cumsum([0] + soc_sizes[:-1]) + (num_zero_cone + num_nonneg_cone)
 
         for i in range(self.ruiz_iters):
+            # Compute max norms across all batches
+            combined_max = np.zeros(n + m)
+
+            for batch in range(self.time_horizon):
+                if self.is_batched:
+                    A_batch = A[:,:, batch].to_scipy_sparse().tocsc()
+                else:
+                    A_batch = A
+                M_batch = build_symmetric_M(A_csc=A_batch, P=P)
+                col_inf_norms = np.abs(M_batch).max(axis=0).toarray().ravel()
+                combined_max = np.maximum(combined_max, col_inf_norms)
+
+
             # Compute scale factors
-            M = build_symmetric_M(A_csc=A, P=P)
-            col_inf_norms = np.abs(M).max(axis=0).toarray().ravel()
-            delta = np.ones_like(col_inf_norms)
-            delta[col_inf_norms > 0] = 1 / np.sqrt(col_inf_norms[col_inf_norms > 0])
+            delta = np.ones_like(combined_max)
+            delta[combined_max > 0] = 1.0 / np.sqrt(combined_max[combined_max > 0])
             delta_cols = delta[:n]
             delta_rows = delta[n:]
 
             # Column scaling as part of M equilibration
-            c = delta_cols * c
+            c = delta_cols[:, np.newaxis] * c
             self.E_vec = self.E_vec * delta_cols
-            A = scale_cols_csc(A, delta_cols)
+            A = scale_cols(A, delta_cols)
 
             # Row scaling as part of M equilibration
-            b = delta_rows * b
+            b = delta_rows[:, np.newaxis] * b
             self.D_vec = self.D_vec * delta_rows
-            A_csr = A.tocsr()
-            A_csr = scale_rows_csr(A_csr, delta_rows)
+            A = scale_rows(A, delta_rows)
 
             # Preserve cone membership
             for s, sz in zip(soc_starts, soc_sizes):
@@ -157,11 +187,9 @@ class ConeBridge:
                 correction_factors[block_idxs] = g / self.D_vec[block_idxs]
 
                 if not np.allclose(correction_factors, 1):
-                    A_csr = scale_rows_csr(A_csr, correction_factors)
-                    b = b * correction_factors
+                    A = scale_rows(A, correction_factors)
+                    b = b * correction_factors[:, np.newaxis]
                     self.D_vec[block_idxs] = g
-
-            A = A_csr.tocsc()
 
             # Scaling factor sigma and P updates
             if P is not None:
@@ -193,6 +221,113 @@ class ConeBridge:
         self.b = b
         self.c = c
 
+    def _equilibrate_ruiz_batched(self):
+        """
+        Ruiz equilibration for batched problems—each batch gets its own scaling factors.
+        TODO: Currently written not efficiently. Update later and can combine to have only 
+        a single ruiz_equilibration routine. 
+        """
+        P = deepcopy(self.P)
+        A = deepcopy(self.A)
+        c = deepcopy(self.c)
+        b = deepcopy(self.b)
+
+        m, n = A.shape[:2]
+        
+        self.D_vec = np.ones((m, self.time_horizon))
+        self.E_vec = np.ones((n, self.time_horizon))
+        self.sigma = np.ones(self.time_horizon)
+        
+        num_zero_cone = self.K["z"]
+        num_nonneg_cone = self.K["l"]
+        soc_sizes = self.K.get("q", [])
+        soc_starts = np.cumsum([0] + soc_sizes[:-1]) + (num_zero_cone + num_nonneg_cone)
+
+        for i in range(self.ruiz_iters):
+            # Compute scaling factors for each batch separately
+            combined_max = np.zeros((n + m, self.time_horizon))
+            
+            for batch in range(self.time_horizon):
+                A_batch = A[:, :, batch].to_scipy_sparse().tocsc()
+                M_batch = build_symmetric_M(A_csc=A_batch, P=P)
+                col_inf_norms = np.abs(M_batch).max(axis=0).toarray().ravel()
+                combined_max[:, batch] = col_inf_norms
+
+            # Compute scale factors for each batch
+            delta = np.ones_like(combined_max)
+            mask = combined_max > 0
+            delta[mask] = 1.0 / np.sqrt(combined_max[mask])
+            delta_cols = delta[:n, :]
+            delta_rows = delta[n:, :]
+
+            # Column and row scaling
+            c = delta_cols * c
+            self.E_vec = self.E_vec * delta_cols
+            b = delta_rows * b
+            self.D_vec = self.D_vec * delta_rows
+
+            A_list = []
+            for batch in range(self.time_horizon):
+                A_batch = A[:, :, batch].to_scipy_sparse().tocsc()
+                A_batch = scale_cols_csc(A_batch, delta_cols[:, batch])
+                A_batch = A_batch.tocsr()
+                A_batch = scale_rows_csr(A_batch, delta_rows[:, batch])
+                A_batch = A_batch.tocsc()
+                A_coo = sparse.COO.from_scipy_sparse(A_batch)
+                A_list.append(A_coo)
+            A_stacked = sparse.stack(A_list, axis=2)
+            A = A_stacked.asformat("gcxs", compressed_axes=[1])
+
+            # Preserve cone membership (per batch)
+            for s, sz in zip(soc_starts, soc_sizes):
+                block_idxs = slice(s, s + sz)
+                # Compute g for each batch
+                g = np.exp(np.mean(np.log(self.D_vec[block_idxs, :]), axis=0))
+                correction_factors = np.ones((m, self.time_horizon))
+                correction_factors[block_idxs, :] = g[np.newaxis, :] / self.D_vec[block_idxs, :]
+
+                if not np.allclose(correction_factors, 1):
+                    A_list = []
+                    for batch in range(self.time_horizon):
+                        A_batch = A[:, :, batch].to_scipy_sparse().tocsr()
+                        A_batch = scale_rows_csr(A_batch, correction_factors[:, batch])
+                        A_batch = A_batch.tocsc()
+                        A_coo = sparse.COO.from_scipy_sparse(A_batch)
+                        A_list.append(A_coo)
+                    
+                    A_stacked = sparse.stack(A_list, axis=2)
+                    A = A_stacked.asformat("gcxs", compressed_axes=[1])
+                    
+                    b = correction_factors * b
+                    self.D_vec[block_idxs, :] = g[np.newaxis, :]
+
+            # Sigma updates (per batch)
+            if P is not None:
+                avg_delta_cols = np.mean(delta_cols, axis=1)  # Average across batches (could arbitrarily pick a batch too)
+                P_csr = scale_rows_csr(P.tocsr(), avg_delta_cols)
+                P = scale_cols_csc(P_csr.tocsc(), avg_delta_cols)
+                P_inf_norm_mean = np.abs(P).max(axis=0).mean()
+            else:
+                P_inf_norm_mean = -np.inf
+
+            c_inf_norm = np.max(np.abs(c), axis=0)  # Max per batch
+            sigma_step = 1.0 / np.maximum(c_inf_norm, P_inf_norm_mean)
+            proposed_sigma = self.sigma * sigma_step
+
+            mask_small = proposed_sigma <= 1e-2
+            sigma_step = np.where(mask_small, 1.0, np.clip(sigma_step, None, 1e4 / self.sigma))
+
+            self.sigma *= sigma_step
+            c = c * sigma_step[np.newaxis, :]  # Broadcasting
+            if P is not None:
+                P = P * sigma_step[0]  # Use first batch sigma for P
+
+        # Update the cone parameters
+        self.P = P
+        self.A = A
+        self.b = b
+        self.c = c
+
     def _build_network(self):
         self.net = PowerNetwork(self.G.shape[0])
 
@@ -214,7 +349,13 @@ class ConeBridge:
         self.device_group_map_list = []
         self.terminal_groups = []
 
-        num_terminals_per_device_list = np.diff(self.G.indptr)
+        if self.is_batched:
+            G_sub0 = self.G[:, :, 0].to_scipy_sparse().tocsc()
+        else:
+            G_sub0 = self.G
+        
+        num_terminals_per_device_list = np.diff(G_sub0.indptr)
+
         positive_mask = num_terminals_per_device_list > 0
         filtered_counts = num_terminals_per_device_list[positive_mask]
         device_idxs = np.nonzero(positive_mask)[0]
@@ -258,29 +399,44 @@ class ConeBridge:
             if num_devices == 0:
                 continue
 
-            A_sub = self.G[:, device_idxs]  # Still sparse representation
-            nnz_per_col = np.diff(A_sub.indptr)
+
+            if self.is_batched:
+                A_sub0 = self.G[:, device_idxs, 0].to_scipy_sparse().tocsc()
+            else:
+                A_sub0 = self.G[:, device_idxs]  # Still sparse representation
+            nnz_per_col = np.diff(A_sub0.indptr)
             # We don't pad to the bin edge, but to the max number of terminals in the bin group
             k_max = nnz_per_col.max()
 
             # A_v is a submatrix of A: (num (max) terminals i.e. k_max, num_devices)
-            A_v = np.zeros((k_max, num_devices), dtype=A_sub.data.dtype)
+            A_v_batched = np.zeros((k_max, num_devices, self.time_horizon), dtype=A_sub0.data.dtype)
             terms = -np.ones(
                 (num_devices, k_max), dtype=np.int64
             )  # We use -1 for padding here (because 0 is an actual terminal)
 
-            # Populate the padded matrix A_v column by column using sparse info from A_sub
+            # Populate the padded matrix A_v column by column using sparse info from A_sub (batch 0 and terminals)
             for j, col_idx in enumerate(range(num_devices)):
-                start, end = A_sub.indptr[j : j + 2]
+                start, end = A_sub0.indptr[j : j + 2]
                 k = end - start  # Number of terminals (non-zero entries) in this column
                 if k == 0:
                     continue
-                A_v[:k, j] = A_sub.data[start:end]
-                terms[j, :k] = A_sub.indices[start:end]
+                A_v_batched[:k, j, 0] = A_sub0.data[start:end]
+                terms[j, :k] = A_sub0.indices[start:end]
+
+            # Now populate the rest of the batches
+            for b in range(1, self.time_horizon):
+                A_sub_b = self.G[:, device_idxs, b].to_scipy_sparse().tocsc()
+
+                for j, col_idx in enumerate(range(num_devices)):
+                    start, end = A_sub_b.indptr[j : j + 2]
+                    k = end - start
+                    if k == 0:
+                        continue
+                    A_v_batched[:k, j, b] = A_sub_b.data[start:end]
+
 
             cost_vec = self.c[device_idxs]
-            A_v_batched = np.repeat(A_v[:, :, None], self.time_horizon, axis=2)  # Batched Case
-
+            
             device = VariableDevice(
                 num_nodes=self.net.num_nodes,
                 terminals=terms,
@@ -396,12 +552,12 @@ class ConeBridge:
             k_max = max(k for _, _, k in bin_blocks)
             num_devices = len(bin_blocks)
 
-            b_d_array = np.zeros((k_max, num_devices), dtype=self.b.dtype)
+            b_d_array = np.zeros((k_max, num_devices, self.time_horizon), dtype=self.b.dtype)
             terminals = -np.ones((num_devices, k_max), dtype=np.int64)
             for bin_idx, (start, end, k) in enumerate(bin_blocks):
-                b_d_array[:k, bin_idx] = self.b[start:end]
+                b_d_array[:k, bin_idx, :] = self.b[start:end, :]
                 terminals[bin_idx, :k] = self.slack_indices[start:end]
-
+            
             soc_cone_device = SecondOrderConeSlackDevice(
                 num_nodes=self.net.num_nodes,
                 terminals=terminals,
@@ -417,7 +573,7 @@ class ConeBridge:
         quadratic_device = QuadraticDevice(
             num_nodes=self.net.num_nodes,
             terminals=np.array(self.quadratic_indices),
-            time_horizion=self.time_horizon,
+            time_horizon=self.time_horizon,
         )
 
         self.devices.append(quadratic_device)

@@ -11,6 +11,7 @@ from zap.conic.slack_device import (
 )
 from zap.conic.quadratic_device import QuadraticDevice
 from scipy.sparse.linalg import svds
+import sparse
 
 
 def get_standard_conic_problem(problem, solver=cp.CLARABEL):
@@ -145,22 +146,164 @@ def estimate_condition_number_sparse(A, fallback_tol=1e-12):
 
 
 def stack_cvxpy_colwise(instance_list):
-    # grab one problem as template
+    """
+    Note in this function we use pydata.sparse to form multi-dimensional sparse arrays (along batch dim).
+    """
+    # Grab one problem as template
     base = get_standard_conic_problem(instance_list[0])[0]
-    m, n = base["A"].shape
+    base_A = base["A"]
+    m, n = base_A.shape
     T = len(instance_list)
 
+    # Initialize batched b and c
     b_mat = np.zeros((m, T))
     c_mat = np.zeros((n, T))
 
-    for j, prob in enumerate(instance_list):
+    coos = []
+    base_A_coo = sparse.COO.from_scipy_sparse(base_A)
+    coos.append(base_A_coo)
+    b_mat[:, 0] = base["b"]
+    c_mat[:, 0] = base["c"]
+    for j, prob in enumerate(instance_list[1:], start=1):
         cone, *_ = get_standard_conic_problem(prob)
-        assert (cone["A"] != base["A"]).nnz == 0   # sparsity identical
-        b_mat[:, j] = cone["b"]                    # columns = scenarios
-        c_mat[:, j] = cone["c"]
+        cur_A = cone["A"].tocsc()
 
-    cone_params = dict(P=base["P"], A=base["A"], b=b_mat, c=c_mat, K=base["K"])
+        # Ensure sparsity pattern is identical
+        assert np.array_equal(cur_A.indptr, base_A.indptr) and np.array_equal(cur_A.indices, base_A.indices)
+
+        b_mat[:, j] = cone["b"]
+        c_mat[:, j] = cone["c"]
+        cur_coo = sparse.COO.from_scipy_sparse(cone["A"])
+        coos.append(cur_coo)
+
+    A_coo = sparse.stack(coos, axis=2)
+    A_mat = A_coo.asformat("gcxs", compressed_axes=[1])
+
+    cone_params = dict(P=base["P"], A=A_mat, b=b_mat, c=c_mat, K=base["K"])
     return cone_params
+
+def compute_batch_objectives(state, devices):
+    """
+    Compute the objective values for each batch in the batched solution.
+    
+    Args:
+        state: ADMMState containing the solution
+        devices: List of devices
+        
+    Returns:
+        torch.Tensor of shape (time_horizon,) containing objective values for each batch
+    """
+    # Get the batch dimension (time_horizon)
+    time_horizon = state.power[0][0].shape[-1]
+    device = state.power[0][0].device
+    
+    # Create tensor to hold batch objectives
+    batch_objectives = torch.zeros(time_horizon, device=device)
+    
+    # For each batch
+    for t in range(time_horizon):
+        batch_costs = []
+        
+        # For each device
+        for i, d in enumerate(devices):
+            # Extract this batch's power for all terminals
+            batch_power = [terminal[:, t] for terminal in state.power[i]]
+            
+            # Extract this batch's local variables (if any)
+            lv0 = state.local_variables[i]
+            lv_slice = None if lv0 is None else  [lv[:, t] for lv in lv0]
+            
+            # For VariableDevice, we need to use just this batch's cost_vector
+            if isinstance(d, VariableDevice):
+                c_t = d.cost_vector[:, t]
+                x_t = lv_slice[0]
+                cost = torch.dot(c_t, x_t)                
+            else:
+                # For other devices, just compute the cost
+                cost = d.operation_cost(batch_power, None, lv_slice, la=torch)
+            
+            batch_costs.append(cost)
+        
+        # Sum all device costs for this batch
+        batch_objectives[t] = sum(batch_costs)
+    
+    return batch_objectives
+
+
+def map_cvxpy_parameters_to_cone_program(problem, parameters, solver=cp.CLARABEL):
+    """
+    TODO: Re-write this function to not do the difference of applications eventually.
+    """    
+    probdata, chain, inverse_data = problem.get_problem_data(solver=solver)
+    compiler = probdata[cp.settings.PARAM_PROB]
+    
+    has_quadratic_obj = compiler.reduced_P.matrix_data is not None
+    
+    # Create parameter mappings using the difference method
+    param_mappings = {}
+    for i, param in enumerate(parameters):
+        param_name = param.name()
+        param_id = param.id
+        
+        original_value = param.value
+        
+        # Test values
+        if param.shape == ():  # Scalar parameter
+            test_value1 = 1.0
+            test_value2 = 0.0
+        else:
+            test_value1 = np.ones(param.shape)
+            test_value2 = np.zeros(param.shape)
+        
+        param.value = test_value1
+        if has_quadratic_obj:
+            P1, c1, d1, A1, b1 = compiler.apply_parameters(quad_obj=True)
+        else:
+            c1, d1, A1, b1 = compiler.apply_parameters(quad_obj=False)
+            P1 = None
+        
+        param.value = test_value2
+        if has_quadratic_obj:
+            P2, c2, d2, A2, b2 = compiler.apply_parameters(quad_obj=True)
+        else:
+            c2, d2, A2, b2 = compiler.apply_parameters(quad_obj=False)
+            P2 = None
+        
+        param.value = original_value
+        
+        c_diff = np.where(c1 != c2)[0].tolist()
+        b_diff = np.where(b1 != b2)[0].tolist()
+        d_affected = d1 != d2
+
+        if sp.issparse(A1):
+            A_diff = (A1 != A2).nonzero()
+            A_affected = list(zip(A_diff[0].tolist(), A_diff[1].tolist()))
+        else:
+            A_diff = np.where(A1 != A2)
+            A_affected = list(zip(A_diff[0].tolist(), A_diff[1].tolist()))
+        
+        P_affected = []
+        if P1 is not None and P2 is not None:
+            if sp.issparse(P1):
+                P_diff = (P1 != P2).nonzero()
+                P_affected = list(zip(P_diff[0].tolist(), P_diff[1].tolist()))
+            else:
+                P_diff = np.where(P1 != P2)
+                P_affected = list(zip(P_diff[0].tolist(), P_diff[1].tolist()))
+        
+        param_mappings[param_name] = {
+            'id': param_id,
+            'size': param.size,
+            'param_col': compiler.param_id_to_col.get(param_id, None),
+            'c': c_diff,
+            'b': b_diff,
+            'A': A_affected,
+            'P': P_affected,
+            'd': d_affected
+
+        }
+    
+    return param_mappings
 
 
 ### Utilities to Perform Ruiz Equilibration ###
@@ -194,3 +337,37 @@ def scale_rows_csr(A_csr: sp.csr_matrix, scale: np.ndarray):
     A_csr.data *= np.repeat(scale, np.diff(A_csr.indptr))
 
     return A_csr
+
+
+def scale_cols(A, scale):
+    """
+    Column-scale A in place.
+    Supports both SciPy CSC and GCXS matrices.
+    """
+    if not isinstance(A, sparse.GCXS):
+        return scale_cols_csc(A, scale)
+    
+    # GCXS case
+    if hasattr(A, 'compressed_axes') and A.compressed_axes == (1,):
+        indptr = A.indptr
+        data = A.data
+        for j in range(len(indptr) - 1):
+            data[indptr[j]:indptr[j + 1]] *= scale[j]
+        return A
+
+def scale_rows(A, scale):
+    """
+    Row-scale A in place.
+    Supports both SciPy CSC and GCXS matrices.
+    """
+    if not isinstance(A, sparse.GCXS):
+        A_csr = A.tocsr()
+        A_csr = scale_rows_csr(A_csr, scale)
+        return A_csr.tocsc()
+    else: # GCXS case
+        indices = A.indices
+        data = A.data
+        rows = indices[0]
+        data *= scale[rows]
+        return A
+

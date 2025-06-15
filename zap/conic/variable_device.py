@@ -23,12 +23,35 @@ class VariableDevice(AbstractDevice):
     A_v: NDArray
     cost_vector: NDArray  # add make dynamic here?
 
-    # def __attrs_post_init__(self):
-        # assert self.A_v.shape == (self.num_terminals_per_device, self.num_devices)
-
     @property
     def time_horizon(self) -> int:
         return self.cost_vector.shape[1]
+
+    def parameterize(self, la=np, **params):
+        new_params = {}
+        
+        for k, v in params.items():
+            if isinstance(v, tuple) and len(v) == 2:
+                # Index-based update
+                indices, values = v
+                
+                current = getattr(self, k)
+                if la == torch and isinstance(current, torch.Tensor):
+                    updated = current.clone()
+                else:
+                    updated = np.copy(current)
+                
+                updated[indices] = values
+                
+                new_params[k] = make_dynamic(replace_none(updated, getattr(self, k)))
+            else:
+                new_params[k] = make_dynamic(replace_none(v, getattr(self, k)))
+        
+        if la == torch:
+            new_params = torchify(new_params)
+        
+        return list(new_params.values())[0]
+
 
     @cached_property
     def incidence_matrix(self):
@@ -117,7 +140,7 @@ class VariableDevice(AbstractDevice):
         return _admm_prox_update(self.A_v, self.cost_vector, power, rho_power)
 
 
-# @torch.jit.script
+@torch.jit.script
 def _admm_prox_update(A_v, c_bv, power: list[torch.Tensor], rho: float):
     """
     See Overleaf on Conic Translation Sec. 4.1.1 for full details (will update the comments here eventually)
@@ -136,9 +159,6 @@ def _admm_prox_update(A_v, c_bv, power: list[torch.Tensor], rho: float):
 
     # go back to list of tensors (list of length number of terminals,
     # each element is num_devices, time_horizon)
-    # p_list = [p_tensor[i].unsqueeze(-1) for i in range(p_tensor.shape[0])]
     p_list = [p_tensor[i] for i in range(p_tensor.shape[0])]
 
-
-    # return p_list, None, [x_star.unsqueeze(-1).expand(-1, 1)]
     return p_list, None, [x_star]

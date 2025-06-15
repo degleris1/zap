@@ -23,7 +23,7 @@ class SlackDevice(AbstractDevice):
 
     @property
     def time_horizon(self) -> int:
-        return self.b_d.shape[1]
+        return self.b_d.shape[-1]
 
     def model_local_variables(self, time_horizon: int) -> List[cp.Variable]:
         return None
@@ -39,6 +39,31 @@ class SlackDevice(AbstractDevice):
 
     def admm_prox_update(self, power, rho):
         raise NotImplementedError
+
+    def parameterize(self, la=np, **params):
+        new_params = {}
+        
+        for k, v in params.items():
+            if isinstance(v, tuple) and len(v) == 2:
+                # Index-based update
+                indices, values = v
+                
+                current = getattr(self, k)
+                if la == torch and isinstance(current, torch.Tensor):
+                    updated = current.clone()
+                else:
+                    updated = np.copy(current)
+                
+                updated[indices] = values
+                
+                new_params[k] = make_dynamic(replace_none(updated, getattr(self, k)))
+            else:
+                new_params[k] = make_dynamic(replace_none(v, getattr(self, k)))
+        
+        if la == torch:
+            new_params = torchify(new_params)
+        
+        return list(new_params.values())[0]
 
 
 # ====
@@ -196,8 +221,10 @@ class SecondOrderConeSlackDevice(SlackDevice):
         Enforces SOC constraint.
         """
         z = cp.vstack([p.T for p in power])  # (num_terminals, num_devices)
-        s = z + self.b_d
-        return [cp.norm(s[1:, i], 2) - s[0, i] for i in range(s.shape[1])]
+        s = z[:,:, np.newaxis] + self.b_d
+
+        return [cp.norm(s[1:, i, batch], 2) - s[0, i, batch] for batch in range(self.time_horizon)
+            for i in range(s.shape[1])]
 
     def admm_prox_update(self, _rho_power, _rho_angle, power, _angle, **kwargs):
         """
@@ -215,16 +242,16 @@ def _admm_prox_update_soc(
     See overleaf for details. Variable notation follows the Overleaf.
     """
 
-    z = torch.stack([p.squeeze(-1) for p in power], dim=0)  # (num_terminals, num_devices)
+    z = torch.stack(power, dim=0)  # (num_terminals, num_devices, time_horizon)
     s = z + b_d
-    k = s[0, :]
-    u = s[1:, :]
+    k = s[0, :, :]
+    u = s[1:, :, :]
 
     # Gets which entries of s are valid (i.e. not padded to 0)
     # Valid is a boolean of the same shape as s, with True for valid entries
     # and False for padded entries
-    rows = torch.arange(u.shape[0], device=u.device).unsqueeze(1)
-    valid = rows < (terminals_per_device - 1).unsqueeze(0)
+    rows = torch.arange(u.shape[0], device=u.device).unsqueeze(1).unsqueeze(2)
+    valid = rows < (terminals_per_device - 1).unsqueeze(0).unsqueeze(2)
 
     u_masked = u * valid
     r = torch.norm(u_masked, 2, dim=0)
@@ -254,5 +281,6 @@ def _admm_prox_update_soc(
 
     # Note Case 3 is covered implicitly by our zero initialization of proj
 
-    p_list = [proj[i].unsqueeze(-1) for i in range(proj.shape[0])]
+    p_list = [proj[i] for i in range(proj.shape[0])]
+
     return p_list, None, None
