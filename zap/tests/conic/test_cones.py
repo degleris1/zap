@@ -5,6 +5,7 @@ import numpy.testing as npt
 import torch
 import scs
 import scipy.sparse as sp
+from cvxpylayers.torch import CvxpyLayer
 from zap.admm import ADMMSolver, ADMMLayer
 from zap.conic.conic_layer import ConicADMMLayer
 from zap.conic.cone_bridge import ConeBridge
@@ -789,3 +790,73 @@ class TestConeBatching(unittest.TestCase):
             delta=TOL,
             msg=f"SOCP Batched solution 2 {batch_objectives[1].item()} differs from reference {ref_obj2}"
         )
+
+class TestConeLayers(unittest.TestCase):
+    def test_cvxpy_layer(self):
+        n_nodes = 10000
+        torch.manual_seed(42)
+        def build_max_flow_cvxpy_layer(n, base_seed):
+            bench = MaxFlowBenchmarkSet(num_problems=1, n=n_nodes, quad_obj=False, base_seed=42)
+            data = bench.get_data(0)
+            inc, adj, b, c, cap_true, n_edges = data
+            source_sink_edge_idx = int(np.argmax(c))
+
+            f = cp.Variable(n_edges)
+            cap = cp.Parameter(n_edges, nonneg=True)
+            constraints = []
+            constraints.append(f <= cap)
+            constraints.append(inc @ f == b)
+            obj = c @ f
+            problem = cp.Problem(cp.Minimize(-obj), constraints)
+            layer = CvxpyLayer(problem, parameters=[cap], variables=[f])
+
+            return layer, torch.tensor(cap_true, dtype=torch.float32), torch.tensor(c, dtype=torch.float32), inc, n_edges
+
+        cvxpy_max_flow_layer, cap_true_tensor, c_tensor, inc, n_edges = build_max_flow_cvxpy_layer(n=n_nodes, base_seed=42)
+
+        # Learn capacities in a training loop
+        mask_real = torch.ones(n_edges, dtype=torch.bool)
+        mask_real[-1] = False
+        cap_artificial  = 10000.0  
+
+        def assemble_cap(full_like_true, cap_real_vec):
+            out = full_like_true.clone() # just for shape
+            out[mask_real] = cap_real_vec
+            out[-1] = cap_artificial
+            return out
+
+
+        cap_var = torch.nn.Parameter(10.0* torch.ones_like(cap_true_tensor[mask_real])) # This doesnt include artificial edge
+        optimizer = torch.optim.Adam([cap_var], lr=0.005)
+        lmbda = 1e-3 # Sparse regularization 
+        # actual_flow_val = torch.dot(cvxpy_max_flow_layer(cap_true_tensor)[0], c_tensor)
+        # actual_flow_val = torch.tensor(203.78) # 100 node
+        # actual_flow_val = torch.tensor(213.11) # 1000 node
+        actual_flow_val = torch.tensor(367.07)
+        residual_norms = []
+        flow_vals_cvxpy = []
+        loss_vals_cvxpy = []
+
+        num_iters = 1
+        for iter in range(num_iters):
+            optimizer.zero_grad()
+
+            cap_full = assemble_cap(cap_true_tensor, cap_var)
+            f_pred  = cvxpy_max_flow_layer(cap_full, solver_args={"mode": "lsqr", "use_indirect": True, "gpu": False})[0]
+            flow_val = torch.dot(f_pred, c_tensor)
+            flow_vals_cvxpy.append(flow_val.item())
+            print(f"completed forward pass: {flow_val.item()}")
+
+            loss = 0.5 * (flow_val - actual_flow_val) ** 2 + lmbda*cap_var.sum()
+            loss_vals_cvxpy.append(loss.item())
+            print("starting backward pass")
+            loss.backward()
+            optimizer.step()
+
+            with torch.no_grad():
+                cap_var.clamp_(1.0, 10.0)
+
+            if iter % 10 == 0:
+                print(f"{iter:3d} | flow={flow_val.item():.4f} | loss={loss.item():.2e}")
+
+
