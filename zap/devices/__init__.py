@@ -8,3 +8,4 @@ from zap.devices.store import Battery
 from zap.devices.transporter import DCLine, ACLine
 from zap.devices.ground import Ground
 from zap.devices.power_target import PowerTarget
+from zap.devices.learned_injectors import LearnedProxGenerator, LearnedProxLoad
