@@ -54,6 +54,7 @@ class LearnedProxGenerator(Generator):
         prox_hidden_depth: int = 1,
         use_batch_norm: bool = True,
         use_output_layer: bool = True,
+        use_residual: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -65,13 +66,14 @@ class LearnedProxGenerator(Generator):
             use_batch_norm=use_batch_norm,
             use_output_layer=use_output_layer,
         )
+        self.use_residual = use_residual
         self.has_changed = True
 
     def admm_prox_update(
         self,
         rho_power: float,
         rho_angle: float,
-        power,  # list[torch.Tensor]
+        power,
         angle,
         nominal_capacity=None,
         max_power=None,
@@ -80,22 +82,23 @@ class LearnedProxGenerator(Generator):
         power_weights=None,
         angle_weights=None,
     ):
-        nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity)
-        max_power = self.parameterize(max_power=max_power)
-        min_power = self.parameterize(min_power=min_power)
+        p_base, _ = super().admm_prox_update(
+            rho_power=rho_power,
+            rho_angle=rho_angle,
+            power=power,
+            angle=angle,
+            nominal_capacity=nominal_capacity,
+            max_power=max_power,
+            min_power=min_power,
+            linear_cost=linear_cost,
+            power_weights=power_weights,
+            angle_weights=angle_weights,
+        )
+        p_base = p_base[0]
 
-        if self.has_changed:
-            self._pmax = torch.multiply(max_power, nominal_capacity)
-            self._pmin = torch.multiply(min_power, nominal_capacity)
-            self.has_changed = False
-
-        set_p = power[0]
-        rho = torch.full_like(set_p, rho_power)
-        inp = torch.stack((set_p, rho), dim=-1)
-        p = self.prox_net(inp).squeeze(-1)
-
-        p = torch.clip(p, self._pmin, self._pmax)
-        return [p], None
+        return _admm_prox_update(
+            rho_power, power, p_base=p_base, prox_net=self.prox_net, use_residual=self.use_residual
+        )
 
 
 class LearnedProxLoad(Load):
@@ -108,6 +111,7 @@ class LearnedProxLoad(Load):
         prox_hidden_depth: int = 1,
         use_batch_norm: bool = True,
         use_output_layer: bool = True,
+        use_residual: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -119,13 +123,14 @@ class LearnedProxLoad(Load):
             use_batch_norm=use_batch_norm,
             use_output_layer=use_output_layer,
         )
+        self.use_residual = use_residual
         self.has_changed = True
 
     def admm_prox_update(
         self,
         rho_power: float,
         rho_angle: float,
-        power,  # list[torch.Tensor]
+        power,
         angle,
         nominal_capacity=None,
         max_power=None,
@@ -134,20 +139,45 @@ class LearnedProxLoad(Load):
         power_weights=None,
         angle_weights=None,
     ):
-        nominal_capacity = self.parameterize(nominal_capacity=nominal_capacity)
-        max_power = self.parameterize(max_power=max_power)
-        min_power = self.parameterize(min_power=min_power)
+        p_base, _ = super().admm_prox_update(
+            rho_power=rho_power,
+            rho_angle=rho_angle,
+            power=power,
+            angle=angle,
+            nominal_capacity=nominal_capacity,
+            max_power=max_power,
+            min_power=min_power,
+            linear_cost=linear_cost,
+            power_weights=power_weights,
+            angle_weights=angle_weights,
+        )
 
-        if self.has_changed:
-            self._pmax = torch.multiply(max_power, nominal_capacity)
-            self._pmin = torch.multiply(min_power, nominal_capacity)
-            self.has_changed = False
+        p_base = p_base[0]
 
-        set_p = power[0]
-        rho = torch.full_like(set_p, rho_power)
-        inp = torch.stack((set_p, rho), dim=-1)
-        p = self.prox_net(inp).squeeze(-1)
+        return _admm_prox_update(
+            rho_power, power, p_base=p_base, prox_net=self.prox_net, use_residual=self.use_residual
+        )
 
-        # Clamp to bounds (note: for Load pmin is negative, pmax = 0)
-        p = torch.clip(p, self._pmin, self._pmax)
-        return [p], None
+
+def _admm_prox_update(
+    rho_power: float,
+    power: list[torch.Tensor],
+    p_base: torch.Tensor = None,
+    prox_net: nn.Module = None,
+    use_residual: bool = False,
+) -> tuple[list[torch.Tensor], None]:
+    set_p = power[0]
+    orig_shape = set_p.shape
+
+    rho_feat = rho_power.expand_as(set_p)
+    inp = torch.stack((set_p, rho_feat), dim=-1)
+    inp2d = inp.view(-1, 2)
+
+    # Apply prox net
+    p_flat = prox_net(inp2d).squeeze(-1)
+    if use_residual:
+        p = p_flat.view(orig_shape) + p_base
+    else:
+        p = p_flat.view(orig_shape)
+
+    return [p], None
