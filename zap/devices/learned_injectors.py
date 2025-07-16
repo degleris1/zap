@@ -8,12 +8,14 @@ from torch import nn
 
 from .injector import Generator, Load
 
+NUM_FEATURES = 5
+
 
 def _build_prox_mlp(
     *,
     input_dim: int,
     output_dim: int = 1,
-    hidden_width: int = 32,
+    hidden_width: int = 128,
     hidden_depth: int = 1,
     use_batch_norm: bool = True,
     use_output_layer: bool = True,
@@ -50,7 +52,7 @@ class LearnedProxGenerator(Generator):
     def __init__(
         self,
         *,
-        prox_hidden_width: int = 32,
+        prox_hidden_width: int = 128,
         prox_hidden_depth: int = 1,
         use_batch_norm: bool = True,
         use_output_layer: bool = True,
@@ -59,7 +61,7 @@ class LearnedProxGenerator(Generator):
     ):
         super().__init__(**kwargs)
         self.prox_net = _build_prox_mlp(
-            input_dim=2,
+            input_dim=NUM_FEATURES,
             output_dim=1,
             hidden_width=prox_hidden_width,
             hidden_depth=prox_hidden_depth,
@@ -94,10 +96,20 @@ class LearnedProxGenerator(Generator):
             power_weights=power_weights,
             angle_weights=angle_weights,
         )
+
+        pmax = self.admm_data[1]
+        pmin = self.admm_data[2]
         p_base = p_base[0]
 
         return _admm_prox_update(
-            rho_power, power, p_base=p_base, prox_net=self.prox_net, use_residual=self.use_residual
+            rho_power,
+            power,
+            pmax,
+            pmin,
+            linear_cost,
+            p_base=p_base,
+            prox_net=self.prox_net,
+            use_residual=self.use_residual,
         )
 
 
@@ -107,7 +119,7 @@ class LearnedProxLoad(Load):
     def __init__(
         self,
         *,
-        prox_hidden_width: int = 32,
+        prox_hidden_width: int = 128,
         prox_hidden_depth: int = 1,
         use_batch_norm: bool = True,
         use_output_layer: bool = True,
@@ -116,7 +128,7 @@ class LearnedProxLoad(Load):
     ):
         super().__init__(**kwargs)
         self.prox_net = _build_prox_mlp(
-            input_dim=2,
+            input_dim=NUM_FEATURES,
             output_dim=1,
             hidden_width=prox_hidden_width,
             hidden_depth=prox_hidden_depth,
@@ -152,16 +164,29 @@ class LearnedProxLoad(Load):
             angle_weights=angle_weights,
         )
 
+        pmax = self.admm_data[1]
+        pmin = self.admm_data[2]
+
         p_base = p_base[0]
 
         return _admm_prox_update(
-            rho_power, power, p_base=p_base, prox_net=self.prox_net, use_residual=self.use_residual
+            rho_power,
+            power,
+            pmax,
+            pmin,
+            linear_cost,
+            p_base=p_base,
+            prox_net=self.prox_net,
+            use_residual=self.use_residual,
         )
 
 
 def _admm_prox_update(
     rho_power: float,
     power: list[torch.Tensor],
+    pmax: torch.Tensor = None,
+    pmin: torch.Tensor = None,
+    linear_cost: torch.Tensor = None,
     p_base: torch.Tensor = None,
     prox_net: nn.Module = None,
     use_residual: bool = False,
@@ -170,15 +195,29 @@ def _admm_prox_update(
     orig_shape = set_p.shape
     prox_net = prox_net.to(set_p.device)
 
+    if linear_cost is None:
+        linear_cost = torch.zeros_like(set_p)
+
     rho_feat = rho_power.expand_as(set_p)
-    inp = torch.stack((set_p, rho_feat), dim=-1)
-    inp2d = inp.view(-1, 2)
+    inp = torch.stack(
+        (
+            set_p,
+            rho_feat,
+            linear_cost,
+            pmin,
+            pmax,
+        ),
+        dim=-1,
+    )
+    inp = inp.view(-1, NUM_FEATURES)
 
     # Apply prox net
-    p_flat = prox_net(inp2d).squeeze(-1)
+    p_flat = prox_net(inp).squeeze(-1)
     if use_residual:
         p = p_flat.view(orig_shape) + p_base
     else:
         p = p_flat.view(orig_shape)
+
+    p = torch.clip(p, min=pmin, max=pmax)
 
     return [p], None
