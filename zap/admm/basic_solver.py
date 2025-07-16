@@ -8,6 +8,7 @@ import numpy as np
 
 from zap.network import DispatchOutcome
 from zap.devices import Battery
+from zap.devices.learned_injectors import LearnedProxLoad, LearnedProxGenerator
 from zap.devices.abstract import AbstractDevice
 from zap.util import infer_machine
 from zap.admm.util import (
@@ -124,6 +125,7 @@ class ADMMSolver:
     adaptation_frequency: int = 50
     verbose: int = 1
     scale_dual_residuals: bool = None  # Deprecated
+    embedding: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         if self.machine is None:
@@ -307,16 +309,29 @@ class ADMMSolver:
                 rho_power = rho_power * (num_contingencies + 1)
                 rho_angle = rho_angle * (num_contingencies + 1)
 
-            p, v = dev.admm_prox_update(
-                rho_power,
-                rho_angle,
-                set_p,
-                set_v,
-                power_weights=w_p,
-                angle_weights=w_v,
-                **parameters[i],
-                **kwargs,
-            )
+            if type(dev) in [LearnedProxGenerator, LearnedProxLoad]:
+                p, v = dev.admm_prox_update(
+                    rho_power,
+                    rho_angle,
+                    set_p,
+                    set_v,
+                    power_weights=w_p,
+                    angle_weights=w_v,
+                    embedding=self.embedding,
+                    **parameters[i],
+                    **kwargs,
+                )
+            else:
+                p, v = dev.admm_prox_update(
+                    rho_power,
+                    rho_angle,
+                    set_p,
+                    set_v,
+                    power_weights=w_p,
+                    angle_weights=w_v,
+                    **parameters[i],
+                    **kwargs,
+                )
             st.power[i] = p
             st.phase[i] = v
 

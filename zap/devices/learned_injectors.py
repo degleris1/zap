@@ -8,7 +8,7 @@ from torch import nn
 
 from .injector import Generator, Load
 
-NUM_FEATURES = 5
+NUM_FEATURES = 205
 
 
 def _build_prox_mlp(
@@ -71,6 +71,11 @@ class LearnedProxGenerator(Generator):
         self.use_residual = use_residual
         self.has_changed = True
 
+        if self.use_residual:
+            last = self.prox_net[-1]  # This last layer is the linear layer
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
     def admm_prox_update(
         self,
         rho_power: float,
@@ -83,6 +88,7 @@ class LearnedProxGenerator(Generator):
         linear_cost=None,
         power_weights=None,
         angle_weights=None,
+        embedding=None,
     ):
         p_base, _ = super().admm_prox_update(
             rho_power=rho_power,
@@ -110,6 +116,7 @@ class LearnedProxGenerator(Generator):
             p_base=p_base,
             prox_net=self.prox_net,
             use_residual=self.use_residual,
+            embedding=embedding,
         )
 
 
@@ -138,6 +145,11 @@ class LearnedProxLoad(Load):
         self.use_residual = use_residual
         self.has_changed = True
 
+        if self.use_residual:
+            last = self.prox_net[-1]  # This last layer is the linear layer
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
     def admm_prox_update(
         self,
         rho_power: float,
@@ -150,6 +162,7 @@ class LearnedProxLoad(Load):
         linear_cost=None,
         power_weights=None,
         angle_weights=None,
+        embedding=None,
     ):
         p_base, _ = super().admm_prox_update(
             rho_power=rho_power,
@@ -178,6 +191,7 @@ class LearnedProxLoad(Load):
             p_base=p_base,
             prox_net=self.prox_net,
             use_residual=self.use_residual,
+            embedding=embedding,
         )
 
 
@@ -190,6 +204,7 @@ def _admm_prox_update(
     p_base: torch.Tensor = None,
     prox_net: nn.Module = None,
     use_residual: bool = False,
+    embedding: torch.Tensor | None = None,
 ) -> tuple[list[torch.Tensor], None]:
     set_p = power[0]
     orig_shape = set_p.shape
@@ -199,6 +214,8 @@ def _admm_prox_update(
         linear_cost = torch.zeros_like(set_p)
 
     rho_feat = rho_power.expand_as(set_p)
+    emb = embedding.unsqueeze(0).expand(set_p.shape[0], -1, -1)
+
     inp = torch.stack(
         (
             set_p,
@@ -209,6 +226,7 @@ def _admm_prox_update(
         ),
         dim=-1,
     )
+    inp = torch.cat((inp, emb), dim=-1)
     inp = inp.view(-1, NUM_FEATURES)
 
     # Apply prox net
