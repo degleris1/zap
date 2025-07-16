@@ -168,6 +168,7 @@ def _admm_prox_update(
 ) -> tuple[list[torch.Tensor], None]:
     set_p = power[0]
     orig_shape = set_p.shape
+    prox_net = prox_net.to(set_p.device)
 
     rho_feat = rho_power.expand_as(set_p)
     inp = torch.stack((set_p, rho_feat), dim=-1)
