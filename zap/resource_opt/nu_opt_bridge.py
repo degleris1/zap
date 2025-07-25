@@ -1,31 +1,19 @@
 import numpy as np
 import cvxpy as cp
-import scipy.sparse as sp
 
 from zap.network import PowerNetwork
 from ..conic.variable_device import VariableDevice
 from .utility_device import LogUtilityDevice
-from ..conic.slack_device import (
-    ZeroConeSlackDevice,
-    NonNegativeConeSlackDevice,
-    SecondOrderConeSlackDevice,
-)
-from scipy.sparse import csc_matrix, isspmatrix_csc, vstack
-from zap.conic.cone_utils import (
-    build_symmetric_M,
-    scale_cols_csc,
-    scale_rows_csr,
-)
-from copy import deepcopy
+from ..conic.slack_device import NonNegativeConeSlackDevice
+from scipy.sparse import csc_matrix, isspmatrix_csc
 
 
 class NUOptBridge:
-    def __init__(
-        self, nu_opt_params: dict, grouping_params: dict | None = None, ruiz_iters: int = 0
-    ):
+    def __init__(self, nu_opt_params: dict, grouping_params: dict | None = None):
         self.R = nu_opt_params["R"]
         self.capacities = nu_opt_params["capacities"]
         self.w = nu_opt_params["w"]
+        self.lin_device_idxs = nu_opt_params.get("lin_device_idxs", None)
         self.G = self.R
         self.net = None
         self.time_horizon = 1
@@ -47,7 +35,14 @@ class NUOptBridge:
     def _transform(self):
         self._build_network()
         self._group_variable_devices()
-        self._create_variable_devices()
+        # Create LinearUtilityDevices
+        self._create_variable_devices(
+            device_group_map_list=self.lin_device_group_map_list, device_type=VariableDevice
+        )
+        self._create_variable_devices(
+            device_group_map_list=self.log_device_group_map_list, device_type=LogUtilityDevice
+        )
+
         self._group_slack_devices()
         self._create_slack_devices()
 
@@ -101,17 +96,28 @@ class NUOptBridge:
         """
         num_terminals_per_device_list = np.diff(self.G.indptr)
 
-        # Tells you what are the distinct number of terminals a device could have (ignore devices with 0 terminals)
-        filtered_counts = num_terminals_per_device_list[num_terminals_per_device_list > 0]
-        self.terminal_groups = np.sort(np.unique(filtered_counts))
+        # Account for the fact that we might also have LinearUtilityDevices (these are just VariableDevices)
+        lin_mask = np.zeros(len(num_terminals_per_device_list), dtype=bool)
+        if self.lin_device_idxs is not None:
+            lin_mask[self.lin_device_idxs] = True
+            log_mask = ~lin_mask
+        else:
+            log_mask = np.ones(len(num_terminals_per_device_list), dtype=bool)
 
-        # List of lists—each sublist contains the indices of devices with the same number of terminals
-        self.device_group_map_list = [
-            np.argwhere(num_terminals_per_device_list == g).flatten() for g in self.terminal_groups
-        ]
+        def build(mask):
+            terminal_groups = np.sort(np.unique(num_terminals_per_device_list[mask]))
+            device_group_map_list = [
+                np.argwhere(mask & (num_terminals_per_device_list == g)).flatten()
+                for g in terminal_groups
+            ]
 
-    def _create_variable_devices(self):
-        for group_idx, device_idxs in enumerate(self.device_group_map_list):
+            return terminal_groups, device_group_map_list
+
+        (self.lin_terminal_groups, self.lin_device_group_map_list) = build(lin_mask)
+        (self.log_terminal_groups, self.log_device_group_map_list) = build(log_mask)
+
+    def _create_variable_devices(self, device_group_map_list, device_type):
+        for group_idx, device_idxs in enumerate(device_group_map_list):
             num_devices = len(device_idxs)
             if num_devices == 0:
                 continue
@@ -138,7 +144,10 @@ class NUOptBridge:
 
             utility_weights = self.w[device_idxs]
 
-            device = LogUtilityDevice(
+            if device_type is VariableDevice:
+                utility_weights *= -1
+
+            device = device_type(
                 num_nodes=self.net.num_nodes,
                 terminals=terms,
                 A_v=A_v,

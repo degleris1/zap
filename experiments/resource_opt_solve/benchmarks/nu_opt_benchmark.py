@@ -3,6 +3,7 @@ import cvxpy as cp
 import scipy.sparse as sp
 from experiments.conic_solve.benchmarks.abstract_benchmark import AbstractBenchmarkSet
 
+
 class NUOptBenchmarkSet(AbstractBenchmarkSet):
     def __init__(
         self,
@@ -12,11 +13,11 @@ class NUOptBenchmarkSet(AbstractBenchmarkSet):
         avg_route_length: float,
         capacity_range: tuple,
         w_range: tuple = None,
-        link_congest_num_frac: float = None, # What fraction of links to congest
-        link_congest_util_frac: float = None, # For congested links, what fraction of flows should use them
+        link_congest_num_frac: float = None,  # What fraction of links to congest
+        link_congest_util_frac: float = None,  # For congested links, what fraction of flows should use them
         congested_capacity_scale: float = None,
-        lin_util_frac: float = None, # Fraction of flows with linear utilities
-        base_seed: int = 0
+        lin_util_frac: float = None,  # Fraction of flows with linear utilities
+        base_seed: int = 0,
     ):
         super().__init__(data_dir=None, num_problems=num_problems)
         self.m = m
@@ -29,10 +30,10 @@ class NUOptBenchmarkSet(AbstractBenchmarkSet):
         self.congested_capacity_scale = congested_capacity_scale
         self.lin_util_frac = lin_util_frac
         self.base_seed = base_seed
-        
+
     def _build_sparse_R(self, m, n, avg_route_length, rng):
         """
-        Build a sparse link-route matrix R of dimension (m,n) in CSC format with 
+        Build a sparse link-route matrix R of dimension (m,n) in CSC format with
         avg_route_length non-zero entries per column on average.
         """
         data_vals = []
@@ -40,7 +41,7 @@ class NUOptBenchmarkSet(AbstractBenchmarkSet):
         col_ptrs = [0]
 
         if self.link_congest_num_frac is not None and self.link_congest_util_frac is not None:
-            n_congest = max(1, int(round(self.link_congest_num_frac*m)))
+            n_congest = max(1, int(round(self.link_congest_num_frac * m)))
             congested_links = rng.choice(m, size=n_congest, replace=False)
         else:
             congested_links = None
@@ -65,10 +66,12 @@ class NUOptBenchmarkSet(AbstractBenchmarkSet):
             remaining = col_nnz - len(selected_rows)
             if remaining > 0:
                 # Use set logic to avoid the links (rows) we already selected
-                candidate_pool = np.setdiff1d(np.arange(m), np.fromiter(selected_rows, dtype=int), assume_unique=True)
+                candidate_pool = np.setdiff1d(
+                    np.arange(m), np.fromiter(selected_rows, dtype=int), assume_unique=True
+                )
                 new_rows = rng.choice(candidate_pool, size=remaining, replace=False)
                 selected_rows.update(new_rows.tolist())
-            
+
             # Choose which links this route uses
             rows_for_col = np.array(list(selected_rows), dtype=int)
             rows_for_col.sort()
@@ -86,11 +89,11 @@ class NUOptBenchmarkSet(AbstractBenchmarkSet):
 
     def get_data(self, identifier: int):
         rng = np.random.default_rng(self.base_seed + identifier)
-        
+
         # Generate link-route matrix R
         p = self.avg_route_length / self.m
         R = self._build_sparse_R(self.m, self.n, self.avg_route_length, rng)
-        
+
         # Generate capacities uniformly
         c_min, c_max = self.capacity_range
         c = rng.uniform(c_min, c_max, size=self.m)
@@ -107,21 +110,20 @@ class NUOptBenchmarkSet(AbstractBenchmarkSet):
             w = np.ones(self.n)
 
         if self.lin_util_frac is not None:
-            n_lin_utils = max(1, int(round(self.lin_util_frac*self.n)))
-            self.linear_flow_idxs = rng.choice(self.n, size=n_lin_utils, replace=False)
+            n_lin_utils = max(1, int(round(self.lin_util_frac * self.n)))
+            linear_flow_idxs = rng.choice(self.n, size=n_lin_utils, replace=False)
         else:
-            self.linear_flow_idxs = None
+            linear_flow_idxs = None
 
-        
-        return R, c, w
-        
+        return R, c, w, linear_flow_idxs
+
     def create_problem(self, data):
-        R, c, w = data
+        R, c, w, linear_flow_idxs = data
         f = cp.Variable(self.n)
-        
+
         constraints = [R @ f <= c, f >= 0]
 
-        if self.linear_flow_idxs is not None:
+        if linear_flow_idxs is not None:
             lin_mask = np.zeros(self.n, dtype=bool)
             lin_mask[linear_flow_idxs] = True
             log_mask = ~lin_mask
@@ -132,6 +134,6 @@ class NUOptBenchmarkSet(AbstractBenchmarkSet):
         else:
             # Purely logarithmic objective
             objective = cp.Maximize(cp.sum(cp.multiply(w, cp.log(f))))
-        
+
         problem = cp.Problem(objective, constraints)
         return problem
