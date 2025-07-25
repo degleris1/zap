@@ -170,11 +170,12 @@ def solve_admm(problem, problem_data, solver_args):
     """
     Call NUM zap on a CVXPY problem.
     """
-    R, capacities, w = problem_data
+    R, capacities, w, linear_flow_idxs = problem_data
     nu_opt_params = {
         "R": R,
         "capacities": capacities,
         "w": w,
+        "lin_device_idxs": linear_flow_idxs,
     }
     grouping_params["variable_grouping_strategy"] = "discrete_terminal_groups"
     nu_opt_bridge = NUOptBridge(nu_opt_params, grouping_params)

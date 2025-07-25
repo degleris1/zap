@@ -22,9 +22,9 @@ clarabel_args:
 mosek_args:
   verbose: True
   mosek_params:
-    MSK_DPAR_INTPNT_CO_TOL_PFEAS: 1.0e-3,
-    MSK_DPAR_INTPNT_CO_TOL_DFEAS: 1.0e-3,  
-    MSK_DPAR_INTPNT_CO_TOL_REL_GAP: 1.0e-3,
+    MSK_DPAR_INTPNT_CO_TOL_PFEAS: 1.0e-3
+    MSK_DPAR_INTPNT_CO_TOL_DFEAS: 1.0e-3  
+    MSK_DPAR_INTPNT_CO_TOL_REL_GAP: 1.0e-3
 
 
 
@@ -35,7 +35,9 @@ nu_opt_1_args:
   m: 20000
   n: 10000
   avg_route_length: 10
-  capacity_range: (0.1, 1)
+  capacity_range:
+    - 0.1
+    - 1.0
   base_seed: 42
 
 nu_opt_2_args:
