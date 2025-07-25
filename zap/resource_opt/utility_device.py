@@ -42,7 +42,6 @@ class LogUtilityDevice(VariableDevice):
         """
         x_d = local_variables[0]
         cost = -la.sum(la.multiply(self.cost_vector.reshape(-1, 1), la.log(x_d)))
-        # cost = la.sum(la.multiply(self.cost_vector.reshape(-1, 1), x_d))
 
         return cost
 
@@ -62,7 +61,7 @@ class LogUtilityDevice(VariableDevice):
         return _admm_prox_update(self.A_v, self.cost_vector, power, rho_power)
 
 
-# @torch.jit.script
+@torch.jit.script
 def _admm_prox_update(R_v, w_bv, power: list[torch.Tensor], rho: float):
     """
     See Overleaf on Network Utility Maximization with Log Utility 
@@ -73,12 +72,15 @@ def _admm_prox_update(R_v, w_bv, power: list[torch.Tensor], rho: float):
     # Because link-route is all 1's, this is the same as Euclidean norm squared of the columns
     # A_d = ||a_d||^2
     A = R_v.sum(dim=0) 
+    # A = (R_v * R_v).sum(dim=0) # Needed if we equilibrate 
+
 
     # b_d = a_d.T @ z_d
     b = (R_v * Z).sum(dim=0)
 
+
     # Get the positive root from the quadratic formula
-    disc = torch.sqrt(b**2 + 4.0 * w_bv * A/rho)
+    disc = torch.sqrt(b.square() + 4.0 * w_bv * A/rho)
     x_star = (b + disc)/(2.0 * A)
 
 
@@ -88,4 +90,4 @@ def _admm_prox_update(R_v, w_bv, power: list[torch.Tensor], rho: float):
     # each element is num_devices, time_horizon)
     p_list = [p_tensor[i].unsqueeze(-1) for i in range(p_tensor.shape[0])]
 
-    return p_list, None, [x_star.unsqueeze(-1).expand(-1, 1)]
+    return p_list, None, [x_star.unsqueeze(-1).expand(-1,1)]

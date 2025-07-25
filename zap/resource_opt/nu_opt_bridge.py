@@ -11,11 +11,16 @@ from ..conic.slack_device import (
     SecondOrderConeSlackDevice,
 )
 from scipy.sparse import csc_matrix, isspmatrix_csc, vstack
+from zap.conic.cone_utils import (
+    build_symmetric_M,
+    scale_cols_csc,
+    scale_rows_csr,
+)
 from copy import deepcopy
 
 
 class NUOptBridge:
-    def __init__(self, nu_opt_params: dict, grouping_params: dict | None = None):
+    def __init__(self, nu_opt_params: dict, grouping_params: dict | None = None, ruiz_iters: int = 0):
         self.R = nu_opt_params["R"]
         self.capacities = nu_opt_params["capacities"]
         self.w = nu_opt_params["w"]
@@ -23,6 +28,30 @@ class NUOptBridge:
         self.net = None
         self.time_horizon = 1
         self.devices = []
+
+        # flow_lengths = np.array(self.R.sum(axis=0)).flatten()  # Path lengths per flow
+        # link_flows = np.array(self.R.sum(axis=1)).flatten()     # Flow counts per link
+        
+        # # 1. Capacity scaling using 25th percentile (avoid min bottleneck)
+        # capacity_scale = 1 / np.quantile(self.capacities[self.capacities > 0], 0.25)
+        # capacities_scaled = self.capacities * capacity_scale
+        
+        # # 2. Row scaling: 1/sqrt(link_flows) to balance hub links
+        # row_scale = 1 / np.sqrt(np.maximum(link_flows, 1))  # Avoid division by zero
+        # R_scaled = scale_rows_csr(self.R.tocsr(), row_scale)
+        # capacities_scaled *= row_scale
+        
+        # # 3. Column scaling: 1/sqrt(flow_lengths) to normalize long paths
+        # col_scale = 1 / np.sqrt(np.maximum(flow_lengths, 1))
+        # R_scaled = scale_cols_csc(R_scaled.tocsc(), col_scale)
+        
+        # # 4. Compute ρ initialization heuristic
+        # avg_path_length = np.mean(flow_lengths)
+        # rho_init = 1 / np.log1p(avg_path_length)  # Empirical heuristic
+
+        # self.R = R_scaled
+        # self.capacities = capacities_scaled
+
 
         if not isspmatrix_csc(self.R):
             self.R = csc_matrix(self.R)
@@ -33,15 +62,51 @@ class NUOptBridge:
         )
         self.variable_grouping_bin_edges = grouping_params.get(
             "variable_grouping_bin_edges", (0, 10, 100, 1000)
+            # "variable_grouping_bin_edges", (0, 5, 10, 15, 20, 100, 1000)
+
         )
         self._transform()
 
     def _transform(self):
+        # self.G, _, _, self.capacities, self.obj_shift = self._equilibrate_ruiz(self.G, self.capacities)
         self._build_network()
         self._group_variable_devices()
         self._create_variable_devices()
         self._group_slack_devices()
         self._create_slack_devices()
+
+    def _equilibrate_ruiz(self, R, c, max_iters=4, tol=1e-3):
+        """
+        Ruiz row/column equilibration for a *CSC* matrix R (in-place).
+        Returns: (R_scaled, row_scale, col_scale)
+        """
+        if not isspmatrix_csc(R):
+            R = csc_matrix(R)          # make a copy in CSC
+
+        m, n = R.shape
+        d_r = np.ones(m)              # diag scaling factors we accumulate
+        d_c = np.ones(n)
+
+        for _ in range(max_iters):
+            # ---- column scaling  ------------------------------------------
+            col_norm = np.sqrt(R.power(2).sum(axis=0)).A1
+            gamma_c  = np.where(col_norm > 0, 1.0 / np.sqrt(col_norm), 1.0)
+            scale_cols_csc(R, gamma_c)         # in-place
+            d_c *= gamma_c
+
+            # ---- row scaling  ---------------------------------------------
+            row_norm = np.sqrt(R.power(2).sum(axis=1)).A1
+            gamma_r  = np.where(row_norm > 0, 1.0 / np.sqrt(row_norm), 1.0)
+            scale_rows_csr(R.tocsr(), gamma_r) # need CSR view for rows
+            d_r *= gamma_r
+
+            if (np.max(col_norm) < 1 + tol) and (np.max(row_norm) < 1 + tol):
+                break
+
+        # scale the capacity vector so the inequality stays equivalent
+        c_scaled = d_r * c
+        obj_shift = (self.w * np.log(d_c)).sum()
+        return R, d_r, d_c, c_scaled, obj_shift
 
     def _build_network(self):
         self.net = PowerNetwork(self.G.shape[0])

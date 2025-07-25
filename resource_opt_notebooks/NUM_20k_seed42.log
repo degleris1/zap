@@ -1,0 +1,44 @@
+============================================================
+CuClarabel GPU Solver - 2025-07-04T15:47:59.437
+Problem file: /home/groups/ramr/akshay81/zap/resource_opt_notebooks/NUM_20k_seed42.h5
+Log file: /home/groups/ramr/akshay81/zap/resource_opt_notebooks/NUM_20k_seed42.log
+============================================================
+
+📂 Loading problem data...
+✅ Problem loaded successfully!
+   Variables: 20000
+   Constraints: 60000
+   Nonzeros in A: 130617
+   CVXPY cone interpretation:
+     - cone_z: 0 zero constraints
+     - cone_l: 30000 nonnegative constraints
+     - cone_ep: 10000 exponential CONES (each has 3 constraints)
+     - Total exp constraints: 30000
+     - Grand total: 60000
+   ✅ Constraint count matches perfectly!
+
+🏗️  Setting up 10001 cone objects...
+   ✅ Added nonnegative cone: 30000 constraints
+   Adding 10000 exponential cones...
+   ✅ Added 10000 exponential cones
+   Total cone objects: 10001
+
+🚀 Setting up CuClarabel with GPU acceleration...
+✅ Solver setup successful!
+
+🔥 Solving with GPU acceleration...
+   Using CUDSS (CUDA sparse direct solver)
+   This is a LARGE problem with 10000 exponential cones!
+
+============================================================
+📊 SOLUTION SUMMARY
+============================================================
+Status: SOLVED
+Optimal value: 33309.7639106409
+Total solve time: 23.558 seconds
+Solver iterations: 41
+⚠️  Problem status: SOLVED
+
+============================================================
+Completed at 2025-07-04T15:48:51.934
+============================================================

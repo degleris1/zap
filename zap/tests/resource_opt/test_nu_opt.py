@@ -27,7 +27,7 @@ class TestNUOptBridge(unittest.TestCase):
             "w": w,
         }
 
-        nu_opt_bridge = NUOptBridge(nu_opt_params)
+        nu_opt_bridge = NUOptBridge(nu_opt_params, ruiz_iters=20)
         machine = "cpu"
         dtype = torch.float32
         admm_devices = [d.torchify(machine=machine, dtype=dtype) for d in nu_opt_bridge.devices]
@@ -48,5 +48,31 @@ class TestNUOptBridge(unittest.TestCase):
             ref_obj,
             delta=TOL,
             msg=f"ADMM objective {solution_admm.objective} differs from reference {ref_obj}",
+        )
+
+    def test_simple_log_num_cvxpy(self):
+        benchmark = NUOptBenchmarkSet(num_problems=1, m=20, n=10, avg_route_length=3, capacity_range=(0.1,1), base_seed=42)
+        for i, prob in enumerate(benchmark):
+                problem = prob
+        problem.solve(solver=cp.CLARABEL)
+        ref_obj = -problem.value
+
+        R, capacities, w = benchmark.get_data(0)
+        m, n = R.shape
+
+        nu_opt_params = {
+            "R": R,
+            "capacities": capacities,
+            "w": w,
+        }
+
+        nu_opt_bridge = NUOptBridge(nu_opt_params)
+        outcome = nu_opt_bridge.solve()
+
+        self.assertAlmostEqual(
+            outcome.problem.value,
+            ref_obj,
+            delta=TOL,
+            msg=f"ADMM objective {outcome.problem.value} differs from reference {ref_obj}",
         )
 
