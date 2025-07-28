@@ -19,7 +19,7 @@ pypsa = {version = "^0.27.0", optional = true}
 sparse-dot-mkl = {version = "^0.9.6", optional = true}
 attrs = "^24.2.0"
 marimo = "^0.11.21"
-cvxpy = "^1.6.4"
+cvxpy = "1.7.1"
 ortools = "9.11.4210"
 scikit-sparse = { version = "^0.4.16", optional = true }
 h5py = "^3.14.0"
