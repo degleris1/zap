@@ -62,7 +62,7 @@ nu_opt_3_args:
     - 1.0
   base_seed: 42
 
-  nu_opt_4_args:
+nu_opt_4_args:
   type: nu_opt
   num_problems: 1
   m: 100000
@@ -73,7 +73,7 @@ nu_opt_3_args:
     - 1.0  
   base_seed: 42
 
-  nu_opt_5_args:
+nu_opt_5_args:
   type: nu_opt
   num_problems: 1
   m: 150000
@@ -84,7 +84,7 @@ nu_opt_3_args:
     - 1.0  
   base_seed: 42
 
-  nu_opt_6_args:
+nu_opt_6_args:
   type: nu_opt
   num_problems: 1
   m: 200000
@@ -95,7 +95,7 @@ nu_opt_3_args:
     - 1.0  
   base_seed: 42
 
-  nu_opt_7_args:
+nu_opt_7_args:
   type: nu_opt
   num_problems: 1
   m: 500000
@@ -106,7 +106,7 @@ nu_opt_3_args:
     - 1.0  
   base_seed: 42
 
-  nu_opt_8_args:
+nu_opt_8_args:
   type: nu_opt
   num_problems: 1
   m: 1000000
@@ -117,7 +117,7 @@ nu_opt_3_args:
     - 1.0  
   base_seed: 42
 
-  nu_opt_9_args:
+nu_opt_9_args:
   type: nu_opt
   num_problems: 1
   m: 10000000

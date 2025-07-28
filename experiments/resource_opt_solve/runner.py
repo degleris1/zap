@@ -188,7 +188,7 @@ def solve_admm(problem, problem_data, solver_args):
     solution_admm, history_admm = admm.solve(nu_opt_bridge.net, admm_devices, nu_opt_bridge.time_horizon)
     end_time = time.time()
     solve_time = end_time - start_time
-    p_obj = solution_admm.objective
+    pobj = solution_admm.objective
 
     return pobj, solve_time
 
