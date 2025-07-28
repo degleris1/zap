@@ -46,7 +46,9 @@ nu_opt_2_args:
   m: 50000
   n: 25000
   avg_route_length: 10
-  capacity_range: (0.1, 1)
+  capacity_range:
+    - 0.1
+    - 1.0
   base_seed: 42
 
 nu_opt_3_args:
@@ -55,7 +57,9 @@ nu_opt_3_args:
   m: 75000
   n: 37500
   avg_route_length: 10
-  capacity_range: (0.1, 1)
+  capacity_range:
+    - 0.1
+    - 1.0
   base_seed: 42
 
   nu_opt_4_args:
@@ -64,7 +68,9 @@ nu_opt_3_args:
   m: 100000
   n: 50000
   avg_route_length: 10
-  capacity_range: (0.1, 1)
+  capacity_range:
+    - 0.1
+    - 1.0  
   base_seed: 42
 
   nu_opt_5_args:
@@ -73,7 +79,9 @@ nu_opt_3_args:
   m: 150000
   n: 75000
   avg_route_length: 10
-  capacity_range: (0.1, 1)
+  capacity_range:
+    - 0.1
+    - 1.0  
   base_seed: 42
 
   nu_opt_6_args:
@@ -82,7 +90,9 @@ nu_opt_3_args:
   m: 200000
   n: 100000
   avg_route_length: 10
-  capacity_range: (0.1, 1)
+  capacity_range:
+    - 0.1
+    - 1.0  
   base_seed: 42
 
   nu_opt_7_args:
@@ -91,7 +101,9 @@ nu_opt_3_args:
   m: 500000
   n: 250000
   avg_route_length: 10
-  capacity_range: (0.1, 1)
+  capacity_range:
+    - 0.1
+    - 1.0  
   base_seed: 42
 
   nu_opt_8_args:
@@ -100,7 +112,9 @@ nu_opt_3_args:
   m: 1000000
   n: 500000
   avg_route_length: 10
-  capacity_range: (0.1, 1)
+  capacity_range:
+    - 0.1
+    - 1.0  
   base_seed: 42
 
   nu_opt_9_args:
@@ -109,5 +123,7 @@ nu_opt_3_args:
   m: 10000000
   n: 5000000
   avg_route_length: 10
-  capacity_range: (0.1, 1)
+  capacity_range:
+    - 0.1
+    - 1.0  
   base_seed: 42

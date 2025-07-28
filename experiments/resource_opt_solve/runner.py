@@ -177,6 +177,7 @@ def solve_admm(problem, problem_data, solver_args):
         "w": w,
         "lin_device_idxs": linear_flow_idxs,
     }
+    grouping_params = {}
     grouping_params["variable_grouping_strategy"] = "discrete_terminal_groups"
     nu_opt_bridge = NUOptBridge(nu_opt_params, grouping_params)
     machine = solver_args.get("machine", "cpu")
