@@ -1,3 +1,4 @@
+import math
 from enum import Enum
 from typing import Optional
 
@@ -8,6 +9,96 @@ from attrs import Factory, define, field
 from numpy.typing import NDArray
 
 from .abstract import AbstractDevice, get_time_horizon, make_dynamic
+
+# Load generation archetypes (from the new synthetic generator)
+ARCHETYPES = {
+    "interactive": dict(L=0.65, A=0.20, sigma_dev=0.05, sigma_cmn=0.03, rho=0.50),
+    "batch": dict(L=0.45, A=0.15, sigma_dev=0.04, sigma_cmn=0.05, rho=0.55),
+    "ai-train": dict(L=0.90, A=0.05, sigma_dev=0.08, sigma_cmn=0.07, rho=0.60),
+    "ai-infer": dict(L=0.35, A=0.10, sigma_dev=0.07, sigma_cmn=0.04, rho=0.40),
+    "hpc": dict(L=0.88, A=0.08, sigma_dev=0.03, sigma_cmn=0.02, rho=0.30),
+    "colocation": dict(L=0.75, A=0.05, sigma_dev=0.02, sigma_cmn=0.02, rho=0.20),
+    # Legacy compatibility mappings
+    "diurnal": dict(
+        L=0.65, A=0.20, sigma_dev=0.05, sigma_cmn=0.03, rho=0.50
+    ),  # maps to interactive
+    "constant": dict(
+        L=0.75, A=0.00, sigma_dev=0.01, sigma_cmn=0.01, rho=0.10
+    ),  # minimal variation
+}
+
+SEED = 42  # reproducibility
+
+
+def _derive_rack_counts(rack_mix: dict, rack_pwr: dict, it_power_kw: float) -> dict:
+    """Choose integer rack counts to hit target IT power."""
+    weights = {k: rack_mix[k] / rack_pwr[k] for k in rack_mix}
+    scale = it_power_kw / sum(v * rack_pwr[k] for k, v in weights.items())
+    counts = {k: max(1, round(scale * weights[k])) for k in weights}
+
+    # Re-scale exactly to target power
+    actual_kw = sum(counts[k] * rack_pwr[k] for k in counts)
+    adj = it_power_kw / actual_kw
+    for k in counts:
+        counts[k] = round(counts[k] * adj)
+    return counts
+
+
+def _generate_synthetic_profile(
+    workload_type: str,
+    rack_mix: dict[str, float],
+    rack_pwr_kw: dict[str, float],
+    site_power_mw: float,
+    pue: float,
+    time_horizon: int,
+    time_resolution_hours: float,
+) -> NDArray:
+    """Generate synthetic load profile using the new load generator."""
+    if workload_type not in ARCHETYPES:
+        raise ValueError(f"Unknown workload_type {workload_type!r}")
+
+    np_rng = np.random.default_rng(SEED)
+    knobs = ARCHETYPES[workload_type]
+
+    P_site_kw = site_power_mw * 1e3
+    P_it_kw = P_site_kw / pue
+
+    # Derive rack counts
+    rack_counts = _derive_rack_counts(rack_mix, rack_pwr_kw, P_it_kw)
+
+    # Pre-compute nominal power list
+    nominal = np.concatenate(
+        [np.full(n, rack_pwr_kw[k]) for k, n in rack_counts.items()]
+    )
+    n_racks = nominal.size
+
+    # Generate time series
+    fleet_kw = np.empty(time_horizon)
+    ar_state = 0.0
+
+    for i in range(time_horizon):
+        # Diurnal pattern
+        hour = i * time_resolution_hours
+        base_factor = knobs["L"] * (
+            1 + knobs["A"] * math.sin(2 * math.pi * hour / 24.0)
+        )
+
+        # Noise components
+        dev_noise = np_rng.normal(0, knobs["sigma_dev"], n_racks)
+        cmn_noise = np_rng.normal(0, knobs["sigma_cmn"])
+
+        # AR(1) update
+        eps = np_rng.normal(0, knobs["sigma_cmn"])
+        ar_state = knobs["rho"] * ar_state + math.sqrt(1 - knobs["rho"] ** 2) * eps
+
+        # Per-rack power
+        rack_kw = nominal * base_factor * (1 + dev_noise + cmn_noise + ar_state)
+        np.clip(rack_kw, 0, nominal, out=rack_kw)
+
+        fleet_kw[i] = rack_kw.sum() * pue
+
+    # Normalize to capacity (return as load factor)
+    return fleet_kw / P_site_kw  # Convert to per-unit
 
 
 @define(kw_only=True, slots=False)
@@ -177,7 +268,9 @@ class AbstractInjector(AbstractDevice):
         if self.quadratic_cost is None:
             return hessians
 
-        hessians[0] += 2 * sp.diags((self.quadratic_cost * np.ones_like(power[0])).ravel())
+        hessians[0] += 2 * sp.diags(
+            (self.quadratic_cost * np.ones_like(power[0])).ravel()
+        )
         return hessians
 
     # ====
@@ -207,7 +300,9 @@ class AbstractInjector(AbstractDevice):
 
         if self.has_changed:
             quadratic_cost = (
-                0.0 * linear_cost if self.quadratic_cost is None else self.quadratic_cost
+                0.0 * linear_cost
+                if self.quadratic_cost is None
+                else self.quadratic_cost
             )
             pmax = torch.multiply(max_power, nominal_capacity)
             pmin = torch.multiply(min_power, nominal_capacity)
@@ -216,7 +311,9 @@ class AbstractInjector(AbstractDevice):
 
         quadratic_cost, pmax, pmin = self.admm_data
 
-        return _admm_prox_update(power, rho_power, linear_cost, quadratic_cost, pmin, pmax)
+        return _admm_prox_update(
+            power, rho_power, linear_cost, quadratic_cost, pmin, pmax
+        )
 
     def get_admm_power_weights(
         self,
@@ -264,8 +361,12 @@ class Generator(AbstractInjector):
     quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     capital_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
     emission_rates: Optional[NDArray] = field(default=None, converter=make_dynamic)
-    min_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
-    max_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    min_nominal_capacity: Optional[NDArray] = field(
+        default=None, converter=make_dynamic
+    )
+    max_nominal_capacity: Optional[NDArray] = field(
+        default=None, converter=make_dynamic
+    )
 
     # TODO - Add dimension checks
 
@@ -348,27 +449,47 @@ class Load(AbstractInjector):
 @define(kw_only=True, slots=False)
 class DataCenterLoad(AbstractInjector):
     """
-    A data center device that can have different load profiles.
+    A data center device with synthetic load profiles based on workload archetypes.
 
-    By default, it has a base load that is 20% of its nominal capacity at all times,
-    and follows a diurnal pattern that peaks around 1:30pm.
-
-    This device represents a data center load with dynamic capacity planning capabilities,
-    allowing for optimization of both capacity and energy consumption.
+    Supports various workload types: 'interactive', 'batch', 'ai-train', 'ai-infer',
+    'hpc', 'colocation', and legacy types 'diurnal', 'constant'.
     """
 
     class ProfileType(str, Enum):
+        # Legacy types for backward compatibility
         DIURNAL = "diurnal"
         CONSTANT = "constant"
         CUSTOM = "custom"
+        # New archetype-based types
+        INTERACTIVE = "interactive"
+        BATCH = "batch"
+        AI_TRAIN = "ai-train"
+        AI_INFER = "ai-infer"
+        HPC = "hpc"
+        COLOCATION = "colocation"
 
+    # Main configuration
     profile_types: list[ProfileType] = field(
-        default=Factory(lambda: [DataCenterLoad.ProfileType.DIURNAL])
+        default=Factory(lambda: [DataCenterLoad.ProfileType.INTERACTIVE])
     )
-    peak_hours: NDArray = field(default=Factory(lambda: [13.5]))
-    base_load_fractions: NDArray = field(default=Factory(lambda: [0.2]))
     time_resolution_hours: float = field(default=0.25)
+    settime_horizon: float = field(default=3.0)
+
+    # Rack configuration (new synthetic generator parameters)
+    rack_mix: dict[str, float] = field(
+        default=Factory(lambda: {"gpu": 0.15, "cpu": 0.40, "storage": 0.45})
+    )
+    rack_power_kw: dict[str, float] = field(
+        default=Factory(lambda: {"gpu": 150, "cpu": 30, "storage": 20})
+    )
+    pue: float = field(default=1.20)
+
+    # Legacy parameters (for backward compatibility)
+    peak_hours: Optional[NDArray] = field(default=None)
+    base_load_fractions: Optional[NDArray] = field(default=None)
     profiles: Optional[NDArray] = field(default=None)
+
+    # Standard device parameters
     min_power: NDArray = field(init=False)
     max_power: NDArray = field(init=False)
     capital_cost: Optional[NDArray] = field(default=None)
@@ -376,20 +497,19 @@ class DataCenterLoad(AbstractInjector):
     nominal_capacity: NDArray
     linear_cost: NDArray = field(converter=make_dynamic)
     quadratic_cost: Optional[NDArray] = field(default=None, converter=make_dynamic)
-    settime_horizon: float = field(default=3.0)
-    min_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
-    max_nominal_capacity: Optional[NDArray] = field(default=None, converter=make_dynamic)
+    min_nominal_capacity: Optional[NDArray] = field(
+        default=None, converter=make_dynamic
+    )
+    max_nominal_capacity: Optional[NDArray] = field(
+        default=None, converter=make_dynamic
+    )
 
     def __attrs_post_init__(self):
         num_dcs = len(self.nominal_capacity)
+
+        # Ensure all arrays have correct length
         if len(self.profile_types) != num_dcs:
             self.profile_types = [self.profile_types[0]] * num_dcs
-        if len(self.peak_hours) != num_dcs:
-            self.peak_hours = [self.peak_hours[0]] * num_dcs
-        if len(self.base_load_fractions) != num_dcs:
-            self.base_load_fractions = [self.base_load_fractions[0]] * num_dcs
-        if self.profiles is not None and len(self.profiles) != num_dcs:
-            self.profiles = [self.profiles[0]] * num_dcs
         if self.capital_cost is not None and len(self.capital_cost) != num_dcs:
             self.capital_cost = [self.capital_cost[0]] * num_dcs
         if self.emission_rates is not None and len(self.emission_rates) != num_dcs:
@@ -402,120 +522,67 @@ class DataCenterLoad(AbstractInjector):
         all_profiles = []
         for i in range(num_dcs):
             if self.profiles is not None and self.profiles[i] is not None:
-                time_horizon = len(self.profiles[i])
-                profile = self._process_custom_profile(self.profiles[i], time_horizon, i)
+                profile = self._process_custom_profile(self.profiles[i], i)
             else:
-                time_horizon = self.settime_horizon
-                profile = self._create_load_profile(time_horizon, i)
+                time_horizon = int(self.settime_horizon / self.time_resolution_hours)
+                profile = self._create_synthetic_profile(time_horizon, i)
             all_profiles.append(profile)
 
         self.profile = np.vstack(all_profiles)
         self.min_power = -self.profile
-        # self.max_power = -self.profile
         self.max_power = np.zeros_like(self.profile)
 
         super_class = super()
         if hasattr(super_class, "__attrs_post_init__"):
             super_class.__attrs_post_init__()
 
-    def _create_diurnal_profile(self, time_horizon: int, dc_idx: int) -> NDArray:
-        """Create a noisy diurnal load profile for a specific data center."""
-        time_steps = self.time_resolution_hours
-        t = np.arange(time_horizon) * time_steps
-        hours = t % 24
-        A = 1.0 - self.base_load_fractions[dc_idx]
-        freq1 = 2 * np.pi / 24
-        freq2 = 4 * np.pi / 24
-        daily = 0.6 * (1 + np.sin((hours - self.peak_hours[dc_idx]) * freq1)) / 2
-        half_day = 0.4 * (1 + np.sin((hours - self.peak_hours[dc_idx]) * freq2)) / 2
-        base = self.base_load_fractions[dc_idx] + A * (daily + half_day)
-        noise = np.random.randn(time_horizon) * 1e-2
-        for i in range(1, time_horizon):
-            noise[i] += 0.5 * noise[i - 1]
-        profile = base + noise
-        window = max(2, int(1.0 / time_steps))
-        kernel = np.ones(window) / window
-        profile = np.convolve(profile, kernel, mode="same")
-        profile = np.clip(profile, self.base_load_fractions[dc_idx], 1.0)
+    def _create_synthetic_profile(self, time_horizon: int, dc_idx: int) -> NDArray:
+        """Create synthetic profile using the new load generator."""
+        workload_type = self.profile_types[dc_idx].value
+        site_power_mw = self.nominal_capacity[dc_idx]
+        profile = _generate_synthetic_profile(
+            workload_type=workload_type,
+            rack_mix=self.rack_mix,
+            rack_pwr_kw=self.rack_power_kw,
+            site_power_mw=site_power_mw,
+            pue=self.pue,
+            time_horizon=time_horizon,
+            time_resolution_hours=self.time_resolution_hours,
+        )
+
         return profile
 
-    def _create_constant_profile(self, time_horizon: int, dc_idx: int) -> NDArray:
-        """Create a constant load profile for a specific data center."""
-        constant_profile = np.ones(time_horizon) * self.base_load_fractions[dc_idx]
-        return constant_profile
-
-    def _process_custom_profile(self, profile: NDArray, time_horizon: int, dc_idx: int) -> NDArray:
-        """Process and validate a custom profile for a specific data center."""
+    def _process_custom_profile(self, profile: NDArray, dc_idx: int) -> NDArray:
+        """Process and validate a custom profile."""
         if len(profile.shape) == 1:
             profile = profile.reshape(1, -1)
-        return profile
-
-    def _create_load_profile(self, time_horizon: int, dc_idx: int) -> NDArray:
-        """Create a load profile for a specific data center."""
-        if self.profile_types[dc_idx] == self.ProfileType.CONSTANT:
-            return self._create_constant_profile(time_horizon, dc_idx)
-        else:
-            return self._create_diurnal_profile(time_horizon, dc_idx)
+        return profile[0] if profile.shape[0] == 1 else profile
 
     def get_emissions(self, power, nominal_capacity=None, la=np):
         if self.emission_rates is None:
             return 0.0
-
         total_emissions = 0.0
         for i in range(len(self.emission_rates)):
             total_emissions += la.sum(la.multiply(self.emission_rates[i], power[0][i]))
-
         return total_emissions
 
     def get_investment_cost(self, nominal_capacity=None, la=np):
-        # return 0.0
-        # if nominal_capacity is None:
-        #     return 0.0
-
-        # capital_cost = 10.0
-        # pnom_min = self.nominal_capacity
-        # # print(f"nominal_capacity: {nominal_capacity}")
-        # terminal_reshape = self.terminals.flatten()
-        # # print(f"pnom_min: {pnom_min}")
-        # # print(f"terminals: {self.terminals}")
-
-        # return la.sum(la.multiply(terminal_reshape**2, (nominal_capacity - pnom_min).flatten()))
-
-        ## Actual investment cost
-        investment_cost = la.sum(
-            la.multiply(
-                self.capital_cost,
-                (nominal_capacity - self.nominal_capacity),
-            )
+        if self.capital_cost is None or nominal_capacity is None:
+            return 0.0
+        return la.sum(
+            la.multiply(self.capital_cost, (nominal_capacity - self.nominal_capacity))
         )
 
-        ## Incentivier Cost
-        incentivizer_cost = la.sum(
-            la.multiply(
-                -11500.0 * 3,
-                (nominal_capacity - self.nominal_capacity),
-            )
-        )  # -5 for toy case
-
-        incentivizer_cost = 0.0
-        # np.random.seed(0)  # For reproducibility in the toy case
-        # if la == np:
-        #     rand_weights = np.random.rand(*nominal_capacity.shape)
-        # else:  # assume torch
-        #     rand_weights = torch.rand_like(nominal_capacity)
-        # return la.sum(
-        #     la.multiply('
-        #         -11500.0 * rand_weights,
-        #         (nominal_capacity - self.nominal_capacity),
-        #     )
-        # )  # -5 for toy case
-
-        # return investment_cost + incentivizer_cost
-        return 0
+    def sample_time(self, time_periods, original_time_horizon):
+        dev = super().sample_time(time_periods, original_time_horizon)
+        # No additional sampling needed for synthetic profiles as they're generated on demand
+        return dev
 
 
 # @torch.jit.script
-def _admm_prox_update(power: list[torch.Tensor], rho: float, lin_cost, quad_cost, pmin, pmax):
+def _admm_prox_update(
+    power: list[torch.Tensor], rho: float, lin_cost, quad_cost, pmin, pmax
+):
     # Problem is
     #     min_p    a (p - pmin)^2 + b (p - pmin) + (rho / 2) || (p - power) ||_2^2 + {box constraints}
     # Objective derivative is
