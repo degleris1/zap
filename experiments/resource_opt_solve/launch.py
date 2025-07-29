@@ -32,7 +32,7 @@ for i, config in enumerate(config_list):
         f"#SBATCH --partition={system['partition']}\n#SBATCH --cpus-per-task=32\n#SBATCH --mem=64G"
     )
     # Request NVIDIA A100 80G
-    gpu_spec = "#SBATCH --constraint='GPU_MEM:80GB&GPU_GEN:VLT'"
+    gpu_spec = "#SBATCH --constraint='GPU_SKU:A100_SXM4&GPU_MEM:80GB'"
 
 
     # Write slurm script
