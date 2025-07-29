@@ -31,6 +31,9 @@ for i, config in enumerate(config_list):
     partition_and_resources = (
         f"#SBATCH --partition={system['partition']}\n#SBATCH --cpus-per-task=32\n#SBATCH --mem=64G"
     )
+    # Request NVIDIA A100 80G
+    gpu_spec = "#SBATCH --constraint='GPU_MEM:80GB&GPU_GEN:VLT'"
+
 
     # Write slurm script
     slurm_script = f"""#!/bin/bash
@@ -39,6 +42,7 @@ for i, config in enumerate(config_list):
 {partition_and_resources}
 #SBATCH --nodes=1
 {gpu_line}
+{gpu_spec}
 #SBATCH --time={system["runtime"]}
 
 module load cuda/12.2.0
