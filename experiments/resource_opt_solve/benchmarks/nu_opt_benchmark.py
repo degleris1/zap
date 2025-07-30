@@ -62,20 +62,24 @@ class NUOptBenchmarkSet(AbstractBenchmarkSet):
                         if len(selected_rows) >= col_nnz:
                             break
 
-            # We may have to still add links to the route to hit the col_nnz
-            remaining = col_nnz - len(selected_rows)
-            if remaining > 0:
-                # Use set logic to avoid the links (rows) we already selected
-                candidate_pool = np.setdiff1d(
-                    np.arange(m), np.fromiter(selected_rows, dtype=int), assume_unique=True
-                )
-                new_rows = rng.choice(candidate_pool, size=remaining, replace=False)
-                selected_rows.update(new_rows.tolist())
+                # We may have to still add links to the route to hit the col_nnz
+                remaining = col_nnz - len(selected_rows)
+                if remaining > 0:
+                    # Use set logic to avoid the links (rows) we already selected
+                    candidate_pool = np.setdiff1d(
+                        np.arange(m), np.fromiter(selected_rows, dtype=int), assume_unique=True
+                    )
+                    new_rows = rng.choice(candidate_pool, size=remaining, replace=False)
+                    selected_rows.update(new_rows.tolist())
 
-            # Choose which links this route uses
-            rows_for_col = np.array(list(selected_rows), dtype=int)
+                # Choose which links this route uses
+                rows_for_col = np.array(list(selected_rows), dtype=int)
+            else:
+                rows_for_col = rng.choice(m, size=col_nnz, replace=False)
+
             rows_for_col.sort()
             vals_for_col = np.ones(len(rows_for_col))
+
 
             data_vals.append(vals_for_col)
             row_indices.append(rows_for_col)
