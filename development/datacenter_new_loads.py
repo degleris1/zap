@@ -6,14 +6,15 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
-    import marimo as mo
     import cvxpy as cp
+    import marimo as mo
     import matplotlib.pyplot as plt
     import numpy as np
     import seaborn as sns
 
     import zap
     from zap.devices.injector import ARCHETYPES
+
     return ARCHETYPES, cp, mo, np, plt, sns, zap
 
 

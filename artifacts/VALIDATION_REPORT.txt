@@ -1,0 +1,3 @@
+Alignment OK
+Units scaled by 1/cost_unit
+No NaNs in capital costs

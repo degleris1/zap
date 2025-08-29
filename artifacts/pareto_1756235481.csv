@@ -1,0 +1,5 @@
+label,dispatch_cost,investment_cost
+Uniform Distribution,5174586.708227091,120250594.05940594
+Capital Based Distribution,6930000.231563387,120250594.05940595
+Solver Optimized Distribution,5665378.151930377,120250594.05700095
+Dispatch Optimized Distribution,5177091.455197003,120250594.06060846

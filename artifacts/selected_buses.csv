@@ -1,0 +1,11 @@
+bus_name,bus_id,node_index
+p280 4,bus_1cdea13c,58
+p250 0,bus_81f12667,48
+p280 1,bus_b4d6a438,55
+p330 2,bus_4758ca28,70
+p50 0,bus_0ebc27b0,76
+p340 0,bus_c320a5bb,74
+p60 0,bus_72a1796d,81
+p100 9,bus_3202b7e9,28
+p90 1,bus_0839dc60,85
+p130 0,bus_d2280f60,33

@@ -30,75 +30,67 @@ ARCHETYPES = {
 SEED = 42  # reproducibility
 
 
-def _derive_rack_counts(rack_mix: dict, rack_pwr: dict, it_power_kw: float) -> dict:
-    """Choose integer rack counts to hit target IT power."""
-    weights = {k: rack_mix[k] / rack_pwr[k] for k in rack_mix}
-    scale = it_power_kw / sum(v * rack_pwr[k] for k, v in weights.items())
-    counts = {k: max(1, round(scale * weights[k])) for k in weights}
-
-    # Re-scale exactly to target power
-    actual_kw = sum(counts[k] * rack_pwr[k] for k in counts)
-    adj = it_power_kw / actual_kw
-    for k in counts:
-        counts[k] = round(counts[k] * adj)
-    return counts
-
-
 def _generate_synthetic_profile(
     workload_type: str,
-    rack_mix: dict[str, float],
-    rack_pwr_kw: dict[str, float],
-    site_power_mw: float,
-    pue: float,
     time_horizon: int,
     time_resolution_hours: float,
+    *,
+    L: Optional[float] = None,
+    A: Optional[float] = None,
+    sigma_dev: Optional[float] = None,
+    sigma_cmn: Optional[float] = None,
+    rho: Optional[float] = None,
+    weekly_amp: float = 0.0,
+    headroom: float = 0.02,
+    min_lf: float = 0.02,
+    seed: int = SEED,
 ) -> NDArray:
-    """Generate synthetic load profile using the new load generator."""
+    """
+    Returns a per-unit (0..1) load factor time series shaped by:
+      - diurnal sinusoid with amplitude A around baseline L
+      - AR(1) state with rho memory
+      - common & idiosyncratic Gaussian noise (sigma_cmn, sigma_dev)
+      - optional weekly modulation (lower weekends / patterning)
+    """
     if workload_type not in ARCHETYPES:
         raise ValueError(f"Unknown workload_type {workload_type!r}")
 
-    np_rng = np.random.default_rng(SEED)
-    knobs = ARCHETYPES[workload_type]
+    knobs = ARCHETYPES[workload_type].copy()
+    if L is not None:
+        knobs["L"] = L
+    if A is not None:
+        knobs["A"] = A
+    if sigma_dev is not None:
+        knobs["sigma_dev"] = sigma_dev
+    if sigma_cmn is not None:
+        knobs["sigma_cmn"] = sigma_cmn
+    if rho is not None:
+        knobs["rho"] = rho
 
-    P_site_kw = site_power_mw * 1e3
-    P_it_kw = P_site_kw / pue
-
-    # Derive rack counts
-    rack_counts = _derive_rack_counts(rack_mix, rack_pwr_kw, P_it_kw)
-
-    # Pre-compute nominal power list
-    nominal = np.concatenate(
-        [np.full(n, rack_pwr_kw[k]) for k, n in rack_counts.items()]
-    )
-    n_racks = nominal.size
-
-    # Generate time series
-    fleet_kw = np.empty(time_horizon)
+    rng = np.random.default_rng(seed)
+    out = np.empty(time_horizon, dtype=float)
     ar_state = 0.0
+    two_pi = 2.0 * math.pi
 
-    for i in range(time_horizon):
-        # Diurnal pattern
-        hour = i * time_resolution_hours
-        base_factor = knobs["L"] * (
-            1 + knobs["A"] * math.sin(2 * math.pi * hour / 24.0)
+    for t in range(time_horizon):
+        hour = t * time_resolution_hours
+
+        diurnal = knobs["L"] * (1.0 + knobs["A"] * math.sin(two_pi * hour / 24.0))
+        weekly = 1.0 + weekly_amp * math.sin(two_pi * hour / (24.0 * 7.0))
+
+        eps_c = rng.normal(0.0, knobs["sigma_cmn"])
+        eps_d = rng.normal(0.0, knobs["sigma_dev"])
+        ar_state = (
+            knobs["rho"] * ar_state
+            + math.sqrt(max(1.0 - knobs["rho"] ** 2, 0.0)) * eps_c
         )
 
-        # Noise components
-        dev_noise = np_rng.normal(0, knobs["sigma_dev"], n_racks)
-        cmn_noise = np_rng.normal(0, knobs["sigma_cmn"])
+        lf = diurnal * weekly * (1.0 + eps_c + eps_d + ar_state)
 
-        # AR(1) update
-        eps = np_rng.normal(0, knobs["sigma_cmn"])
-        ar_state = knobs["rho"] * ar_state + math.sqrt(1 - knobs["rho"] ** 2) * eps
+        lf = max(min_lf, min(1.0 - headroom, lf))
+        out[t] = lf
 
-        # Per-rack power
-        rack_kw = nominal * base_factor * (1 + dev_noise + cmn_noise + ar_state)
-        np.clip(rack_kw, 0, nominal, out=rack_kw)
-
-        fleet_kw[i] = rack_kw.sum() * pue
-
-    # Normalize to capacity (return as load factor)
-    return fleet_kw / P_site_kw  # Convert to per-unit
+    return out
 
 
 @define(kw_only=True, slots=False)
@@ -449,47 +441,39 @@ class Load(AbstractInjector):
 @define(kw_only=True, slots=False)
 class DataCenterLoad(AbstractInjector):
     """
-    A data center device with synthetic load profiles based on workload archetypes.
-
-    Supports various workload types: 'interactive', 'batch', 'ai-train', 'ai-infer',
-    'hpc', 'colocation', and legacy types 'diurnal', 'constant'.
+    Data center device with synthetic *site-level* load profiles driven by nominal_capacity only.
+    Produces per-unit load factors (0..1); actual power bounds come from multiplying by nominal_capacity.
     """
 
     class ProfileType(str, Enum):
-        # Legacy types for backward compatibility
-        DIURNAL = "diurnal"
-        CONSTANT = "constant"
-        CUSTOM = "custom"
-        # New archetype-based types
+        # Keep legacy names for drop-in compatibility
         INTERACTIVE = "interactive"
         BATCH = "batch"
         AI_TRAIN = "ai-train"
         AI_INFER = "ai-infer"
         HPC = "hpc"
         COLOCATION = "colocation"
+        DIURNAL = "diurnal"
+        CONSTANT = "constant"
 
-    # Main configuration
+    # --- Profile controls
     profile_types: list[ProfileType] = field(
         default=Factory(lambda: [DataCenterLoad.ProfileType.INTERACTIVE])
     )
     time_resolution_hours: float = field(default=0.25)
-    settime_horizon: float = field(default=3.0)
+    settime_horizon: float = field(default=24.0)
 
-    # Rack configuration (new synthetic generator parameters)
-    rack_mix: dict[str, float] = field(
-        default=Factory(lambda: {"gpu": 0.15, "cpu": 0.40, "storage": 0.45})
-    )
-    rack_power_kw: dict[str, float] = field(
-        default=Factory(lambda: {"gpu": 150, "cpu": 30, "storage": 20})
-    )
-    pue: float = field(default=1.20)
+    # Optional global knobs for all DCs (can be overridden per-DC via per_dc_overrides)
+    weekly_amp: float = field(default=0.0)
+    headroom: float = field(default=0.02)
+    min_lf: float = field(default=0.02)
+    base_seed: int = field(default=SEED)
 
-    # Legacy parameters (for backward compatibility)
-    peak_hours: Optional[NDArray] = field(default=None)
-    base_load_fractions: Optional[NDArray] = field(default=None)
-    profiles: Optional[NDArray] = field(default=None)
+    # Per-DC overrides: dict(index -> dict of L/A/sigma_dev/sigma_cmn/rho)
+    per_dc_overrides: Optional[dict] = field(default=None)
 
     # Standard device parameters
+    profiles: Optional[NDArray] = field(default=None)  # user-supplied per-unit arrays
     min_power: NDArray = field(init=False)
     max_power: NDArray = field(init=False)
     capital_cost: Optional[NDArray] = field(default=None)
@@ -507,7 +491,7 @@ class DataCenterLoad(AbstractInjector):
     def __attrs_post_init__(self):
         num_dcs = len(self.nominal_capacity)
 
-        # Ensure all arrays have correct length
+        # Length checks / broadcast
         if len(self.profile_types) != num_dcs:
             self.profile_types = [self.profile_types[0]] * num_dcs
         if self.capital_cost is not None and len(self.capital_cost) != num_dcs:
@@ -519,44 +503,46 @@ class DataCenterLoad(AbstractInjector):
         if self.quadratic_cost is not None and len(self.quadratic_cost) != num_dcs:
             self.quadratic_cost = [self.quadratic_cost[0]] * num_dcs
 
+        T = int(round(self.settime_horizon / self.time_resolution_hours))
         all_profiles = []
+
         for i in range(num_dcs):
             if self.profiles is not None and self.profiles[i] is not None:
-                profile = self._process_custom_profile(self.profiles[i], i)
+                profile = self._process_custom_profile(self.profiles[i])
             else:
-                time_horizon = int(self.settime_horizon / self.time_resolution_hours)
-                profile = self._create_synthetic_profile(time_horizon, i)
+                pt = self.profile_types[i].value
+                overrides = (self.per_dc_overrides or {}).get(i, {})
+                profile = _generate_synthetic_profile(
+                    workload_type=pt,
+                    time_horizon=T,
+                    time_resolution_hours=self.time_resolution_hours,
+                    L=overrides.get("L"),
+                    A=overrides.get("A"),
+                    sigma_dev=overrides.get("sigma_dev"),
+                    sigma_cmn=overrides.get("sigma_cmn"),
+                    rho=overrides.get("rho"),
+                    weekly_amp=self.weekly_amp,
+                    headroom=self.headroom,
+                    min_lf=self.min_lf,
+                    seed=self.base_seed + 9973 * i,
+                )
             all_profiles.append(profile)
 
-        self.profile = np.vstack(all_profiles)
-        self.min_power = -self.profile
+        self.profile = np.vstack(all_profiles)  # shape (n_dc, T), per-unit
+        self.min_power = -self.profile  # withdraw
         self.max_power = np.zeros_like(self.profile)
 
         super_class = super()
         if hasattr(super_class, "__attrs_post_init__"):
             super_class.__attrs_post_init__()
 
-    def _create_synthetic_profile(self, time_horizon: int, dc_idx: int) -> NDArray:
-        """Create synthetic profile using the new load generator."""
-        workload_type = self.profile_types[dc_idx].value
-        site_power_mw = self.nominal_capacity[dc_idx]
-        profile = _generate_synthetic_profile(
-            workload_type=workload_type,
-            rack_mix=self.rack_mix,
-            rack_pwr_kw=self.rack_power_kw,
-            site_power_mw=site_power_mw,
-            pue=self.pue,
-            time_horizon=time_horizon,
-            time_resolution_hours=self.time_resolution_hours,
-        )
-
-        return profile
-
-    def _process_custom_profile(self, profile: NDArray, dc_idx: int) -> NDArray:
-        """Process and validate a custom profile."""
-        if len(profile.shape) == 1:
-            profile = profile.reshape(1, -1)
-        return profile[0] if profile.shape[0] == 1 else profile
+    @staticmethod
+    def _process_custom_profile(profile: NDArray) -> NDArray:
+        if profile.ndim == 1:
+            return profile.reshape(-1)
+        if profile.shape[0] == 1:
+            return profile[0]
+        raise ValueError("Custom profile must be 1D or shape (1, T).")
 
     def get_emissions(self, power, nominal_capacity=None, la=np):
         if self.emission_rates is None:

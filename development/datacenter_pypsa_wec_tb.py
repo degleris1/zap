@@ -6,20 +6,21 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    import os
+    from pathlib import Path
+
     import cvxpy as cp
     import marimo as mo
     import matplotlib.pyplot as plt
     import numpy as np
-    import seaborn as sns
-    import os
-    import pypsa
-    from pathlib import Path
     import pandas as pd
-
+    import pypsa
+    import seaborn as sns
 
     import zap
-    from zap.importers.pypsa import load_pypsa_network, parse_buses
     from zap.devices import DataCenterLoad
+    from zap.importers.pypsa import load_pypsa_network, parse_buses
+
     return (
         DataCenterLoad,
         Path,
@@ -39,11 +40,13 @@ def _():
 
 @app.cell
 def _(os, pypsa):
-    HOME_PATH = os.environ.get('HOME')
-    PYPSA_NETW0RK_PATH = HOME_PATH + '/zap_data/pypsa-networks/western_small/network_2021.nc'
+    HOME_PATH = os.environ.get("HOME")
+    PYPSA_NETW0RK_PATH = (
+        HOME_PATH + "/zap_data/pypsa-networks/western_small/network_2021.nc"
+    )
     pn = pypsa.Network(PYPSA_NETW0RK_PATH)
     snapshots = pn.generators_t.p_max_pu.index
-    snapshot_data = snapshots[5616:5640] # 8/23/21
+    snapshot_data = snapshots[5616:5640]  # 8/23/21
     return HOME_PATH, PYPSA_NETW0RK_PATH, pn, snapshot_data, snapshots
 
 
@@ -58,16 +61,16 @@ def _(parse_buses, pn):
     # ---- Get core series ----------------------------------------------------
     buses = pn.buses
     load_ts = pn.loads_t.p_set
-    avg_load = load_ts.groupby(axis=1, level=0).mean().sum()    # MW per bus
-    gen_cap  = pn.generators.groupby("bus")["p_nom"].sum() # MW per bus
+    avg_load = load_ts.groupby(axis=1, level=0).mean().sum()  # MW per bus
+    gen_cap = pn.generators.groupby("bus")["p_nom"].sum()  # MW per bus
 
     # ---- Normalise ----------------------------------------------------------
     def normalise(s):
         return (s - s.min()) / (s.max() - s.min() + 1e-9)
 
     score = (
-        0.6 * normalise(avg_load) +
-        0.4 * normalise(gen_cap).reindex_like(avg_load).fillna(0.0)
+        0.6 * normalise(avg_load)
+        + 0.4 * normalise(gen_cap).reindex_like(avg_load).fillna(0.0)
         # 0.2 * normalise(lmp).reindex_like(avg_load).fillna(0.0)
     )
 
@@ -112,13 +115,17 @@ def _(pn):
 @app.cell
 def _(load_pypsa_network, pn, snapshot_data):
     pypsa_kwargs = {}
-    pypsa_net, pypsa_devices = load_pypsa_network(pn, snapshot_data, power_unit=1.0e3, cost_unit=100.0, **pypsa_kwargs)
+    pypsa_net, pypsa_devices = load_pypsa_network(
+        pn, snapshot_data, power_unit=1.0e3, cost_unit=100.0, **pypsa_kwargs
+    )
     return pypsa_devices, pypsa_kwargs, pypsa_net
 
 
 @app.cell
 def _(load_pypsa_network, pn, pypsa_kwargs, snapshots_test):
-    pypsa_net_test, pypsa_devices_test = load_pypsa_network(pn, snapshots_test,  power_unit=1.0e3, cost_unit=100.0, **pypsa_kwargs)
+    pypsa_net_test, pypsa_devices_test = load_pypsa_network(
+        pn, snapshots_test, power_unit=1.0e3, cost_unit=100.0, **pypsa_kwargs
+    )
     return pypsa_devices_test, pypsa_net_test
 
 
@@ -130,7 +137,9 @@ def _(pypsa_devices_test):
 
 @app.cell
 def _(cp, pypsa_devices_test, pypsa_net_test):
-    outcome_test = pypsa_net_test.dispatch(pypsa_devices_test, time_horizon=10, solver=cp.PDLP, add_ground=False)
+    outcome_test = pypsa_net_test.dispatch(
+        pypsa_devices_test, time_horizon=10, solver=cp.PDLP, add_ground=False
+    )
     return (outcome_test,)
 
 
@@ -150,7 +159,9 @@ def _(pypsa_devices):
 def _(pypsa_devices):
     ## Look at overall generation and load in this system
 
-    print(f"There are {pypsa_devices[0].nominal_capacity.sum()} MW of generation in the system.")
+    print(
+        f"There are {pypsa_devices[0].nominal_capacity.sum()} MW of generation in the system."
+    )
     return
 
 
@@ -169,14 +180,16 @@ def _(base_outcome, plt):
 @app.cell
 def _(cp, pypsa_devices, pypsa_net):
     T = 24
-    base_outcome = pypsa_net.dispatch(pypsa_devices, time_horizon=T, solver=cp.CLARABEL, add_ground=False)
+    base_outcome = pypsa_net.dispatch(
+        pypsa_devices, time_horizon=T, solver=cp.CLARABEL, add_ground=False
+    )
     return T, base_outcome
 
 
 @app.cell
 def _(base_outcome, plt):
     ## Plot prices in base outcome
-    print(f'Dispatch Cost is {base_outcome.problem.value}')
+    print(f"Dispatch Cost is {base_outcome.problem.value}")
     plt.plot(base_outcome.prices.T)
     return
 
@@ -198,13 +211,14 @@ def _(
     n_dc = len(terminals)
 
     dcloads = DataCenterLoad(
-        num_nodes = pypsa_net.num_nodes,
-        terminal = terminals,
-        profile_types = [zap.DataCenterLoad.ProfileType.DIURNAL]*n_dc,
-        nominal_capacity = np.ones((n_dc)),
-        linear_cost = np.ones(n_dc)*1000,
-        settime_horizon= T,
-        capital_cost=np.array([9.5, 9.5, 9.5, 11.7, 11.7, 11.7, 14.0, 14.0, 14.0, 14.0])*1e6
+        num_nodes=pypsa_net.num_nodes,
+        terminal=terminals,
+        profile_types=[zap.DataCenterLoad.ProfileType.DIURNAL] * n_dc,
+        nominal_capacity=np.ones((n_dc)),
+        linear_cost=np.ones(n_dc) * 1000,
+        settime_horizon=T,
+        capital_cost=np.array([9.5, 9.5, 9.5, 11.7, 11.7, 11.7, 14.0, 14.0, 14.0, 14.0])
+        * 1e6,
     )
     pypsa_devices_dc.append(dcloads)
     return dcloads, n_dc, pypsa_devices_dc, terminals
@@ -212,7 +226,7 @@ def _(
 
 @app.cell
 def _(np):
-    np.array([9.5, 9.5, 9.5, 11.7, 11.7, 11.7, 14.0, 14.0, 14.0, 14.0])*1e6
+    np.array([9.5, 9.5, 9.5, 11.7, 11.7, 11.7, 14.0, 14.0, 14.0, 14.0]) * 1e6
     return
 
 
@@ -231,7 +245,7 @@ def _(T, cp, n_dc, np, pypsa_devices_dc, pypsa_net, zap):
 
     # lower_bounds = {}
     # upper_bounds = {}
-    lower_bounds = {"dc_capacity": np.full(n_dc,  0)}
+    lower_bounds = {"dc_capacity": np.full(n_dc, 0)}
     upper_bounds = {"dc_capacity": np.full(n_dc, 1000)}
 
     # eta = {"dc_capacity": np.full(n_dc, TOTAL_DC_BUDGET / n_dc)}
@@ -240,18 +254,23 @@ def _(T, cp, n_dc, np, pypsa_devices_dc, pypsa_net, zap):
     # init_eta = np.random.rand(n_dc) * 10
     eta = {"dc_capacity": init_eta}
 
-
     op_obj = zap.planning.DispatchCostObjective(pypsa_net, pypsa_devices_dc)
     inv_obj = zap.planning.InvestmentObjective(pypsa_devices_dc, xstar)
 
     P = zap.planning.PlanningProblem(
-        operation_objective=op_obj, investment_objective=inv_obj, layer=xstar, lower_bounds=lower_bounds, upper_bounds=upper_bounds
+        operation_objective=op_obj,
+        investment_objective=inv_obj,
+        layer=xstar,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
     )
 
     # Add in simplex constraint
     # P.extra_projections = {}
     P.extra_projections = {
-        "dc_capacity": zap.planning.SimplexBudgetProjection(budget=TOTAL_DC_BUDGET, strict=True)
+        "dc_capacity": zap.planning.SimplexBudgetProjection(
+            budget=TOTAL_DC_BUDGET, strict=True
+        )
     }
 
     cost = P(**eta, requires_grad=True)
@@ -282,19 +301,19 @@ def _(grad):
 
 @app.cell
 def _(state):
-    state[0]['dc_capacity'].sum()
+    state[0]["dc_capacity"].sum()
     return
 
 
 @app.cell
 def _(plt, state):
-    plt.plot(state[0]['dc_capacity'])
+    plt.plot(state[0]["dc_capacity"])
     return
 
 
 @app.cell
 def _(state):
-    state[0]['dc_capacity']
+    state[0]["dc_capacity"]
     return
 
 
@@ -312,7 +331,9 @@ def _(P):
 
 @app.cell
 def _(T, cp, pypsa_devices_dc, pypsa_net):
-    post_outcome = pypsa_net.dispatch(pypsa_devices_dc, time_horizon=T, solver=cp.CLARABEL, add_ground=False)
+    post_outcome = pypsa_net.dispatch(
+        pypsa_devices_dc, time_horizon=T, solver=cp.CLARABEL, add_ground=False
+    )
     return (post_outcome,)
 
 
@@ -336,17 +357,35 @@ def _(pypsa_devices_dc):
 
 @app.cell
 def _(np):
-    solver_opt_capacities = np.array([
-        275.41860954, 275.39441647, 275.39291164, 24.82772319,
-        24.82772319, 24.82772319, 24.82772319, 24.82772319,
-        24.82772319, 24.82772319
-    ])
+    solver_opt_capacities = np.array(
+        [
+            275.41860954,
+            275.39441647,
+            275.39291164,
+            24.82772319,
+            24.82772319,
+            24.82772319,
+            24.82772319,
+            24.82772319,
+            24.82772319,
+            24.82772319,
+        ]
+    )
 
-    grid_opt_capacities = np.array([
-        109.79731552,  73.48552114,  87.88355807, 109.73627581,
-        107.75840246,  86.61183818,  86.68299651, 104.44680737,
-        129.91202981, 103.68525514
-    ])
+    grid_opt_capacities = np.array(
+        [
+            109.79731552,
+            73.48552114,
+            87.88355807,
+            109.73627581,
+            107.75840246,
+            86.61183818,
+            86.68299651,
+            104.44680737,
+            129.91202981,
+            103.68525514,
+        ]
+    )
     return grid_opt_capacities, solver_opt_capacities
 
 
@@ -366,60 +405,98 @@ def _(
 ):
     ### Three scenarios to check
 
-    capital_costs = np.array([9.5, 9.5, 9.5, 11.7, 11.7, 11.7, 14.0, 14.0, 14.0, 14.0])*1e6
+    capital_costs = (
+        np.array([9.5, 9.5, 9.5, 11.7, 11.7, 11.7, 14.0, 14.0, 14.0, 14.0]) * 1e6
+    )
 
     # (1) Uniform Distribution. Dispatch cost? Investment cost?
 
     dcloads_uniform = DataCenterLoad(
-        num_nodes = pypsa_net.num_nodes,
-        terminal = terminals,
-        profile_types = [zap.DataCenterLoad.ProfileType.DIURNAL]*n_dc,
-        nominal_capacity = np.ones((n_dc)) * 100,
-        linear_cost = np.ones(n_dc)*1000,
-        settime_horizon= T,
+        num_nodes=pypsa_net.num_nodes,
+        terminal=terminals,
+        profile_types=[zap.DataCenterLoad.ProfileType.DIURNAL] * n_dc,
+        nominal_capacity=np.ones((n_dc)) * 100,
+        linear_cost=np.ones(n_dc) * 1000,
+        settime_horizon=T,
         capital_cost=capital_costs,
     )
     pypsa_devices_uniform = pypsa_devices.copy()
     pypsa_devices_uniform.append(dcloads_uniform)
-    uniform_outcome = pypsa_net.dispatch(pypsa_devices_uniform, time_horizon=T, solver=cp.CLARABEL, add_ground=False)
+    uniform_outcome = pypsa_net.dispatch(
+        pypsa_devices_uniform, time_horizon=T, solver=cp.CLARABEL, add_ground=False
+    )
     uniform_dispatch_cost = uniform_outcome.problem.value
     uniform_investment_cost = np.dot(capital_costs, np.ones((n_dc)) * 100)
     print(f"Uniform Dispatch Cost: {uniform_dispatch_cost}")
     print(f"Uniform Investment Cost: {uniform_investment_cost}")
 
-
     # (2) Investment Optimized Distribution. Dispatch cost? Investment cost?
     dcloads_investment_opt = DataCenterLoad(
-        num_nodes = pypsa_net.num_nodes,
-        terminal = terminals,
-        profile_types = [zap.DataCenterLoad.ProfileType.DIURNAL]*n_dc,
-        nominal_capacity = np.array([1000.0/3.0, 1000.0/3.0, 1000.0/3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        linear_cost = np.ones(n_dc)*1000,
-        settime_horizon= T,
+        num_nodes=pypsa_net.num_nodes,
+        terminal=terminals,
+        profile_types=[zap.DataCenterLoad.ProfileType.DIURNAL] * n_dc,
+        nominal_capacity=np.array(
+            [
+                1000.0 / 3.0,
+                1000.0 / 3.0,
+                1000.0 / 3.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ]
+        ),
+        linear_cost=np.ones(n_dc) * 1000,
+        settime_horizon=T,
         capital_cost=capital_costs,
     )
     pypsa_devices_investment_opt = pypsa_devices.copy()
     pypsa_devices_investment_opt.append(dcloads_investment_opt)
-    investment_opt_outcome = pypsa_net.dispatch(pypsa_devices_investment_opt, time_horizon=T, solver=cp.CLARABEL, add_ground=False)
+    investment_opt_outcome = pypsa_net.dispatch(
+        pypsa_devices_investment_opt,
+        time_horizon=T,
+        solver=cp.CLARABEL,
+        add_ground=False,
+    )
     investment_opt_dispatch_cost = investment_opt_outcome.problem.value
-    investment_opt_investment_cost = np.dot(capital_costs, np.array([1000.0/3.0, 1000.0/3.0, 1000.0/3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+    investment_opt_investment_cost = np.dot(
+        capital_costs,
+        np.array(
+            [
+                1000.0 / 3.0,
+                1000.0 / 3.0,
+                1000.0 / 3.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ]
+        ),
+    )
     print(f"Investment Optimized Dispatch Cost: {investment_opt_dispatch_cost}")
     print(f"Investment Optimized Investment Cost: {investment_opt_investment_cost}")
 
-
     # (3) Optimized Distribution. Dispatch cost? Investment cost?
     dcloads_solver_opt = DataCenterLoad(
-        num_nodes = pypsa_net.num_nodes,
-        terminal = terminals,
-        profile_types = [zap.DataCenterLoad.ProfileType.DIURNAL]*n_dc,
-        nominal_capacity = solver_opt_capacities,
-        linear_cost = np.ones(n_dc)*1000,
-        settime_horizon= T,
+        num_nodes=pypsa_net.num_nodes,
+        terminal=terminals,
+        profile_types=[zap.DataCenterLoad.ProfileType.DIURNAL] * n_dc,
+        nominal_capacity=solver_opt_capacities,
+        linear_cost=np.ones(n_dc) * 1000,
+        settime_horizon=T,
         capital_cost=capital_costs,
     )
     pypsa_devices_solver_opt = pypsa_devices.copy()
     pypsa_devices_solver_opt.append(dcloads_solver_opt)
-    solver_opt_outcome = pypsa_net.dispatch(pypsa_devices_solver_opt, time_horizon=T, solver=cp.CLARABEL, add_ground=False)
+    solver_opt_outcome = pypsa_net.dispatch(
+        pypsa_devices_solver_opt, time_horizon=T, solver=cp.CLARABEL, add_ground=False
+    )
     solver_opt_dispatch_cost = solver_opt_outcome.problem.value
     solver_opt_investment_cost = np.dot(capital_costs, solver_opt_capacities)
     print(f"Solver Optimized Dispatch Cost: {solver_opt_dispatch_cost}")
@@ -427,27 +504,36 @@ def _(
 
     # (4) Optimized Distribution w/o Investment Costs. Dispatch cost? Investment cost?
     dcloads_grid_opt = DataCenterLoad(
-        num_nodes = pypsa_net.num_nodes,
-        terminal = terminals,
-        profile_types = [zap.DataCenterLoad.ProfileType.DIURNAL]*n_dc,
-        nominal_capacity = grid_opt_capacities,
-        linear_cost = np.ones(n_dc)*1000,
-        settime_horizon= T,
+        num_nodes=pypsa_net.num_nodes,
+        terminal=terminals,
+        profile_types=[zap.DataCenterLoad.ProfileType.DIURNAL] * n_dc,
+        nominal_capacity=grid_opt_capacities,
+        linear_cost=np.ones(n_dc) * 1000,
+        settime_horizon=T,
         capital_cost=capital_costs,
     )
     pypsa_devices_grid_opt = pypsa_devices.copy()
     pypsa_devices_grid_opt.append(dcloads_grid_opt)
-    grid_opt_outcome = pypsa_net.dispatch(pypsa_devices_grid_opt, time_horizon=T, solver=cp.CLARABEL, add_ground=False)
+    grid_opt_outcome = pypsa_net.dispatch(
+        pypsa_devices_grid_opt, time_horizon=T, solver=cp.CLARABEL, add_ground=False
+    )
     grid_opt_dispatch_cost = grid_opt_outcome.problem.value
     grid_opt_investment_cost = np.dot(capital_costs, grid_opt_capacities)
     print(f"Grid Optimized Dispatch Cost: {grid_opt_dispatch_cost}")
     print(f"Grid Optimized Investment Cost: {grid_opt_investment_cost}")
 
-
-
-
-    dispatch_costs = [uniform_dispatch_cost, investment_opt_dispatch_cost, solver_opt_dispatch_cost, grid_opt_dispatch_cost]
-    investment_costs = [uniform_investment_cost, investment_opt_investment_cost, solver_opt_investment_cost, grid_opt_investment_cost]
+    dispatch_costs = [
+        uniform_dispatch_cost,
+        investment_opt_dispatch_cost,
+        solver_opt_dispatch_cost,
+        grid_opt_dispatch_cost,
+    ]
+    investment_costs = [
+        uniform_investment_cost,
+        investment_opt_investment_cost,
+        solver_opt_investment_cost,
+        grid_opt_investment_cost,
+    ]
     return (
         capital_costs,
         dcloads_grid_opt,
@@ -496,6 +582,7 @@ def _(dispatch_costs, investment_costs, plt):
 @app.cell
 def _():
     from matplotlib.ticker import ScalarFormatter
+
     return (ScalarFormatter,)
 
 
@@ -508,19 +595,22 @@ def _(np, plt):
 
         # Add labels positioned just left of each point
         for x, y, label in zip(dispatch_costs, investment_costs, labels):
-            if label == 'Capital Based Distribution':
+            if label == "Capital Based Distribution":
                 continue
-            ax.text(x + 0.005 * x, y, label, fontsize=12, ha='left')
+            ax.text(x + 0.005 * x, y, label, fontsize=12, ha="left")
         x = dispatch_costs[1]
         y = investment_costs[1]
         label = labels[1]
-        ax.text(x - 0.005 * x, y, label, fontsize=12, ha='right')
-
+        ax.text(x - 0.005 * x, y, label, fontsize=12, ha="right")
 
         # Set axis labels
-        ax.set_xlabel('Dispatch Cost (Millions $)', fontsize=14)
-        ax.set_ylabel('Investment Cost (Billions $)', fontsize=14)
-        ax.set_title('Dispatch vs. Investment Costs under Different Capacity Allocations', fontsize=16, pad=15)
+        ax.set_xlabel("Dispatch Cost (Millions $)", fontsize=14)
+        ax.set_ylabel("Investment Cost (Billions $)", fontsize=14)
+        ax.set_title(
+            "Dispatch vs. Investment Costs under Different Capacity Allocations",
+            fontsize=16,
+            pad=15,
+        )
 
         # Format ticks as floats with one decimal place + M/B suffixes
         xticks = np.linspace(min(dispatch_costs), max(dispatch_costs), 4)
@@ -529,16 +619,17 @@ def _(np, plt):
         ax.set_xticks(xticks)
         ax.set_yticks(yticks)
 
-        ax.set_xticklabels([f'{x/1e6:.1f}M' for x in xticks])
-        ax.set_yticklabels([f'{y/1e9:.1f}B' for y in yticks])
+        ax.set_xticklabels([f"{x/1e6:.1f}M" for x in xticks])
+        ax.set_yticklabels([f"{y/1e9:.1f}B" for y in yticks])
 
         # Grid styling
-        ax.grid(True, linestyle='--', linewidth=0.7, alpha=0.7)
-        ax.tick_params(axis='both', which='both', labelsize=12)
+        ax.grid(True, linestyle="--", linewidth=0.7, alpha=0.7)
+        ax.tick_params(axis="both", which="both", labelsize=12)
 
         plt.tight_layout()
-        plt.savefig('pareto_optimal_allocations.pdf')
+        plt.savefig("pareto_optimal_allocations.pdf")
         return fig
+
     return (plot_pareto_tradeoff,)
 
 
@@ -550,7 +641,12 @@ def _(os):
 
 @app.cell
 def _(dispatch_costs, investment_costs, plot_pareto_tradeoff):
-    labels = ['Uniform Distribution', 'Capital Based Distribution', 'Solver Optimized Distribution', 'Dispatch Optimized Distribution']
+    labels = [
+        "Uniform Distribution",
+        "Capital Based Distribution",
+        "Solver Optimized Distribution",
+        "Dispatch Optimized Distribution",
+    ]
     fig = plot_pareto_tradeoff(dispatch_costs, investment_costs, labels)
     # plt.show()
     return fig, labels

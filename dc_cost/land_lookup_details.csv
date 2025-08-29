@@ -1,0 +1,102 @@
+bus_id,county_fips,state_fips,state_name,nchs_class,u_mult,base_per_acre,land_usd_per_acre
+bus_ccaef72e,53067.0,53.0,Washington,Medium Metro,1.25,100000.0,125000.0
+bus_5cb99bcb,53057.0,53.0,Washington,Small Metro,1.15,100000.0,114999.99999999999
+bus_eda22473,53035.0,53.0,Washington,Medium Metro,1.25,100000.0,125000.0
+bus_82e2cae6,53033.0,53.0,Washington,Large Central Metro,1.5,100000.0,150000.0
+bus_75dbcda8,53007.0,53.0,Washington,Small Metro,1.15,100000.0,114999.99999999999
+bus_d6014a88,53053.0,53.0,Washington,Large Fringe Metro,1.35,100000.0,135000.0
+bus_816a8bd1,53061.0,53.0,Washington,Large Fringe Metro,1.35,100000.0,135000.0
+bus_affd34ae,6059.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_b59a9294,6107.0,6.0,California,Medium Metro,1.25,100000.0,125000.0
+bus_001ae5c6,6111.0,6.0,California,Medium Metro,1.25,100000.0,125000.0
+bus_fef3c563,6037.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_5d66e975,6025.0,6.0,California,Small Metro,1.15,100000.0,114999.99999999999
+bus_8c960106,6071.0,6.0,California,Large Fringe Metro,1.35,100000.0,135000.0
+bus_46bfe7b0,6037.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_8c4ce5db,6065.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_573f41b2,6071.0,6.0,California,Large Fringe Metro,1.35,100000.0,135000.0
+bus_d054cc5a,6037.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_850c1efd,6051.0,6.0,California,Noncore (Rural),1.0,100000.0,100000.0
+bus_fa2c6cf1,6071.0,6.0,California,Large Fringe Metro,1.35,100000.0,135000.0
+bus_c8dec523,6037.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_77a4632e,6065.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_0d87c5b6,6029.0,6.0,California,Medium Metro,1.25,100000.0,125000.0
+bus_8fabdc4e,6071.0,6.0,California,Large Fringe Metro,1.35,100000.0,135000.0
+bus_475d5479,6065.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_5b2fbca2,6059.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_1906eca9,6029.0,6.0,California,Medium Metro,1.25,100000.0,125000.0
+bus_bc5d44ea,6037.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_b2512daf,6029.0,6.0,California,Medium Metro,1.25,100000.0,125000.0
+bus_27f1448f,6037.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_e767da81,6073.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_c820a516,6073.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_c7e20017,6073.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_e9824e05,32001.0,32.0,Nevada,Micropolitan,1.05,100000.0,105000.0
+bus_b9dd508f,32003.0,32.0,Nevada,Large Central Metro,1.5,100000.0,150000.0
+bus_9ab58074,32003.0,32.0,Nevada,Large Central Metro,1.5,100000.0,150000.0
+bus_8b898815,32003.0,32.0,Nevada,Large Central Metro,1.5,100000.0,150000.0
+bus_43e68bd2,16055.0,16.0,Idaho,Small Metro,1.15,100000.0,114999.99999999999
+bus_2eff5c21,16015.0,16.0,Idaho,Medium Metro,1.25,100000.0,125000.0
+bus_42561c2c,16005.0,16.0,Idaho,Small Metro,1.15,100000.0,114999.99999999999
+bus_c4bd70c9,30063.0,30.0,Montana,Small Metro,1.15,100000.0,114999.99999999999
+bus_9e26eed4,30045.0,30.0,Montana,Noncore (Rural),1.0,100000.0,100000.0
+bus_8460a1a9,53041.0,53.0,Washington,Micropolitan,1.05,100000.0,105000.0
+bus_26606df9,53005.0,53.0,Washington,Medium Metro,1.25,100000.0,125000.0
+bus_cd12caba,30111.0,30.0,Montana,Small Metro,1.15,100000.0,114999.99999999999
+bus_f20eb250,56035.0,56.0,Wyoming,Noncore (Rural),1.0,100000.0,100000.0
+bus_9ff9acd4,56033.0,56.0,Wyoming,Micropolitan,1.05,100000.0,105000.0
+bus_d7f98a17,56005.0,56.0,Wyoming,Micropolitan,1.05,100000.0,105000.0
+bus_b3dd22be,56001.0,56.0,Wyoming,Micropolitan,1.05,100000.0,105000.0
+bus_007fc663,49035.0,49.0,Utah,Large Central Metro,1.5,100000.0,150000.0
+bus_cb6aba33,49021.0,49.0,Utah,Micropolitan,1.05,100000.0,105000.0
+bus_61bb0be0,49003.0,49.0,Utah,Micropolitan,1.05,100000.0,105000.0
+bus_ced995fd,49015.0,49.0,Utah,Noncore (Rural),1.0,100000.0,100000.0
+bus_239e9408,49013.0,49.0,Utah,Noncore (Rural),1.0,100000.0,100000.0
+bus_89bd3caa,4015.0,4.0,Arizona,Small Metro,1.15,100000.0,114999.99999999999
+bus_01346baf,4025.0,4.0,Arizona,Small Metro,1.15,100000.0,114999.99999999999
+bus_b1279b3f,4013.0,4.0,Arizona,Large Central Metro,1.5,100000.0,150000.0
+bus_9538eb07,4027.0,4.0,Arizona,Small Metro,1.15,100000.0,114999.99999999999
+bus_02a1bd2e,4003.0,4.0,Arizona,Small Metro,1.15,100000.0,114999.99999999999
+bus_2bdaf2be,4013.0,4.0,Arizona,Large Central Metro,1.5,100000.0,150000.0
+bus_c1181f6c,4017.0,4.0,Arizona,Micropolitan,1.05,100000.0,105000.0
+bus_44431b12,4005.0,4.0,Arizona,Small Metro,1.15,100000.0,114999.99999999999
+bus_5b5e8346,4005.0,4.0,Arizona,Small Metro,1.15,100000.0,114999.99999999999
+bus_6d60b4f4,4021.0,4.0,Arizona,Large Fringe Metro,1.35,100000.0,135000.0
+bus_139d0c14,4009.0,4.0,Arizona,Micropolitan,1.05,100000.0,105000.0
+bus_ce47f28b,4001.0,4.0,Arizona,Noncore (Rural),1.0,100000.0,100000.0
+bus_c5130ccc,53043.0,53.0,Washington,Noncore (Rural),1.0,100000.0,100000.0
+bus_874d9c41,4019.0,4.0,Arizona,Large Central Metro,1.5,100000.0,150000.0
+bus_27cc095c,35061.0,35.0,New Mexico,Medium Metro,1.25,100000.0,125000.0
+bus_f0adbabe,8059.0,8.0,Colorado,Large Fringe Metro,1.35,100000.0,135000.0
+bus_7440ac87,8037.0,8.0,Colorado,Micropolitan,1.05,100000.0,105000.0
+bus_7e1f53e0,8031.0,8.0,Colorado,Large Central Metro,1.5,100000.0,150000.0
+bus_9bd8dbf9,8077.0,8.0,Colorado,Small Metro,1.15,100000.0,114999.99999999999
+bus_a1c8c1e8,8075.0,8.0,Colorado,Micropolitan,1.05,100000.0,105000.0
+bus_da75aa04,8069.0,8.0,Colorado,Medium Metro,1.25,100000.0,125000.0
+bus_335d0fc8,8043.0,8.0,Colorado,Micropolitan,1.05,100000.0,105000.0
+bus_8defa8a5,53025.0,53.0,Washington,Micropolitan,1.05,100000.0,105000.0
+bus_35052dc7,41067.0,41.0,Oregon,Large Fringe Metro,1.35,100000.0,135000.0
+bus_4af8861d,41003.0,41.0,Oregon,Small Metro,1.15,100000.0,114999.99999999999
+bus_85d2616c,41059.0,41.0,Oregon,Micropolitan,1.05,100000.0,105000.0
+bus_bd4e3f5b,41031.0,41.0,Oregon,Medium Metro,1.25,100000.0,125000.0
+bus_df4a49f8,48141.0,48.0,Texas,Medium Metro,1.25,100000.0,125000.0
+bus_5c2bd57a,41019.0,41.0,Oregon,Micropolitan,1.05,100000.0,105000.0
+bus_00117431,41025.0,41.0,Oregon,Noncore (Rural),1.0,100000.0,100000.0
+bus_200eead6,6093.0,6.0,California,Noncore (Rural),1.0,100000.0,100000.0
+bus_87db4562,6085.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_91d8467c,6067.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_a82e8302,6089.0,6.0,California,Small Metro,1.15,100000.0,114999.99999999999
+bus_7c36f181,6077.0,6.0,California,Medium Metro,1.25,100000.0,125000.0
+bus_6b356700,6053.0,6.0,California,Medium Metro,1.25,100000.0,125000.0
+bus_16510349,6017.0,6.0,California,Large Fringe Metro,1.35,100000.0,135000.0
+bus_29fba8fb,6075.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_aeec73bd,6095.0,6.0,California,Medium Metro,1.25,100000.0,125000.0
+bus_6dc51421,,,,Unclassified,1.0,100000.0,100000.0
+bus_ab8fa85a,,,,Unclassified,1.0,100000.0,100000.0
+bus_401b47c6,6019.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_fa805d35,,,,Unclassified,1.0,100000.0,100000.0
+bus_8e496769,6001.0,6.0,California,Large Central Metro,1.5,100000.0,150000.0
+bus_380ce326,6099.0,6.0,California,Medium Metro,1.25,100000.0,125000.0
+bus_62da227b,6007.0,6.0,California,Small Metro,1.15,100000.0,114999.99999999999
+bus_4dde735a,6097.0,6.0,California,Medium Metro,1.25,100000.0,125000.0
+bus_c47f890e,6079.0,6.0,California,Medium Metro,1.25,100000.0,125000.0

@@ -1,0 +1,35 @@
+{
+  "gamma_per_mw": 12000000.0,
+  "acres_per_mw": 0.2,
+  "selected_buses": [
+    "p280 4",
+    "p250 0",
+    "p280 1",
+    "p330 2",
+    "p50 0",
+    "p340 0",
+    "p60 0",
+    "p100 9",
+    "p90 1",
+    "p130 0"
+  ],
+  "terminals": [
+    58,
+    48,
+    55,
+    70,
+    76,
+    74,
+    81,
+    28,
+    85,
+    33
+  ],
+  "power_unit": 1000.0,
+  "cost_unit": 100.0,
+  "land_details": "/Users/grantwilkins/zap/dc_cost/land_lookup_details.csv",
+  "land_details_sha256": "8de1c2941b7c9e1763fa14f011c0d4fab0114428c12fd8698160e8ba3d420080",
+  "pypsa_source": "/Users/grantwilkins/zap_data/pypsa-networks/western_small",
+  "time_horizon_hours": 24,
+  "time_res_hours": 1.0
+}
