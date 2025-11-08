@@ -48,6 +48,7 @@ for i, config in enumerate(config_list):
 module load cuda/12.2.0
 module load openblas/0.3.20
 module load suitesparse/7.4.0
+module load cudss/0.3.0.9
 
 LD_LIBRARY_PATH=$(echo $LD_LIBRARY_PATH | tr ':' '\n' | grep -v "$HOME/.local/cuda-stubs" | paste -sd ':' -)
 export LD_LIBRARY_PATH
