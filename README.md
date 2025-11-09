@@ -58,7 +58,8 @@ If you also used the gradient-based planning methods, please also cite our paper
 
 ```
 
-If you use this package for solving network utility maximization problems, please cite our paper ([preprint] (https://arxiv.org/abs/2509.10722)):
+If you use this package for solving network utility maximization problems, please cite our paper ([preprint](https://arxiv.org/abs/2509.10722)):
+
 ```bibtex
 @article{sreekumar2025num,
   title={Large-Scale Network Utility Maximization via GPU-Accelerated Proximal Message Passing},
