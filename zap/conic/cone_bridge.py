@@ -1,7 +1,7 @@
 import numpy as np
 import cvxpy as cp
 import scipy.sparse as sp
-import sksparse.cholmod as cholmod
+# import sksparse.cholmod as cholmod
 
 from zap.network import PowerNetwork
 from .variable_device import VariableDevice

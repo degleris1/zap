@@ -26,3 +26,4 @@ Models can be solved using a GPU-accelerated ADMM solver, integrated into PyTorc
    Home<self>
    Quick Start<quickstart>
    Basic Usage<basic>
+   Basic Usage (NUM)<basic_num>
