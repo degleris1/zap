@@ -5,10 +5,6 @@
 
 See the [documentation page](https://degleris1.github.io/zap/) for installation, basic usage, and examples.
 
-For basic usage and examples on solving network utility maximization problems, please refer to the demo notebook. 
-
-
-
 ## Developer Setup
 
 For developers, we recommend installing [poetry](https://python-poetry.org/docs/).
