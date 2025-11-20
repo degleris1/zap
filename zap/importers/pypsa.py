@@ -49,7 +49,7 @@ class BatteryDefaults:
 
 @dataclass
 class LoadDefaults:
-    marginal_value: float = 1000.0
+    marginal_value: float = 10000.0
     quadratic_cost: float = 0.0
 
 
@@ -134,9 +134,9 @@ def parse_generators(
     )  # Perturb costs
 
     # Build nominal capacities
-    # Set min and max capacities for non-extendable generators
+    # For non-extendable generators: set min = max = p_nom (fixed capacity)
     non_ext_generators_mask = net.generators.index[
-        net.generators.p_nom_extendable & active_generator_mask
+        ~net.generators.p_nom_extendable & active_generator_mask
     ]
     if not non_ext_generators_mask.empty:
         generators.loc[non_ext_generators_mask, "p_nom_min"] = generators.loc[
@@ -145,6 +145,18 @@ def parse_generators(
         generators.loc[non_ext_generators_mask, "p_nom_max"] = generators.loc[
             non_ext_generators_mask, "p_nom"
         ]
+
+    # For extendable generators: use p_nom_min as the baseline for investment cost
+    # This ensures investment cost = capital_cost * (capacity - p_nom_min)
+    # Note: The user should set p_nom_min = p_nom if they want p_nom as the baseline
+    ext_generators_mask = net.generators.index[
+        net.generators.p_nom_extendable & active_generator_mask
+    ]
+    if not ext_generators_mask.empty:
+        generators.loc[ext_generators_mask, "p_nom"] = generators.loc[
+            ext_generators_mask, "p_nom_min"
+        ]
+
     nominal_capacities = generators.p_nom.values
     min_nominal_capacities = generators.p_nom_min.values
     max_nominal_capacities = generators.p_nom_max.values
@@ -242,8 +254,10 @@ def parse_dc_lines(
     active_links_mask = get_active_assets(net, "Link", snapshots)
     links = deepcopy(net.links.loc[active_links_mask])
 
-    # Set min and max capacities for non-extendable links
-    non_ext_links_mask = net.links.index[net.links.p_nom_extendable & active_links_mask]
+    # For non-extendable links: set min = max = p_nom (fixed capacity)
+    non_ext_links_mask = net.links.index[
+        ~net.links.p_nom_extendable & active_links_mask
+    ]
     if not non_ext_links_mask.empty:
         links.loc[non_ext_links_mask, "p_nom_min"] = links.loc[
             non_ext_links_mask, "p_nom"
@@ -251,6 +265,11 @@ def parse_dc_lines(
         links.loc[non_ext_links_mask, "p_nom_max"] = links.loc[
             non_ext_links_mask, "p_nom"
         ]
+
+    # For extendable links: use p_nom_min as the baseline for investment cost
+    ext_links_mask = net.links.index[net.links.p_nom_extendable & active_links_mask]
+    if not ext_links_mask.empty:
+        links.loc[ext_links_mask, "p_nom"] = links.loc[ext_links_mask, "p_nom_min"]
 
     # links = net.links[net.links.carrier == "DC"] # remove since we want to model multi-carrier networks
     sources, sinks = get_source_sinks(links, buses_to_index)
@@ -306,8 +325,10 @@ def parse_ac_lines(
     # Filter lines with infinite reactance
     lines = lines[~np.isinf(lines.x)]
 
-    # Set min and max capacities for non-extendable lines
-    non_ext_lines_mask = net.lines.index[net.lines.s_nom_extendable & active_lines_mask]
+    # For non-extendable lines: set min = max = s_nom (fixed capacity)
+    non_ext_lines_mask = net.lines.index[
+        ~net.lines.s_nom_extendable & active_lines_mask
+    ]
     if not non_ext_lines_mask.empty:
         lines.loc[non_ext_lines_mask, "s_nom_min"] = lines.loc[
             non_ext_lines_mask, "s_nom"
@@ -315,6 +336,11 @@ def parse_ac_lines(
         lines.loc[non_ext_lines_mask, "s_nom_max"] = lines.loc[
             non_ext_lines_mask, "s_nom"
         ]
+
+    # For extendable lines: use s_nom_min as the baseline for investment cost
+    ext_lines_mask = net.lines.index[net.lines.s_nom_extendable & active_lines_mask]
+    if not ext_lines_mask.empty:
+        lines.loc[ext_lines_mask, "s_nom"] = lines.loc[ext_lines_mask, "s_nom_min"]
 
     sources, sinks = get_source_sinks(lines, buses_to_index)
 
@@ -360,9 +386,9 @@ def parse_storage_units(
     else:
         quadratic_cost = defaults.quadratic_discharge_cost * np.ones(terminals.size)
 
-    # Set min and max capacities for non-extendable storage units
+    # For non-extendable storage units: set min = max = p_nom (fixed capacity)
     non_ext_storage_mask = net.storage_units.index[
-        net.storage_units.p_nom_extendable & active_storage_mask
+        ~net.storage_units.p_nom_extendable & active_storage_mask
     ]
     if not non_ext_storage_mask.empty:
         storage_units.loc[non_ext_storage_mask, "p_nom_min"] = storage_units.loc[
@@ -370,6 +396,15 @@ def parse_storage_units(
         ]
         storage_units.loc[non_ext_storage_mask, "p_nom_max"] = storage_units.loc[
             non_ext_storage_mask, "p_nom"
+        ]
+
+    # For extendable storage units: use p_nom_min as the baseline for investment cost
+    ext_storage_mask = net.storage_units.index[
+        net.storage_units.p_nom_extendable & active_storage_mask
+    ]
+    if not ext_storage_mask.empty:
+        storage_units.loc[ext_storage_mask, "p_nom"] = storage_units.loc[
+            ext_storage_mask, "p_nom_min"
         ]
 
     # Set SOC set-points
