@@ -8,8 +8,6 @@ from torch import nn
 
 from .injector import Generator, Load
 
-NUM_FEATURES = 205
-
 
 def _build_prox_mlp(
     *,
@@ -52,6 +50,7 @@ class LearnedProxGenerator(Generator):
     def __init__(
         self,
         *,
+        embedding_dim: int,
         prox_hidden_width: int = 128,
         prox_hidden_depth: int = 1,
         use_batch_norm: bool = True,
@@ -60,8 +59,12 @@ class LearnedProxGenerator(Generator):
         **kwargs,
     ):
         super().__init__(**kwargs)
+
+        # Build prox network: 5 base features + embedding dimension
+        # Base features: [set_p, rho, linear_cost, pmin, pmax]
+        num_features = 5 + embedding_dim
         self.prox_net = _build_prox_mlp(
-            input_dim=NUM_FEATURES,
+            input_dim=num_features,
             output_dim=1,
             hidden_width=prox_hidden_width,
             hidden_depth=prox_hidden_depth,
@@ -71,8 +74,9 @@ class LearnedProxGenerator(Generator):
         self.use_residual = use_residual
         self.has_changed = True
 
+        # Initialize residual connection weights to zero if needed
         if self.use_residual:
-            last = self.prox_net[-1]  # This last layer is the linear layer
+            last = self.prox_net[-1]
             nn.init.zeros_(last.weight)
             nn.init.zeros_(last.bias)
 
@@ -126,6 +130,7 @@ class LearnedProxLoad(Load):
     def __init__(
         self,
         *,
+        embedding_dim: int,
         prox_hidden_width: int = 128,
         prox_hidden_depth: int = 1,
         use_batch_norm: bool = True,
@@ -134,8 +139,12 @@ class LearnedProxLoad(Load):
         **kwargs,
     ):
         super().__init__(**kwargs)
+
+        # Build prox network: 5 base features + embedding dimension
+        # Base features: [set_p, rho, linear_cost, pmin, pmax]
+        num_features = 5 + embedding_dim
         self.prox_net = _build_prox_mlp(
-            input_dim=NUM_FEATURES,
+            input_dim=num_features,
             output_dim=1,
             hidden_width=prox_hidden_width,
             hidden_depth=prox_hidden_depth,
@@ -145,8 +154,9 @@ class LearnedProxLoad(Load):
         self.use_residual = use_residual
         self.has_changed = True
 
+        # Initialize residual connection weights to zero if needed
         if self.use_residual:
-            last = self.prox_net[-1]  # This last layer is the linear layer
+            last = self.prox_net[-1]
             nn.init.zeros_(last.weight)
             nn.init.zeros_(last.bias)
 
@@ -179,7 +189,6 @@ class LearnedProxLoad(Load):
 
         pmax = self.admm_data[1]
         pmin = self.admm_data[2]
-
         p_base = p_base[0]
 
         return _admm_prox_update(
@@ -227,7 +236,10 @@ def _admm_prox_update(
         dim=-1,
     )
     inp = torch.cat((inp, emb), dim=-1)
-    inp = inp.view(-1, NUM_FEATURES)
+
+    # Dynamic reshape based on actual feature dimension
+    num_features = inp.shape[-1]
+    inp = inp.view(-1, num_features)
 
     # Apply prox net
     p_flat = prox_net(inp).squeeze(-1)

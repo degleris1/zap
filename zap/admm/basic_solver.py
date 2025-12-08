@@ -309,7 +309,7 @@ class ADMMSolver:
                 rho_power = rho_power * (num_contingencies + 1)
                 rho_angle = rho_angle * (num_contingencies + 1)
 
-            if type(dev) in [LearnedProxGenerator, LearnedProxLoad]:
+            if isinstance(dev, (LearnedProxGenerator, LearnedProxLoad)):
                 p, v = dev.admm_prox_update(
                     rho_power,
                     rho_angle,
