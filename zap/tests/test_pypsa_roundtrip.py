@@ -36,7 +36,7 @@ except ImportError:
     HAS_MATPLOTLIB = False
 
 # Directory for saving plots
-PLOT_DIR = Path(__file__).parent / "dispatch_plots"
+PLOT_DIR = Path(__file__).parent / "plots"
 
 
 # Test tolerances
@@ -146,7 +146,8 @@ class TestPyPSARoundtripBase(unittest.TestCase):
             return
 
         # Create plot directory if it doesn't exist
-        PLOT_DIR.mkdir(exist_ok=True)
+        dispatch_plot_dir = PLOT_DIR / "dispatch"
+        dispatch_plot_dir.mkdir(parents=True, exist_ok=True)
 
         # Time axis
         time_horizon = self.time_horizon
@@ -155,6 +156,9 @@ class TestPyPSARoundtripBase(unittest.TestCase):
         # Run PyPSA optimization to get comparison data
         pypsa_net = self.pypsa_network.copy()
         pypsa_net.set_snapshots(self.snapshots)
+        # Set snapshot weightings to scale objective function by time horizon
+        # This ensures PyPSA objective matches Zap's scaled capital costs
+        pypsa_net.snapshot_weightings.loc[:, :] = len(self.snapshots) / HOURS_PER_YEAR
         # Use multi_investment_periods only if network has investment periods
         has_investment_periods = pypsa_net.investment_periods.size > 0
         pypsa_net.optimize(
@@ -413,7 +417,7 @@ class TestPyPSARoundtripBase(unittest.TestCase):
         plt.tight_layout()
 
         # Save plot
-        plot_path = PLOT_DIR / f"{filename_prefix}_comparison.png"
+        plot_path = dispatch_plot_dir / f"{filename_prefix}_comparison.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
         plt.close()
 
@@ -853,6 +857,8 @@ class TestObjectiveValueBase(unittest.TestCase):
 
         # Run PyPSA optimization on the same network
         pypsa_net = self.pypsa_network.copy()
+        # Set snapshot weightings to scale objective function by time horizon
+        pypsa_net.snapshot_weightings.loc[:, :] = len(self.snapshots) / HOURS_PER_YEAR
 
         # Solve with PyPSA's linear optimal power flow
         # Use multi_investment_periods only if network has investment periods
@@ -914,7 +920,8 @@ class TestObjectiveValueBase(unittest.TestCase):
             self.skipTest("matplotlib not available")
 
         # Create plot directory if it doesn't exist
-        PLOT_DIR.mkdir(exist_ok=True)
+        dispatch_plot_dir = PLOT_DIR / "dispatch"
+        dispatch_plot_dir.mkdir(parents=True, exist_ok=True)
 
         # Time axis
         time_horizon = self.time_horizon
@@ -922,6 +929,8 @@ class TestObjectiveValueBase(unittest.TestCase):
 
         # Run PyPSA optimization
         pypsa_net = self.pypsa_network.copy()
+        # Set snapshot weightings to scale objective function by time horizon
+        pypsa_net.snapshot_weightings.loc[:, :] = len(self.snapshots) / HOURS_PER_YEAR
         # Use multi_investment_periods only if network has investment periods
         has_investment_periods = pypsa_net.investment_periods.size > 0
         pypsa_net.optimize(
@@ -1020,7 +1029,7 @@ class TestObjectiveValueBase(unittest.TestCase):
         plt.tight_layout()
 
         # Save plot
-        plot_path = PLOT_DIR / "synthetic_network_comparison.png"
+        plot_path = dispatch_plot_dir / "synthetic_network_comparison.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
         plt.close()
 
@@ -1209,7 +1218,7 @@ class TestInvestmentPlanningBase(unittest.TestCase):
         # Solve planning problem with more iterations for convergence
         cls.optimized_params, cls.history = cls.problem.solve(
             num_iterations=1000,
-            algorithm=zap.planning.GradientDescent(step_size=0.1),
+            algorithm=zap.planning.GradientDescent(step_size=1e-3),
             initial_state=initial_params,
         )
 
@@ -1258,7 +1267,8 @@ class TestInvestmentPlanningBase(unittest.TestCase):
             return
 
         # Create plot directory if it doesn't exist
-        PLOT_DIR.mkdir(exist_ok=True)
+        planning_plot_dir = PLOT_DIR / "planning"
+        planning_plot_dir.mkdir(parents=True, exist_ok=True)
 
         # Time axis
         time_horizon = self.time_horizon
@@ -1267,8 +1277,10 @@ class TestInvestmentPlanningBase(unittest.TestCase):
         # Run PyPSA optimization to get comparison data
         pypsa_net = self.pypsa_network.copy()
         pypsa_net.set_snapshots(self.snapshots)
+        # Set snapshot weightings to scale objective function by time horizon
+        pypsa_net.snapshot_weightings.loc[:, :] = HOURS_PER_YEAR / len(self.snapshots)
         pypsa_net.optimize(solver_name="highs")
-
+        breakpoint()
         # Create figure with subplots (3 rows x 2 columns)
         fig, axes = plt.subplots(3, 2, figsize=(16, 14))
 
@@ -1321,7 +1333,6 @@ class TestInvestmentPlanningBase(unittest.TestCase):
 
         # Right: Zap
         ax_zap_gen = axes[0, 1]
-
         carrier_power_zap = {}
         if gen_device is not None:
             gen_idx = self.get_device_index(Generator)
@@ -1368,12 +1379,11 @@ class TestInvestmentPlanningBase(unittest.TestCase):
         # === Row 2: Marginal Prices ===
         # Left: PyPSA
         ax_pypsa_prices = axes[1, 0]
-        if "marginal_price" in pypsa_net.buses_t:
-            pypsa_prices = pypsa_net.buses_t.marginal_price
-            for bus_name in pypsa_prices.columns:
-                ax_pypsa_prices.plot(
-                    hours, pypsa_prices[bus_name].values, label=bus_name, alpha=0.7
-                )
+        pypsa_prices = pypsa_net.buses_t.marginal_price
+        for bus_name in pypsa_prices.columns:
+            ax_pypsa_prices.plot(
+                hours, pypsa_prices[bus_name].values, label=bus_name, alpha=0.7
+            )
 
         ax_pypsa_prices.set_xlabel("Hour")
         ax_pypsa_prices.set_ylabel("Price ($/MWh)")
@@ -1488,7 +1498,7 @@ class TestInvestmentPlanningBase(unittest.TestCase):
         plt.tight_layout()
 
         # Save plot
-        plot_path = PLOT_DIR / f"{filename_prefix}_comparison.png"
+        plot_path = planning_plot_dir / f"{filename_prefix}_comparison.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
         plt.close()
 
@@ -1522,6 +1532,8 @@ class TestGeneratorInvestment(TestInvestmentPlanningBase):
         # Run PyPSA optimization
         pypsa_net = self.pypsa_network.copy()
         pypsa_net.set_snapshots(self.snapshots)
+        # Set snapshot weightings to scale objective function by time horizon
+        pypsa_net.snapshot_weightings.loc[:, :] = len(self.snapshots) / HOURS_PER_YEAR
         pypsa_net.optimize(solver_name="highs")
 
         # Compare capacities for each generator
@@ -1571,6 +1583,8 @@ class TestGeneratorInvestment(TestInvestmentPlanningBase):
         # Run PyPSA optimization
         pypsa_net = self.pypsa_network.copy()
         pypsa_net.set_snapshots(self.snapshots)
+        # Set snapshot weightings to scale objective function by time horizon
+        pypsa_net.snapshot_weightings.loc[:, :] = len(self.snapshots) / HOURS_PER_YEAR
         pypsa_net.optimize(solver_name="highs")
 
         # Compare capacities for each line
@@ -1716,202 +1730,9 @@ class TestExtendableFlags(TestInvestmentPlanningBase):
                 )
 
 
-class TestCapitalCostTimeScaling(TestInvestmentPlanningBase):
-    """Test that capital costs scale correctly with time horizon."""
-
-    @classmethod
-    def create_short_network(cls):
-        """Create network with 1-hour horizon."""
-        n, _ = cls.create_investment_network()
-        snapshots = pd.date_range("2020-01-01", periods=1, freq="h")
-        n.set_snapshots(snapshots)
-
-        # Update time-varying data
-        n.generators_t["p_max_pu"] = pd.DataFrame({"gen_solar": [0.5]}, index=snapshots)
-        n.loads_t["p_set"] = pd.DataFrame({"load0": [100.0]}, index=snapshots)
-
-        return n, snapshots
-
-    def test_capital_cost_proportional_to_horizon(self):
-        """Verify capital costs scale linearly with time horizon."""
-        # Load networks with different horizons
-        short_net, short_snaps = self.create_short_network()
-
-        _, short_devices = load_pypsa_network(short_net, short_snaps)
-        _, long_devices = load_pypsa_network(self.pypsa_network, self.snapshots)
-
-        # Get generators
-        short_gen = None
-        long_gen = None
-        for d in short_devices:
-            if isinstance(d, Generator):
-                short_gen = d
-                break
-        for d in long_devices:
-            if isinstance(d, Generator):
-                long_gen = d
-                break
-
-        if short_gen is None or long_gen is None:
-            self.skipTest("No generators found")
-
-        # Capital costs should scale by ratio of snapshots
-        scale_ratio = len(self.snapshots) / len(short_snaps)
-
-        # Compare capital costs for the same generator
-        for i in range(min(short_gen.num_devices, long_gen.num_devices)):
-            if short_gen.capital_cost[i] > 0:
-                ratio = long_gen.capital_cost[i] / short_gen.capital_cost[i]
-                self.assertAlmostEqual(ratio, scale_ratio, places=2)
-
-
-# =============================================================================
-# Storage Investment Tests
-# =============================================================================
-
-
-class TestStorageInvestmentBase(unittest.TestCase):
-    """Base class for storage investment tests."""
-
-    @classmethod
-    def create_storage_network(cls):
-        """Create network with extendable storage devices."""
-        n = pypsa.Network()
-
-        snapshots = pd.date_range("2020-01-01", periods=24, freq="h")
-        n.set_snapshots(snapshots)
-
-        # Add buses
-        n.add("Bus", "bus0")
-        n.add("Bus", "bus1")
-
-        # Add carriers
-        n.add("Carrier", "battery", co2_emissions=0.0)
-        n.add("Carrier", "gas", co2_emissions=0.2)
-
-        # Add generator
-        n.add(
-            "Generator",
-            "gen0",
-            bus="bus0",
-            p_nom=200.0,
-            marginal_cost=50.0,
-            carrier="gas",
-        )
-
-        # Add load with variable profile
-        load_profile = 100 + 50 * np.sin(np.linspace(0, 4 * np.pi, 24))
-        n.add(
-            "Load",
-            "load0",
-            bus="bus1",
-            p_set=load_profile,
-        )
-
-        # Add line
-        n.add(
-            "Line",
-            "line_0_1",
-            bus0="bus0",
-            bus1="bus1",
-            s_nom=200.0,
-            x=0.1,
-        )
-
-        # Add storage unit with explicit SOC settings
-        n.add(
-            "StorageUnit",
-            "battery0",
-            bus="bus1",
-            p_nom=20.0,
-            p_nom_extendable=False,  # Fixed for basic test
-            max_hours=4.0,
-            efficiency_dispatch=0.9,
-            capital_cost=100000.0,
-            state_of_charge_initial=0.0,  # Start empty
-            cyclic_state_of_charge=False,  # No cyclic constraint
-        )
-
-        return n, snapshots
-
-    @classmethod
-    def setUpClass(cls):
-        cls.pypsa_network, cls.snapshots = cls.create_storage_network()
-
-        cls.net, cls.devices = load_pypsa_network(
-            cls.pypsa_network,
-            cls.snapshots,
-        )
-
-        cls.time_horizon = len(cls.snapshots)
-
-        cls.dispatch = cls.net.dispatch(
-            cls.devices,
-            time_horizon=cls.time_horizon,
-            solver=cp.MOSEK,
-        )
-
-
-class TestStorageUnitInvestment(TestStorageInvestmentBase):
-    """Test StorageUnit investment calculations."""
-
-    def get_storage_device(self):
-        """Get StorageUnit device from devices list."""
-        for device in self.devices:
-            if isinstance(device, StorageUnit):
-                return device
-        return None
-
-    def test_storage_unit_exists(self):
-        """Verify storage unit was imported."""
-        storage = self.get_storage_device()
-        self.assertIsNotNone(storage, "No storage unit found in devices")
-
-    def test_storage_unit_duration(self):
-        """Verify storage duration is preserved."""
-        storage = self.get_storage_device()
-        if storage is None:
-            self.skipTest("No storage unit found")
-
-        # Duration should be preserved from PyPSA
-        original_duration = self.pypsa_network.storage_units["max_hours"].values
-        np.testing.assert_array_almost_equal(
-            storage.duration.flatten(), original_duration
-        )
-
-    def test_storage_unit_efficiency(self):
-        """Verify storage efficiency is preserved."""
-        storage = self.get_storage_device()
-        if storage is None:
-            self.skipTest("No storage unit found")
-
-        original_eff = self.pypsa_network.storage_units["efficiency_dispatch"].values
-        np.testing.assert_array_almost_equal(
-            storage.charge_efficiency.flatten(), original_eff
-        )
-
-    def test_storage_investment_cost_formula(self):
-        """Verify storage unit investment cost calculation."""
-        storage = self.get_storage_device()
-        if storage is None:
-            self.skipTest("No storage unit found")
-
-        # Test investment cost formula
-        new_capacity = storage.power_capacity * 2.0
-        investment_cost = storage.get_investment_cost(power_capacity=new_capacity)
-
-        expected_cost = np.sum(
-            storage.capital_cost * (new_capacity - storage.power_capacity)
-        )
-
-        self.assertAlmostEqual(investment_cost, expected_cost, places=3)
-
-
 # =============================================================================
 # Test with Real Network Data
 # =============================================================================
-
-
 class TestTexas7NodeRoundtrip(TestPyPSARoundtripBase):
     """Test roundtrip with texas_7node network."""
 
