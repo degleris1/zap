@@ -14,3 +14,7 @@ build/
 
 
 .claude/
+
+# Test outputs
+zap/tests/**/*.csv
+zap/tests/**/*.png

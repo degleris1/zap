@@ -18,16 +18,20 @@ class PlanningProblemADMM(AbstractPlanningProblem):
         layer: ADMMLayer,
         lower_bounds: dict = None,
         upper_bounds: dict = None,
+        snapshot_weight: float = 1.0,
     ):
         # Call super initializer
         self.la = torch
+        self.snapshot_weight = snapshot_weight
         self.rho_power_history = []
         self.rho_angle_history = []
         super().__init__(
             operation_objective, investment_objective, layer, lower_bounds, upper_bounds
         )
 
-    def forward(self, requires_grad: bool = False, batch=None, initial_state=None, **kwargs):
+    def forward(
+        self, requires_grad: bool = False, batch=None, initial_state=None, **kwargs
+    ):
         # Enable gradient tracking if needed
         if requires_grad:
             print("Tracking gradient during forward pass.")
@@ -48,9 +52,12 @@ class PlanningProblemADMM(AbstractPlanningProblem):
         op_cost = self.operation_objective(state, parameters=params, la=torch)
         inv_cost = self.investment_objective(**kwargs, la=torch)
 
+        # Store unweighted costs for tracking
         self.op_cost = op_cost.detach()
         self.inv_cost = inv_cost.detach()
-        self.cost = op_cost + inv_cost
+
+        # Apply snapshot weight to operational cost (to annualize from snapshot)
+        self.cost = (self.snapshot_weight * op_cost) + inv_cost
         self.kwargs = kwargs
         self.params = params
         self.state = state

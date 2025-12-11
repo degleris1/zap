@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import pypsa
 from pathlib import Path
+import logging
 
 import zap
 from zap.devices.injector import Generator, Load
@@ -26,6 +27,16 @@ from zap.devices.store import Store
 from zap.importers.pypsa import load_pypsa_network, HOURS_PER_YEAR
 from zap.exporters.pypsa import export_to_pypsa
 from zap.tests import network_examples as examples
+from zap.tests.plotting_helpers import (
+    get_zap_energy_balance,
+    plot_energy_balance_comparison,
+    plot_price_comparison,
+    plot_line_flows,
+    plot_capacity_comparison,
+    plot_capacity_evolution,
+    aggregate_capacities_by_carrier,
+    export_comparison_csvs,
+)
 
 # Try to import matplotlib for plotting
 try:
@@ -44,6 +55,8 @@ PRICE_TOLERANCE = 1e-2
 POWER_TOLERANCE = 1e-3
 COST_TOLERANCE = 1e-2
 POWER_BALANCE_TOLERANCE = 1e-6
+
+logger = logging.getLogger(__name__)
 
 
 class TestPyPSARoundtripBase(unittest.TestCase):
@@ -156,256 +169,64 @@ class TestPyPSARoundtripBase(unittest.TestCase):
         # Run PyPSA optimization to get comparison data
         pypsa_net = self.pypsa_network.copy()
         pypsa_net.set_snapshots(self.snapshots)
-        # Set snapshot weightings to scale objective function by time horizon
-        # This ensures PyPSA objective matches Zap's scaled capital costs
-        pypsa_net.snapshot_weightings.loc[:, :] = len(self.snapshots) / HOURS_PER_YEAR
-        # Use multi_investment_periods only if network has investment periods
+        pypsa_net.snapshot_weightings.loc[:, :] = HOURS_PER_YEAR / len(self.snapshots)
         has_investment_periods = pypsa_net.investment_periods.size > 0
         pypsa_net.optimize(
             solver_name="highs", multi_investment_periods=has_investment_periods
         )
 
-        # Create figure with subplots (2 rows x 2 columns)
-        # Share y-axis between PyPSA (left) and Zap (right) for each row
-        fig, axes = plt.subplots(2, 2, figsize=(16, 10), sharex=True)
+        # Get energy balance data using PyPSA statistics API
+        pypsa_energy_raw = (
+            pypsa_net.statistics.energy_balance(
+                comps=["Generator", "StorageUnit"],
+                aggregate_time=False,
+                nice_names=False,
+            )
+            .droplevel(0)
+            .T
+        )
+        # Group by carrier (avoid FutureWarning by transposing first)
+        pypsa_energy = pypsa_energy_raw.T.groupby(level="carrier").sum().T
+        pypsa_energy.index = hours
 
-        # Share y-axis between left and right columns for each row
-        for row in range(2):
-            axes[row, 0].sharey(axes[row, 1])
+        # Get Zap energy balance
+        zap_energy = get_zap_energy_balance(
+            self.devices, self.dispatch, pypsa_net, time_horizon
+        )
 
-        # Get device info
-        gen_device = self.get_device_by_type(Generator)
-        load_device = self.get_device_by_type(Load)
-        storage_device = self.get_device_by_type(StorageUnit)
-
-        # Get carrier colors from PyPSA network
+        # Get carrier colors and load profile
         carrier_colors = pypsa_net.carriers.color.to_dict()
+        load_profile = (
+            pypsa_net.loads_t.p_set.sum(axis=1).values
+            if len(pypsa_net.loads) > 0
+            else None
+        )
 
-        # === Row 1: Energy Balance by Carrier (including storage) ===
-        # Left: PyPSA
-        ax_pypsa_dispatch = axes[0, 0]
+        # Create figure
+        _, axes = plt.subplots(2, 2, figsize=(16, 10), sharex=True)
 
-        # Build carrier power dictionary for PyPSA (generators + storage)
-        carrier_power_pypsa = {}
+        # Row 1: Energy balance comparison
+        plot_energy_balance_comparison(
+            axes[0, 0],
+            axes[0, 1],
+            pypsa_energy,
+            zap_energy,
+            carrier_colors,
+            load_profile,
+            title_left="PyPSA Dispatch by Carrier",
+            title_right="Zap Dispatch by Carrier",
+        )
 
-        # Add generators grouped by carrier
-        if len(pypsa_net.generators) > 0:
-            pypsa_gen_p = pypsa_net.generators_t.p
-            gen_carriers = pypsa_net.generators["carrier"]
-            for gen_name in pypsa_gen_p.columns:
-                carrier = gen_carriers[gen_name]
-                if carrier not in carrier_power_pypsa:
-                    carrier_power_pypsa[carrier] = np.zeros(time_horizon)
-                carrier_power_pypsa[carrier] += pypsa_gen_p[gen_name].values
+        # Row 2: Price comparison
+        plot_price_comparison(
+            axes[1, 0],
+            axes[1, 1],
+            pypsa_net.buses_t.marginal_price,
+            self.dispatch.prices,
+            hours,
+        )
 
-        # Add storage units grouped by carrier (positive = discharge, negative = charge)
-        if len(pypsa_net.storage_units) > 0:
-            pypsa_storage_p = pypsa_net.storage_units_t.p
-            storage_carriers = pypsa_net.storage_units["carrier"]
-            for storage_name in pypsa_storage_p.columns:
-                carrier = storage_carriers[storage_name]
-                if carrier not in carrier_power_pypsa:
-                    carrier_power_pypsa[carrier] = np.zeros(time_horizon)
-                carrier_power_pypsa[carrier] += pypsa_storage_p[storage_name].values
-
-        # Create DataFrame for easier plotting
-        if carrier_power_pypsa:
-            pypsa_df = pd.DataFrame(carrier_power_pypsa, index=hours)
-
-            # Plot positive values (generation + discharge) as stacked area
-            positive_df = pypsa_df.where(pypsa_df > 0).fillna(0)
-            if not positive_df.empty and positive_df.sum().sum() > 0:
-                bottom = np.zeros(time_horizon)
-                for carrier in sorted(positive_df.columns):
-                    power = positive_df[carrier].values
-                    if power.sum() > 0:
-                        color = carrier_colors.get(carrier, None)
-                        ax_pypsa_dispatch.fill_between(
-                            hours,
-                            bottom,
-                            bottom + power,
-                            label=carrier,
-                            alpha=0.7,
-                            color=color,
-                        )
-                        bottom += power
-
-            # Plot negative values (charging) as stacked area below zero
-            negative_df = pypsa_df.where(pypsa_df < 0).fillna(0)
-            if not negative_df.empty and negative_df.sum().sum() < 0:
-                bottom = np.zeros(time_horizon)
-                for carrier in sorted(negative_df.columns):
-                    power = negative_df[carrier].values
-                    if power.sum() < 0:
-                        color = carrier_colors.get(carrier, None)
-                        ax_pypsa_dispatch.fill_between(
-                            hours,
-                            bottom + power,
-                            bottom,
-                            label=f"{carrier} (charge)",
-                            alpha=0.7,
-                            color=color,
-                        )
-                        bottom += power
-
-        # Add load line
-        if len(pypsa_net.loads) > 0:
-            total_demand = pypsa_net.loads_t.p_set.sum(axis=1).values
-            ax_pypsa_dispatch.plot(hours, total_demand, "k-", linewidth=2, label="Load")
-
-        ax_pypsa_dispatch.axhline(y=0, color="k", linestyle="-", linewidth=0.5)
-        ax_pypsa_dispatch.set_ylabel("Power (MW)")
-        ax_pypsa_dispatch.set_title("PyPSA Dispatch by Carrier")
-        ax_pypsa_dispatch.grid(True, alpha=0.3)
-
-        # Right: Zap
-        ax_zap_dispatch = axes[0, 1]
-
-        # Build carrier power dictionary for Zap (generators + storage)
-        carrier_power_zap = {}
-
-        # Add generators grouped by carrier
-        if gen_device is not None:
-            gen_idx = self.get_device_index(Generator)
-            gen_power = self.dispatch.power[gen_idx][0]
-
-            # Get carrier information
-            if hasattr(gen_device, "carrier") and gen_device.carrier is not None:
-                carriers = gen_device.carrier
-            else:
-                # Fall back to extracting carrier from PyPSA network
-                carriers = []
-                for i in range(gen_device.num_devices):
-                    name = (
-                        gen_device.name[i]
-                        if hasattr(gen_device, "name")
-                        else f"Gen {i}"
-                    )
-                    if name in pypsa_net.generators.index:
-                        carriers.append(pypsa_net.generators.loc[name, "carrier"])
-                    else:
-                        carriers.append("Unknown")
-
-            # Group by carrier
-            for i in range(gen_device.num_devices):
-                carrier = carriers[i] if i < len(carriers) else "Unknown"
-                if carrier not in carrier_power_zap:
-                    carrier_power_zap[carrier] = np.zeros(time_horizon)
-                carrier_power_zap[carrier] += gen_power[i, :]
-
-        # Add storage units grouped by carrier
-        if storage_device is not None:
-            storage_idx = self.get_device_index(StorageUnit)
-            storage_power = self.dispatch.power[storage_idx][0]
-
-            # Get carrier information for storage
-            if (
-                hasattr(storage_device, "carrier")
-                and storage_device.carrier is not None
-            ):
-                storage_carriers = storage_device.carrier
-            else:
-                # Fall back to extracting carrier from PyPSA network
-                storage_carriers = []
-                for i in range(storage_device.num_devices):
-                    name = (
-                        storage_device.name[i]
-                        if hasattr(storage_device, "name")
-                        else f"Storage {i}"
-                    )
-                    if name in pypsa_net.storage_units.index:
-                        storage_carriers.append(
-                            pypsa_net.storage_units.loc[name, "carrier"]
-                        )
-                    else:
-                        storage_carriers.append("battery")
-
-            # Group by carrier
-            for i in range(storage_device.num_devices):
-                carrier = (
-                    storage_carriers[i] if i < len(storage_carriers) else "battery"
-                )
-                if carrier not in carrier_power_zap:
-                    carrier_power_zap[carrier] = np.zeros(time_horizon)
-                carrier_power_zap[carrier] += storage_power[i, :]
-
-        # Create DataFrame for easier plotting
-        if carrier_power_zap:
-            zap_df = pd.DataFrame(carrier_power_zap, index=hours)
-
-            # Plot positive values (generation + discharge) as stacked area
-            positive_df = zap_df.where(zap_df > 0).fillna(0)
-            if not positive_df.empty and positive_df.sum().sum() > 0:
-                bottom = np.zeros(time_horizon)
-                for carrier in sorted(positive_df.columns):
-                    power = positive_df[carrier].values
-                    if power.sum() > 0:
-                        color = carrier_colors.get(carrier, None)
-                        ax_zap_dispatch.fill_between(
-                            hours,
-                            bottom,
-                            bottom + power,
-                            label=carrier,
-                            alpha=0.7,
-                            color=color,
-                        )
-                        bottom += power
-
-            # Plot negative values (charging) as stacked area below zero
-            negative_df = zap_df.where(zap_df < 0).fillna(0)
-            if not negative_df.empty and negative_df.sum().sum() < 0:
-                bottom = np.zeros(time_horizon)
-                for carrier in sorted(negative_df.columns):
-                    power = negative_df[carrier].values
-                    if power.sum() < 0:
-                        color = carrier_colors.get(carrier, None)
-                        ax_zap_dispatch.fill_between(
-                            hours,
-                            bottom + power,
-                            bottom,
-                            color=color,
-                            label=f"{carrier} (charge)",
-                            alpha=0.7,
-                        )
-                        bottom += power
-
-        # Add load line
-        if load_device is not None:
-            total_demand = load_device.load.sum(axis=0)
-            ax_zap_dispatch.plot(hours, total_demand, "k-", linewidth=2, label="Load")
-
-        ax_zap_dispatch.axhline(y=0, color="k", linestyle="-", linewidth=0.5)
-        ax_zap_dispatch.set_ylabel("Power (MW)")
-        ax_zap_dispatch.set_title("Zap Dispatch by Carrier")
-        ax_zap_dispatch.grid(True, alpha=0.3)
-
-        # === Row 2: Marginal Prices ===
-        # Left: PyPSA
-        ax_pypsa_prices = axes[1, 0]
-        if "marginal_price" in pypsa_net.buses_t:
-            pypsa_prices = pypsa_net.buses_t.marginal_price
-            for bus_name in pypsa_prices.columns[:10]:  # Limit to 10 buses
-                ax_pypsa_prices.plot(
-                    hours, pypsa_prices[bus_name].values, label=bus_name[:10], alpha=0.7
-                )
-
-        ax_pypsa_prices.set_xlabel("Hour")
-        ax_pypsa_prices.set_ylabel("Price ($/MWh)")
-        ax_pypsa_prices.set_title("PyPSA Marginal Prices")
-        ax_pypsa_prices.grid(True, alpha=0.3)
-
-        # Right: Zap
-        ax_zap_prices = axes[1, 1]
-        prices = self.dispatch.prices
-        for bus in range(min(prices.shape[0], 10)):  # Limit to 10 buses
-            ax_zap_prices.plot(hours, prices[bus, :], label=f"Bus {bus}", alpha=0.7)
-
-        ax_zap_prices.set_xlabel("Hour")
-        ax_zap_prices.set_ylabel("Price ($/MWh)")
-        ax_zap_prices.set_title("Zap Marginal Prices")
-        ax_zap_prices.grid(True, alpha=0.3)
-
-        # Add legends to right column only (to avoid clutter)
+        # Add legends
         axes[0, 1].legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=6)
         axes[1, 1].legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=6)
 
@@ -857,8 +678,8 @@ class TestObjectiveValueBase(unittest.TestCase):
 
         # Run PyPSA optimization on the same network
         pypsa_net = self.pypsa_network.copy()
-        # Set snapshot weightings to scale objective function by time horizon
-        pypsa_net.snapshot_weightings.loc[:, :] = len(self.snapshots) / HOURS_PER_YEAR
+        # Set snapshot weightings to scale operational costs by time horizon
+        pypsa_net.snapshot_weightings.loc[:, :] = HOURS_PER_YEAR / len(self.snapshots)
 
         # Solve with PyPSA's linear optimal power flow
         # Use multi_investment_periods only if network has investment periods
@@ -929,8 +750,8 @@ class TestObjectiveValueBase(unittest.TestCase):
 
         # Run PyPSA optimization
         pypsa_net = self.pypsa_network.copy()
-        # Set snapshot weightings to scale objective function by time horizon
-        pypsa_net.snapshot_weightings.loc[:, :] = len(self.snapshots) / HOURS_PER_YEAR
+        # Set snapshot weightings to scale operational costs by time horizon
+        pypsa_net.snapshot_weightings.loc[:, :] = HOURS_PER_YEAR / len(self.snapshots)
         # Use multi_investment_periods only if network has investment periods
         has_investment_periods = pypsa_net.investment_periods.size > 0
         pypsa_net.optimize(
@@ -938,7 +759,7 @@ class TestObjectiveValueBase(unittest.TestCase):
         )
 
         # Create figure with side-by-side comparison
-        fig, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
+        _, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
 
         # Share y-axis between left and right columns for each row
         for row in range(2):
@@ -1044,6 +865,10 @@ class TestObjectiveValueBase(unittest.TestCase):
 class TestInvestmentPlanningBase(unittest.TestCase):
     """Base class for investment planning tests."""
 
+    # Hyperparameter: Override capacity factors for renewable generators
+    # Set to None to use actual profiles, or a float (e.g., 0.6) to override
+    override_renewable_cf = None  # Set to 0.6 for testing with 60% CF
+
     @classmethod
     def create_investment_network(cls):
         """Create a simple network with extendable devices for investment testing."""
@@ -1146,6 +971,28 @@ class TestInvestmentPlanningBase(unittest.TestCase):
 
         cls.time_horizon = len(cls.snapshots)
 
+        # Apply capacity factor override if specified
+        if cls.override_renewable_cf is not None:
+            print(
+                f"\n⚙️  Overriding renewable capacity factors to {cls.override_renewable_cf:.0%}"
+            )
+            for device in cls.devices:
+                if isinstance(device, Generator):
+                    # Get carrier info from PyPSA to identify renewables
+                    for i, name in enumerate(device.name):
+                        if name in cls.pypsa_network.generators.index:
+                            carrier = cls.pypsa_network.generators.loc[name, "carrier"]
+                            # Override for renewable carriers
+                            if carrier in ["onwind", "offwind", "solar", "wind"]:
+                                original_cf = device.max_power[i].mean()
+                                device.max_power[i] = np.full(
+                                    cls.time_horizon, cls.override_renewable_cf
+                                )
+                                if i < 3:  # Print first few for verification
+                                    print(
+                                        f"     {name} ({carrier}): {original_cf:.1%} → {cls.override_renewable_cf:.0%}"
+                                    )
+
         # Set up planning problem with capacity expansion
         # Define which parameters to optimize
         parameter_names = {}
@@ -1154,6 +1001,8 @@ class TestInvestmentPlanningBase(unittest.TestCase):
                 parameter_names["generator"] = (i, "nominal_capacity")
             elif isinstance(device, ACLine):
                 parameter_names["ac_line"] = (i, "nominal_capacity")
+            elif isinstance(device, StorageUnit):
+                parameter_names["storage_unit"] = (i, "power_capacity")
 
         # Create dispatch layer for planning
         cls.layer = zap.DispatchLayer(
@@ -1176,36 +1025,52 @@ class TestInvestmentPlanningBase(unittest.TestCase):
         upper_bounds = {}
         for param_name, (device_idx, attr_name) in parameter_names.items():
             device = cls.devices[device_idx]
-            # Set lower bound from device's min_nominal_capacity (from p_nom_min)
-            if (
-                hasattr(device, "min_nominal_capacity")
-                and device.min_nominal_capacity is not None
-            ):
-                lower_bounds[param_name] = deepcopy(device.min_nominal_capacity)
+
+            # Handle different device types with different attribute names
+            if isinstance(device, StorageUnit):
+                # StorageUnit uses min/max_power_capacity instead of min/max_nominal_capacity
+                min_attr = "min_power_capacity"
+                max_attr = "max_power_capacity"
+            else:
+                # Generator and ACLine use min/max_nominal_capacity
+                min_attr = "min_nominal_capacity"
+                max_attr = "max_nominal_capacity"
+
+            # Set lower bound
+            if hasattr(device, min_attr) and getattr(device, min_attr) is not None:
+                lower_bounds[param_name] = deepcopy(getattr(device, min_attr))
             else:
                 lower_bounds[param_name] = np.zeros_like(getattr(device, attr_name))
-            # Set upper bound from device's max_nominal_capacity (from p_nom_max)
-            if (
-                hasattr(device, "max_nominal_capacity")
-                and device.max_nominal_capacity is not None
-            ):
+
+            # Set upper bound
+            if hasattr(device, max_attr) and getattr(device, max_attr) is not None:
                 # Handle inf values by replacing with large number
-                max_cap = deepcopy(device.max_nominal_capacity)
+                max_cap = deepcopy(getattr(device, max_attr))
                 if np.any(np.isinf(max_cap)):
-                    max_cap = np.where(np.isinf(max_cap), 1000.0, max_cap)
+                    # Use 10x current capacity as upper bound for inf values
+                    # This allows expansion while keeping problem bounded
+                    current_cap = getattr(device, attr_name)
+                    reasonable_upper = (current_cap + 1000.0) * 10.0
+                    max_cap = np.where(np.isinf(max_cap), reasonable_upper, max_cap)
                 upper_bounds[param_name] = max_cap
             else:
-                upper_bounds[param_name] = np.full_like(
-                    getattr(device, attr_name), 1000.0
-                )
+                # No max specified - use reasonable default based on current capacity
+                current_cap = getattr(device, attr_name)
+                upper_bounds[param_name] = (current_cap + 1000.0) * 10.0
 
-        # Create planning problem
+        # Create planning problem with snapshot weighting
+        # Weight operational costs by 8760/24 to annualize from 24-hour snapshot
+        # This matches PyPSA's approach of scaling opex by 365
+        HOURS_PER_YEAR = 8760
+        snapshot_weight = HOURS_PER_YEAR / len(cls.snapshots)
+
         cls.problem = zap.planning.PlanningProblem(
             operation_objective=op_objective,
             investment_objective=inv_objective,
             layer=cls.layer,
             lower_bounds=lower_bounds,
             upper_bounds=upper_bounds,
+            snapshot_weight=snapshot_weight,
         )
 
         # Initialize parameters at current values
@@ -1216,18 +1081,28 @@ class TestInvestmentPlanningBase(unittest.TestCase):
             )
 
         # Solve planning problem with more iterations for convergence
-        cls.optimized_params, cls.history = cls.problem.solve(
-            num_iterations=1000,
-            algorithm=zap.planning.GradientDescent(step_size=1e-3),
-            initial_state=initial_params,
+        # Include PARAM tracker to enable capacity evolution plotting
+        from zap.planning.trackers import (
+            LOSS,
+            GRAD_NORM,
+            PROJ_GRAD_NORM,
+            TIME,
+            SUBOPTIMALITY,
+            PARAM,
         )
 
-        # Update devices with optimized capacities
-        print(f"Parameter names: {parameter_names}")
-        print(
+        cls.optimized_params, cls.history = cls.problem.solve(
+            num_iterations=100,
+            algorithm=zap.planning.GradientDescent(step_size=1e-3, clip=1e3),
+            initial_state=initial_params,
+            trackers=[LOSS, GRAD_NORM, PROJ_GRAD_NORM, TIME, SUBOPTIMALITY, PARAM],
+        )
+
+        logger.info(f"Parameter names: {parameter_names}")
+        logger.info(
             f"Optimized params keys: {cls.optimized_params.keys() if hasattr(cls.optimized_params, 'keys') else type(cls.optimized_params)}"
         )
-        print(f"Optimized params: {cls.optimized_params}")
+        logger.info(f"Optimized params: {cls.optimized_params}")
 
         for param_name, (device_idx, attr_name) in parameter_names.items():
             if param_name in cls.optimized_params:
@@ -1236,9 +1111,9 @@ class TestInvestmentPlanningBase(unittest.TestCase):
                 if hasattr(new_capacity, "numpy"):
                     new_capacity = new_capacity.numpy()
                 setattr(cls.devices[device_idx], attr_name, new_capacity)
-                print(f"Updated {param_name}: {new_capacity}")
+                logger.info(f"Updated {param_name}: {new_capacity}")
             else:
-                print(f"Parameter {param_name} not found in optimized_params")
+                logger.warning(f"Parameter {param_name} not found in optimized_params")
 
         # Run dispatch with optimized parameters to get dispatch results
         cls.dispatch = cls.net.dispatch(
@@ -1277,214 +1152,99 @@ class TestInvestmentPlanningBase(unittest.TestCase):
         # Run PyPSA optimization to get comparison data
         pypsa_net = self.pypsa_network.copy()
         pypsa_net.set_snapshots(self.snapshots)
-        # Set snapshot weightings to scale objective function by time horizon
         pypsa_net.snapshot_weightings.loc[:, :] = HOURS_PER_YEAR / len(self.snapshots)
-        pypsa_net.optimize(solver_name="highs")
-        breakpoint()
-        # Create figure with subplots (3 rows x 2 columns)
-        fig, axes = plt.subplots(3, 2, figsize=(16, 14))
+        has_investment_periods = pypsa_net.investment_periods.size > 0
+        pypsa_net.optimize(
+            solver_name="highs", multi_investment_periods=has_investment_periods
+        )
 
-        # Share y-axis between left and right columns for rows 0 and 1
-        for row in range(2):
-            axes[row, 0].sharey(axes[row, 1])
+        # Get energy balance data using PyPSA statistics API
+        pypsa_energy_raw = (
+            pypsa_net.statistics.energy_balance(
+                comps=["Generator", "StorageUnit"],
+                aggregate_time=False,
+                nice_names=False,
+            )
+            .droplevel(0)
+            .T
+        )
+        # Group by carrier (avoid FutureWarning by transposing first)
+        pypsa_energy = pypsa_energy_raw.T.groupby(level="carrier").sum().T
+        pypsa_energy.index = hours
 
-        # Get device info
-        gen_device = self.get_device_by_type(Generator)
-        load_device = self.get_device_by_type(Load)
+        # Get Zap energy balance
+        zap_energy = get_zap_energy_balance(
+            self.devices, self.dispatch, pypsa_net, time_horizon
+        )
 
-        # Get carrier colors from PyPSA network
+        # Get carrier colors and load profile
         carrier_colors = (
             pypsa_net.carriers.color.to_dict() if len(pypsa_net.carriers) > 0 else {}
         )
+        load_profile = (
+            pypsa_net.loads_t.p_set.sum(axis=1).values
+            if len(pypsa_net.loads) > 0
+            else None
+        )
 
-        # === Row 1: Generator Dispatch by Carrier ===
-        # Left: PyPSA
-        ax_pypsa_gen = axes[0, 0]
+        # Create figure with subplots (4 rows x 2 columns)
+        _, axes = plt.subplots(4, 2, figsize=(16, 18))
 
-        carrier_power_pypsa = {}
-        if len(pypsa_net.generators) > 0:
-            pypsa_gen_p = pypsa_net.generators_t.p
-            gen_carriers = pypsa_net.generators["carrier"]
-            for gen_name in pypsa_gen_p.columns:
-                carrier = gen_carriers[gen_name]
-                if carrier not in carrier_power_pypsa:
-                    carrier_power_pypsa[carrier] = np.zeros(time_horizon)
-                carrier_power_pypsa[carrier] += pypsa_gen_p[gen_name].values
+        # Row 1: Energy balance comparison
+        plot_energy_balance_comparison(
+            axes[0, 0],
+            axes[0, 1],
+            pypsa_energy,
+            zap_energy,
+            carrier_colors,
+            load_profile,
+            title_left="PyPSA Dispatch by Carrier",
+            title_right="Zap Dispatch by Carrier",
+        )
 
-        if carrier_power_pypsa:
-            pypsa_df = pd.DataFrame(carrier_power_pypsa, index=hours)
-            bottom = np.zeros(time_horizon)
-            for carrier in sorted(pypsa_df.columns):
-                power = pypsa_df[carrier].values
-                color = carrier_colors.get(carrier, None)
-                ax_pypsa_gen.fill_between(
-                    hours, bottom, bottom + power, label=carrier, alpha=0.7, color=color
-                )
-                bottom += power
+        # Row 2: Price comparison
+        plot_price_comparison(
+            axes[1, 0],
+            axes[1, 1],
+            pypsa_net.buses_t.marginal_price,
+            self.dispatch.prices,
+            hours,
+        )
 
-        # Add load line
-        if len(pypsa_net.loads) > 0:
-            total_demand = pypsa_net.loads_t.p_set.sum(axis=1).values
-            ax_pypsa_gen.plot(hours, total_demand, "k-", linewidth=2, label="Load")
+        # Row 3: Line flows
+        plot_line_flows(
+            axes[2, 0],
+            axes[2, 1],
+            pypsa_net,
+            self.dispatch,
+            self.devices,
+            hours,
+        )
 
-        ax_pypsa_gen.set_ylabel("Power (MW)")
-        ax_pypsa_gen.set_title("PyPSA Dispatch by Carrier")
-        ax_pypsa_gen.grid(True, alpha=0.3)
+        # Row 4: Capacity comparison
+        (
+            pypsa_initial,
+            pypsa_final,
+            zap_initial,
+            zap_final,
+        ) = aggregate_capacities_by_carrier(pypsa_net, self.devices)
+        plot_capacity_comparison(
+            axes[3, 0],
+            pypsa_initial,
+            pypsa_final,
+            zap_initial,
+            zap_final,
+            carrier_colors,
+        )
 
-        # Right: Zap
-        ax_zap_gen = axes[0, 1]
-        carrier_power_zap = {}
-        if gen_device is not None:
-            gen_idx = self.get_device_index(Generator)
-            gen_power = self.dispatch.power[gen_idx][0]
-
-            # Get carrier information
-            carriers = []
-            for i in range(gen_device.num_devices):
-                name = gen_device.name[i] if hasattr(gen_device, "name") else f"Gen {i}"
-                if name in pypsa_net.generators.index:
-                    carriers.append(pypsa_net.generators.loc[name, "carrier"])
-                else:
-                    carriers.append("Unknown")
-
-            for i in range(gen_device.num_devices):
-                carrier = carriers[i] if i < len(carriers) else "Unknown"
-                if carrier not in carrier_power_zap:
-                    carrier_power_zap[carrier] = np.zeros(time_horizon)
-                carrier_power_zap[carrier] += gen_power[i, :]
-
-        if carrier_power_zap:
-            zap_df = pd.DataFrame(carrier_power_zap, index=hours)
-            bottom = np.zeros(time_horizon)
-            for carrier in sorted(zap_df.columns):
-                power = zap_df[carrier].values
-                color = carrier_colors.get(carrier, None)
-                # Handle empty string color
-                if color == "":
-                    color = None
-                ax_zap_gen.fill_between(
-                    hours, bottom, bottom + power, label=carrier, alpha=0.7, color=color
-                )
-                bottom += power
-
-        # Add load line
-        if load_device is not None:
-            total_demand = load_device.load.sum(axis=0)
-            ax_zap_gen.plot(hours, total_demand, "k-", linewidth=2, label="Load")
-
-        ax_zap_gen.set_ylabel("Power (MW)")
-        ax_zap_gen.set_title("Zap Dispatch by Carrier")
-        ax_zap_gen.grid(True, alpha=0.3)
-
-        # === Row 2: Marginal Prices ===
-        # Left: PyPSA
-        ax_pypsa_prices = axes[1, 0]
-        pypsa_prices = pypsa_net.buses_t.marginal_price
-        for bus_name in pypsa_prices.columns:
-            ax_pypsa_prices.plot(
-                hours, pypsa_prices[bus_name].values, label=bus_name, alpha=0.7
-            )
-
-        ax_pypsa_prices.set_xlabel("Hour")
-        ax_pypsa_prices.set_ylabel("Price ($/MWh)")
-        ax_pypsa_prices.set_title("PyPSA Marginal Prices")
-        ax_pypsa_prices.grid(True, alpha=0.3)
-
-        # Right: Zap
-        ax_zap_prices = axes[1, 1]
-        prices = self.dispatch.prices
-        for bus in range(prices.shape[0]):
-            ax_zap_prices.plot(hours, prices[bus, :], label=f"Bus {bus}", alpha=0.7)
-
-        ax_zap_prices.set_xlabel("Hour")
-        ax_zap_prices.set_ylabel("Price ($/MWh)")
-        ax_zap_prices.set_title("Zap Marginal Prices")
-        ax_zap_prices.grid(True, alpha=0.3)
-
-        # === Row 3: Invested Capacities ===
-        ax_capacity = axes[2, 0]
-
-        # Collect capacity data
-        components = []
-        pypsa_capacities = []
-        zap_capacities = []
-
-        # Generator capacities
-        for gen_name in pypsa_net.generators.index:
-            p_nom_opt = pypsa_net.generators.loc[gen_name, "p_nom_opt"]
-            if p_nom_opt > 0:
-                components.append(gen_name)
-                pypsa_capacities.append(float(p_nom_opt))
-
-                # Find corresponding Zap capacity
-                if gen_device is not None and hasattr(gen_device, "name"):
-                    try:
-                        idx = list(gen_device.name).index(gen_name)
-                        zap_cap = gen_device.nominal_capacity[idx]
-                        # Convert to scalar if array
-                        zap_cap = (
-                            float(zap_cap)
-                            if hasattr(zap_cap, "__len__")
-                            and len(np.atleast_1d(zap_cap)) == 1
-                            else float(np.atleast_1d(zap_cap)[0])
-                            if hasattr(zap_cap, "__len__")
-                            else float(zap_cap)
-                        )
-                        zap_capacities.append(zap_cap)
-                    except (ValueError, IndexError):
-                        zap_capacities.append(0)
-                else:
-                    zap_capacities.append(0)
-
-        # Line capacities
-        ac_line_device = self.get_device_by_type(ACLine)
-        for line_name in pypsa_net.lines.index:
-            s_nom_opt = pypsa_net.lines.loc[line_name, "s_nom_opt"]
-            if s_nom_opt > 0:
-                components.append(line_name)
-                pypsa_capacities.append(float(s_nom_opt))
-
-                # Find corresponding Zap capacity
-                if ac_line_device is not None and hasattr(ac_line_device, "name"):
-                    try:
-                        idx = list(ac_line_device.name).index(line_name)
-                        zap_cap = ac_line_device.nominal_capacity[idx]
-                        # Convert to scalar if array
-                        zap_cap = (
-                            float(zap_cap)
-                            if hasattr(zap_cap, "__len__")
-                            and len(np.atleast_1d(zap_cap)) == 1
-                            else float(np.atleast_1d(zap_cap)[0])
-                            if hasattr(zap_cap, "__len__")
-                            else float(zap_cap)
-                        )
-                        zap_capacities.append(zap_cap)
-                    except (ValueError, IndexError):
-                        zap_capacities.append(0)
-                else:
-                    zap_capacities.append(0)
-
-        # Create bar chart
-        if components:
-            x = np.arange(len(components))
-            width = 0.35
-
-            ax_capacity.bar(
-                x - width / 2, pypsa_capacities, width, label="PyPSA", alpha=0.7
-            )
-            ax_capacity.bar(
-                x + width / 2, zap_capacities, width, label="Zap", alpha=0.7
-            )
-
-            ax_capacity.set_ylabel("Capacity (MW)")
-            ax_capacity.set_title("Optimal Invested Capacities")
-            ax_capacity.set_xticks(x)
-            ax_capacity.set_xticklabels(components, rotation=45, ha="right")
-            ax_capacity.legend()
-            ax_capacity.grid(True, alpha=0.3)
-
-        # Hide the unused subplot
-        axes[2, 1].axis("off")
+        # Row 4 right: Capacity evolution during optimization
+        plot_capacity_evolution(
+            axes[3, 1],
+            self.history,
+            self.devices,
+            pypsa_network=pypsa_net,
+            title="Capacity Evolution During Optimization",
+        )
 
         # Add legends
         axes[0, 1].legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
@@ -1501,6 +1261,24 @@ class TestInvestmentPlanningBase(unittest.TestCase):
         plot_path = planning_plot_dir / f"{filename_prefix}_comparison.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
         plt.close()
+
+        # Export CSV data
+        export_comparison_csvs(
+            planning_plot_dir,
+            filename_prefix,
+            pypsa_initial,
+            pypsa_final,
+            zap_initial,
+            zap_final,
+            pypsa_net.buses_t.marginal_price,
+            self.dispatch.prices,
+            hours,
+        )
+
+        # Export PyPSA statistics
+        pypsa_net.statistics().to_csv(
+            planning_plot_dir / f"{filename_prefix}_pypsa_statistics.csv"
+        )
 
         print(f"Comparison plot saved to: {plot_path}")
 
@@ -1532,9 +1310,10 @@ class TestGeneratorInvestment(TestInvestmentPlanningBase):
         # Run PyPSA optimization
         pypsa_net = self.pypsa_network.copy()
         pypsa_net.set_snapshots(self.snapshots)
-        # Set snapshot weightings to scale objective function by time horizon
-        pypsa_net.snapshot_weightings.loc[:, :] = len(self.snapshots) / HOURS_PER_YEAR
-        pypsa_net.optimize(solver_name="highs")
+        # Set snapshot weightings to scale operational costs by time horizon
+        pypsa_net.snapshot_weightings.loc[:, :] = HOURS_PER_YEAR / len(self.snapshots)
+
+        pypsa_net.optimize(solver_name="highs", multi_investment_periods=True)
 
         # Compare capacities for each generator
         for gen_name in pypsa_net.generators.index:
@@ -1570,55 +1349,6 @@ class TestGeneratorInvestment(TestInvestmentPlanningBase):
                 except ValueError:
                     pass  # Generator not found in Zap
 
-    def test_line_investment_matches_pypsa(self):
-        """Verify line capacity investments are reasonable compared to PyPSA results.
-
-        Note: Zap uses gradient descent while PyPSA uses LP, so exact matches aren't expected.
-        This test verifies that both find solutions that expand capacity to meet load.
-        """
-        ac_line_device = self.get_device_by_type(ACLine)
-        if ac_line_device is None:
-            self.skipTest("No AC lines in network")
-
-        # Run PyPSA optimization
-        pypsa_net = self.pypsa_network.copy()
-        pypsa_net.set_snapshots(self.snapshots)
-        # Set snapshot weightings to scale objective function by time horizon
-        pypsa_net.snapshot_weightings.loc[:, :] = len(self.snapshots) / HOURS_PER_YEAR
-        pypsa_net.optimize(solver_name="highs")
-
-        # Compare capacities for each line
-        for line_name in pypsa_net.lines.index:
-            pypsa_cap = pypsa_net.lines.loc[line_name, "s_nom_opt"]
-
-            # Find corresponding Zap capacity
-            if hasattr(ac_line_device, "name"):
-                try:
-                    idx = list(ac_line_device.name).index(line_name)
-                    zap_cap = ac_line_device.nominal_capacity[idx]
-                    # Convert to scalar
-                    zap_cap = (
-                        float(np.atleast_1d(zap_cap)[0])
-                        if hasattr(zap_cap, "__len__")
-                        else float(zap_cap)
-                    )
-
-                    # Verify Zap capacity is at least the minimum
-                    min_cap = float(
-                        np.atleast_1d(ac_line_device.min_nominal_capacity[idx])[0]
-                    )
-                    self.assertGreaterEqual(
-                        zap_cap,
-                        min_cap,
-                        f"Line {line_name}: Zap={zap_cap:.1f} < min={min_cap:.1f}",
-                    )
-
-                    # Log the comparison for debugging
-                    print(f"Line {line_name}: Zap={zap_cap:.1f}, PyPSA={pypsa_cap:.1f}")
-
-                except ValueError:
-                    pass  # Line not found in Zap
-
     def test_generator_capacity_bounds(self):
         """Verify generator capacity is within bounds."""
         gen = self.get_generator_device()
@@ -1653,43 +1383,6 @@ class TestGeneratorInvestment(TestInvestmentPlanningBase):
         investment_cost = gen.get_investment_cost(nominal_capacity=new_capacity)
 
         expected_cost = np.sum(gen.capital_cost * (new_capacity - gen.nominal_capacity))
-
-        self.assertAlmostEqual(investment_cost, expected_cost, places=3)
-
-
-class TestLineInvestment(TestInvestmentPlanningBase):
-    """Test transmission line capacity expansion."""
-
-    def get_ac_line_device(self):
-        """Get AC line device from devices list."""
-        for device in self.devices:
-            if isinstance(device, ACLine):
-                return device
-        return None
-
-    def test_line_capacity_bounds(self):
-        """Verify line capacity is within bounds."""
-        line = self.get_ac_line_device()
-        if line is None:
-            self.skipTest("No AC lines in network")
-
-        # Check min/max bounds are set
-        self.assertTrue(np.all(line.min_nominal_capacity <= line.nominal_capacity))
-        self.assertTrue(np.all(line.nominal_capacity <= line.max_nominal_capacity))
-
-    def test_line_investment_cost_formula(self):
-        """Verify line investment cost calculation."""
-        line = self.get_ac_line_device()
-        if line is None:
-            self.skipTest("No AC lines in network")
-
-        # Test investment cost formula
-        new_capacity = line.nominal_capacity * 1.5
-        investment_cost = line.get_investment_cost(nominal_capacity=new_capacity)
-
-        expected_cost = np.sum(
-            line.capital_cost * (new_capacity - line.nominal_capacity)
-        )
 
         self.assertAlmostEqual(investment_cost, expected_cost, places=3)
 
@@ -1731,7 +1424,38 @@ class TestExtendableFlags(TestInvestmentPlanningBase):
 
 
 # =============================================================================
-# Test with Real Network Data
+# Investment Planning Tests with PyPSA-USA Network Data
+# =============================================================================
+
+
+class TestTexas7NodeInvestment(TestInvestmentPlanningBase):
+    """Test investment planning with Texas 7-node network.
+
+    To test with higher renewable capacity factors, set:
+        override_renewable_cf = 0.6  # 60% capacity factor for all renewables
+    """
+
+    @classmethod
+    def create_investment_network(cls):
+        """Load Texas 7-node network and enable capacity expansion."""
+        net = examples.load_example_network("texas_7node")
+
+        # Use first 24 hours for faster testing
+        snapshots = net.snapshots[:48]
+        net.set_snapshots(snapshots)
+        # Set snapshot weightings to scale operational costs by time horizon
+        net.snapshot_weightings.loc[:, :] = HOURS_PER_YEAR / len(snapshots)
+
+        # net.generators.loc[net.generators.carrier == 'onwind', 'p_nom'] += 10
+        return net, snapshots
+
+    def test_generate_investment_plot(self):
+        """Generate investment planning plot for Texas 7-node network."""
+        self.plot_investment_results("texas_7node_investment")
+
+
+# =============================================================================
+# Test with PyPSA-USA Network Data
 # =============================================================================
 class TestTexas7NodeRoundtrip(TestPyPSARoundtripBase):
     """Test roundtrip with texas_7node network."""
@@ -1745,20 +1469,6 @@ class TestTexas7NodeRoundtrip(TestPyPSARoundtripBase):
         # Use network's native snapshots (first 24 hours)
         net = examples.load_example_network("texas_7node")
         return net.snapshots[:24]
-
-
-class TestTexas7Node48Hour(TestPyPSARoundtripBase):
-    """Test with 48-hour horizon."""
-
-    @classmethod
-    def load_pypsa_network(cls):
-        return examples.load_example_network("texas_7node")
-
-    @classmethod
-    def get_snapshots(cls):
-        # Use network's native snapshots (all 48 hours)
-        net = examples.load_example_network("texas_7node")
-        return net.snapshots[:48]
 
 
 # =============================================================================

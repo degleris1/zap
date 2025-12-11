@@ -21,10 +21,12 @@ class PlanningProblemCVX(AbstractPlanningProblem):
         lower_bounds: dict = None,
         upper_bounds: dict = None,
         regularize=1e-6,
+        snapshot_weight: float = 1.0,
     ):
         # Call super initializer
         self.la = np
         self.regularize = regularize
+        self.snapshot_weight = snapshot_weight
         super().__init__(
             operation_objective, investment_objective, layer, lower_bounds, upper_bounds
         )
@@ -57,9 +59,12 @@ class PlanningProblemCVX(AbstractPlanningProblem):
         op_cost = self.operation_objective(self.torch_state, parameters=params, la=la)
         inv_cost = self.investment_objective(**torch_kwargs, la=la)
 
+        # Store unweighted costs for tracking
         self.op_cost = op_cost
         self.inv_cost = inv_cost
-        self.cost = op_cost + inv_cost
+
+        # Apply snapshot weight to operational cost (to annualize from snapshot)
+        self.cost = (self.snapshot_weight * op_cost) + inv_cost
 
         self.kwargs = kwargs
         self.torch_kwargs = torch_kwargs
@@ -79,7 +84,9 @@ class PlanningProblemCVX(AbstractPlanningProblem):
         dy.ground = self.state.ground
 
         # Backward pass through layer
-        dtheta_op = self.layer.backward(self.state, dy, regularize=self.regularize, **self.kwargs)
+        dtheta_op = self.layer.backward(
+            self.state, dy, regularize=self.regularize, **self.kwargs
+        )
 
         # Combine gradients
         dtheta = {k: v + dtheta_op[k] for k, v in dtheta_direct.items()}
