@@ -96,4 +96,4 @@ class Ground(AbstractDevice):
         p = torch.zeros_like(power[0], device=machine)
         a = torch.zeros_like(angle[0], device=machine) + self.voltage
 
-        return [p], [a]
+        return [p], [a], None

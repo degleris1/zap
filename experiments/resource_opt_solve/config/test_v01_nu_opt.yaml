@@ -1,0 +1,41 @@
+system:
+  runtime: 600
+  gpu: 1
+  partition: "serc"
+
+
+solver: [expand, admm, clarabel, mosek]
+benchmarks: [nu_opt_1]
+ 
+# Solver Args
+admm_args:
+  machine: cuda
+  atol: 1.0e-9
+  rtol: 1.0e-9
+  tau: 2
+  alpha: 1.6
+  num_iterations: 1000
+
+clarabel_args:
+  verbose: True
+
+mosek_args:
+  verbose: True
+  mosek_params:
+    MSK_DPAR_INTPNT_CO_TOL_PFEAS: 1.0e-3
+    MSK_DPAR_INTPNT_CO_TOL_DFEAS: 1.0e-3  
+    MSK_DPAR_INTPNT_CO_TOL_REL_GAP: 1.0e-3
+
+
+
+# Benchmark Args 
+nu_opt_1_args:
+  type: nu_opt
+  num_problems: 1
+  m: 20000
+  n: 10000
+  avg_route_length: 10
+  capacity_range:
+    - 0.1
+    - 1.0
+  base_seed: 42

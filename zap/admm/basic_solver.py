@@ -42,6 +42,7 @@ class ADMMState:
     clone_phase: object = None
     rho_power: object = None
     rho_angle: object = None
+    local_variables: object = None
 
     def update(self, **kwargs):
         """Return a new state with fields updated."""
@@ -76,6 +77,7 @@ class ADMMState:
             clone_phase=self.clone_phase.clone().detach(),
             rho_power=self.rho_power,
             rho_angle=self.rho_angle,
+            local_variables=self.local_variables,
         )
 
     def as_outcome(self) -> DispatchOutcome:
@@ -83,7 +85,7 @@ class ADMMState:
             phase_duals=nested_ax(self.dual_phase, self.rho_angle),
             local_equality_duals=None,
             local_inequality_duals=None,
-            local_variables=[None for _ in self.power],
+            local_variables=self.local_variables,
             power=self.power,
             angle=self.phase,
             prices=-self.rho_power * self.dual_power,
@@ -307,7 +309,7 @@ class ADMMSolver:
                 rho_power = rho_power * (num_contingencies + 1)
                 rho_angle = rho_angle * (num_contingencies + 1)
 
-            p, v = dev.admm_prox_update(
+            p, v, lv = dev.admm_prox_update(
                 rho_power,
                 rho_angle,
                 set_p,
@@ -319,6 +321,7 @@ class ADMMSolver:
             )
             st.power[i] = p
             st.phase[i] = v
+            st.local_variables[i] = lv
 
         return st
 
@@ -430,7 +433,6 @@ class ADMMSolver:
         parameters,
         as_item=True,
     ):
-        # TODO Incorporate local variables
         costs = []
         for i, d in enumerate(devices):
             if st.power[i][0].dim() == 3:
@@ -441,7 +443,9 @@ class ADMMSolver:
                 costs += [d.operation_cost(pi, vi, None, la=torch, **parameters[i])]
             else:
                 costs += [
-                    d.operation_cost(st.power[i], st.phase[i], None, la=torch, **parameters[i])
+                    d.operation_cost(
+                        st.power[i], st.phase[i], st.local_variables[i], la=torch, **parameters[i]
+                    )
                 ]
 
         if as_item:
@@ -460,7 +464,7 @@ class ADMMSolver:
         # Relative component
         # We add this check so we don't waste time computing norms if we don't need to
         if self.rtol > 0.0 or self.rtol_primal is not None or self.rtol_dual is not None:
-            assert self.track_objective
+            # assert self.track_objective
             # print("Adding relative component to convergence check.")
 
             # Compute norm of primal variables
@@ -724,6 +728,9 @@ class ADMMSolver:
         clone_phase = theta_bar.clone().detach()
 
         rho_power, rho_angle = self.get_rho()
+
+        local_variables = [None for _ in devices]
+
         return ADMMState(
             num_terminals=num_terminals,
             num_ac_terminals=num_ac_terminals,
@@ -739,4 +746,5 @@ class ADMMSolver:
             clone_phase=clone_phase,
             rho_power=rho_power,
             rho_angle=rho_angle,
+            local_variables=local_variables,
         )

@@ -10,8 +10,9 @@
 zap documentation
 =================
 
-**Zap**  is a Python library for for differentiable electricity system modeling.
-It provides a modular, component-based approach to building electricity models.
+
+**Zap**  is a Python library for for differentiable network optimization.
+Currently, it provides a modular, component-based approach for modeling electricity systems and congestion-controlled flow networks.
 Models can be solved using a GPU-accelerated ADMM solver, integrated into PyTorch-based deep learning models, or iteratively planned using gradient algorithms.
 
 .. note::
@@ -25,4 +26,14 @@ Models can be solved using a GPU-accelerated ADMM solver, integrated into PyTorc
 
    Home<self>
    Quick Start<quickstart>
-   Basic Usage<basic>
+
+.. toctree::
+   :maxdepth: 1
+
+   Electricity System Modeling<electricity_system_modeling/index>
+
+
+.. toctree::
+   :maxdepth: 1
+   
+   Network Utility Maximization<num/index>

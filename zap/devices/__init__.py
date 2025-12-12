@@ -11,3 +11,4 @@ from zap.devices.ground import Ground
 
 
 Battery = StorageUnit
+from zap.devices.power_target import PowerTarget

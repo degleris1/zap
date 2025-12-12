@@ -229,4 +229,4 @@ class Transporter(AbstractDevice):
         p1 = torch.clip(p1, pmin, pmax)
         p0 = -p1
 
-        return [p0, p1], None
+        return [p0, p1], None, None

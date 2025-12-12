@@ -1,0 +1,129 @@
+system:
+  runtime: 600
+  gpu: 1
+  partition: "serc"
+
+
+solver: [expand, admm, clarabel, mosek]
+benchmarks: [expand, nu_opt_1, nu_opt_2, nu_opt_3, nu_opt_4, nu_opt_5, nu_opt_6, nu_opt_7, nu_opt_8, nu_opt_9]
+ 
+# Solver Args
+admm_args:
+  machine: cuda
+  atol: 1.0e-9
+  rtol: 1.0e-9
+  tau: 2
+  alpha: 1.6
+  num_iterations: 1000
+
+clarabel_args:
+  verbose: True
+
+mosek_args:
+  verbose: True
+  mosek_params:
+    MSK_DPAR_INTPNT_CO_TOL_PFEAS: 1.0e-3
+    MSK_DPAR_INTPNT_CO_TOL_DFEAS: 1.0e-3  
+    MSK_DPAR_INTPNT_CO_TOL_REL_GAP: 1.0e-3
+
+
+
+# Benchmark Args 
+nu_opt_1_args:
+  type: nu_opt
+  num_problems: 1
+  m: 20000
+  n: 10000
+  avg_route_length: 10
+  capacity_range:
+    - 0.1
+    - 1.0
+  base_seed: 42
+
+nu_opt_2_args:
+  type: nu_opt
+  num_problems: 1
+  m: 50000
+  n: 25000
+  avg_route_length: 10
+  capacity_range:
+    - 0.1
+    - 1.0
+  base_seed: 42
+
+nu_opt_3_args:
+  type: nu_opt
+  num_problems: 1
+  m: 75000
+  n: 37500
+  avg_route_length: 10
+  capacity_range:
+    - 0.1
+    - 1.0
+  base_seed: 42
+
+nu_opt_4_args:
+  type: nu_opt
+  num_problems: 1
+  m: 100000
+  n: 50000
+  avg_route_length: 10
+  capacity_range:
+    - 0.1
+    - 1.0  
+  base_seed: 42
+
+nu_opt_5_args:
+  type: nu_opt
+  num_problems: 1
+  m: 150000
+  n: 75000
+  avg_route_length: 10
+  capacity_range:
+    - 0.1
+    - 1.0  
+  base_seed: 42
+
+nu_opt_6_args:
+  type: nu_opt
+  num_problems: 1
+  m: 200000
+  n: 100000
+  avg_route_length: 10
+  capacity_range:
+    - 0.1
+    - 1.0  
+  base_seed: 42
+
+nu_opt_7_args:
+  type: nu_opt
+  num_problems: 1
+  m: 500000
+  n: 250000
+  avg_route_length: 10
+  capacity_range:
+    - 0.1
+    - 1.0  
+  base_seed: 42
+
+nu_opt_8_args:
+  type: nu_opt
+  num_problems: 1
+  m: 1000000
+  n: 500000
+  avg_route_length: 10
+  capacity_range:
+    - 0.1
+    - 1.0  
+  base_seed: 42
+
+nu_opt_9_args:
+  type: nu_opt
+  num_problems: 1
+  m: 10000000
+  n: 5000000
+  avg_route_length: 10
+  capacity_range:
+    - 0.1
+    - 1.0  
+  base_seed: 42
