@@ -11,9 +11,28 @@ from pathlib import Path
 from typing import Optional
 import importlib.util
 
-from zap.devices.injector import Generator, Load
-from zap.devices.transporter import ACLine, DCLine
-from zap.devices.storage_unit import StorageUnit
+# Import device classes from Zap if not already imported
+try:
+    Generator
+except NameError:
+    from zap.devices.injector import Generator
+try:
+    Load
+except NameError:
+    from zap.devices.injector import Load
+try:
+    ACLine
+except NameError:
+    from zap.devices.transporter import ACLine
+try:
+    DCLine
+except NameError:
+    from zap.devices.transporter import DCLine
+try:
+    StorageUnit
+except NameError:
+    from zap.devices.storage_unit import StorageUnit
+
 
 # Try to import matplotlib
 try:
@@ -56,7 +75,17 @@ def get_zap_energy_balance(
     carrier_power = {}
 
     for device_idx, device in enumerate(devices):
-        power = dispatch.power[device_idx][0]
+        # Get power from dispatch - handle different array structures
+        power_data = dispatch.power[device_idx]
+        if isinstance(power_data, (list, tuple)):
+            power = power_data[0]
+        else:
+            power = power_data
+
+        # Ensure power is 2D (num_devices x time_horizon)
+        power = np.atleast_2d(power)
+        if power.shape[0] == time_horizon and power.shape[1] != time_horizon:
+            power = power.T  # Transpose if needed
 
         if isinstance(device, Generator):
             # Get carrier for each generator
@@ -67,7 +96,8 @@ def get_zap_energy_balance(
                 carrier = carriers[i]
                 if carrier not in carrier_power:
                     carrier_power[carrier] = np.zeros(time_horizon)
-                carrier_power[carrier] += power[i, :]
+                if i < power.shape[0]:
+                    carrier_power[carrier] += power[i, :]
 
         elif isinstance(device, StorageUnit):
             # Get carrier for each storage unit
@@ -78,7 +108,8 @@ def get_zap_energy_balance(
                 carrier = carriers[i]
                 if carrier not in carrier_power:
                     carrier_power[carrier] = np.zeros(time_horizon)
-                carrier_power[carrier] += power[i, :]
+                if i < power.shape[0]:
+                    carrier_power[carrier] += power[i, :]
 
     # Create DataFrame matching PyPSA format
     if carrier_power:
@@ -111,14 +142,25 @@ def _get_device_carriers(
         List of carrier strings for each device
     """
     if hasattr(device, "carrier") and device.carrier is not None:
-        return device.carrier
+        carrier = device.carrier
+        if hasattr(carrier, "tolist"):
+            return carrier.tolist()
+        return list(carrier)
 
     # Fall back to PyPSA lookup
     carriers = []
     pypsa_component = getattr(pypsa_network, component_name)
 
     for i in range(device.num_devices):
-        name = device.name[i] if hasattr(device, "name") else f"Device {i}"
+        # Handle different name formats (list, array, pandas Index)
+        if hasattr(device, "name") and device.name is not None:
+            if hasattr(device.name, "__getitem__"):
+                name = device.name[i]
+            else:
+                name = f"Device {i}"
+        else:
+            name = f"Device {i}"
+
         if name in pypsa_component.index:
             carriers.append(pypsa_component.loc[name, "carrier"])
         else:
@@ -167,7 +209,7 @@ def plot_energy_balance(
         bottom = np.zeros(len(hours))
         for carrier in sorted(energy_pos.columns):
             power = energy_pos[carrier].values
-            if np.sum(power) > 0:
+            if np.any(power > 0):  # Changed: plot if ANY positive values exist
                 color = carrier_colors.get(carrier)
                 if color == "":
                     color = None
@@ -186,7 +228,7 @@ def plot_energy_balance(
         bottom = np.zeros(len(hours))
         for carrier in sorted(energy_neg.columns):
             power = energy_neg[carrier].values
-            if np.sum(power) < 0:
+            if np.any(power < 0):  # Changed: plot if ANY negative values exist
                 color = carrier_colors.get(carrier)
                 if color == "":
                     color = None
@@ -953,9 +995,8 @@ def plot_capacity_evolution(
                 "label_prefix": "Storage: ",
             }
 
-    # Plot each parameter's evolution
-    lines_plotted = []
-    labels_plotted = []
+    # Aggregate capacities by carrier
+    carrier_capacity_history = {}  # carrier -> list of capacity sums per iteration
 
     for param_name, states in _extract_param_history(state_history):
         if param_name not in param_to_device_info:
@@ -963,14 +1004,13 @@ def plot_capacity_evolution(
 
         device_info = param_to_device_info[param_name]
         device = device_info["device"]
-        label_prefix = device_info["label_prefix"]
 
         # states shape: (num_iterations, num_devices) or (num_iterations, num_devices, 1)
         states = np.array(states)
         if states.ndim == 3:
             states = states.squeeze(-1)  # Remove trailing dimension if present
 
-        # Plot each device's capacity evolution
+        # Aggregate by carrier
         for i in range(states.shape[1]):
             # Get device name
             if hasattr(device, "name") and device.name is not None:
@@ -978,30 +1018,51 @@ def plot_capacity_evolution(
             else:
                 name = f"{param_name}_{i}"
 
-            # Get carrier for color
-            color = None
+            # Determine carrier/category
             if pypsa_network is not None and isinstance(device, Generator):
                 if name in pypsa_network.generators.index:
                     carrier = pypsa_network.generators.loc[name, "carrier"]
-                    color = carrier_colors.get(carrier)
-                    if color == "":
-                        color = None
+                else:
+                    carrier = "other_gen"
             elif isinstance(device, ACLine):
-                color = "gray"
+                carrier = "ac_line"
             elif isinstance(device, StorageUnit):
-                color = "purple"
+                carrier = "storage"
+            else:
+                carrier = param_name
 
-            capacity_values = states[:, i]
-            (line,) = ax.plot(
-                iterations,
-                capacity_values,
-                label=f"{label_prefix}{name}",
-                color=color,
-                alpha=0.8,
-                linewidth=1.5,
-            )
-            lines_plotted.append(line)
-            labels_plotted.append(f"{label_prefix}{name}")
+            # Initialize carrier history if needed
+            if carrier not in carrier_capacity_history:
+                carrier_capacity_history[carrier] = np.zeros(num_iterations)
+
+            # Add this device's capacity to carrier total
+            carrier_capacity_history[carrier] += states[:, i]
+
+    # Plot aggregated carrier capacities
+    lines_plotted = []
+    labels_plotted = []
+
+    for carrier, capacity_values in sorted(carrier_capacity_history.items()):
+        # Get color for carrier
+        color = carrier_colors.get(carrier)
+        if color == "" or color is None:
+            if carrier == "ac_line":
+                color = "gray"
+            elif carrier == "storage":
+                color = "purple"
+            else:
+                color = None
+
+        (line,) = ax.plot(
+            iterations,
+            capacity_values,
+            label=carrier,
+            color=color,
+            alpha=0.8,
+            linewidth=2.0,
+        )
+        lines_plotted.append(line)
+        labels_plotted.append(carrier)
 
     ax.set_xlabel("Iteration")
     ax.set_ylabel("Capacity (MW)")

@@ -15,6 +15,7 @@ def load_battery_network(
 
     # One load
     loads = Load(
+        name="load",
         num_nodes=net.num_nodes,
         terminal=np.array([0]),
         load=np.array([[10.0, 13.0, 80.0]]),
@@ -23,6 +24,7 @@ def load_battery_network(
 
     # One battery
     batteries = Battery(
+        name="battery",
         num_nodes=net.num_nodes,
         terminal=np.array([0]),
         power_capacity=np.array([10.0]),
@@ -33,6 +35,7 @@ def load_battery_network(
 
     # Two generators
     generators = Generator(
+        name="generator",
         num_nodes=net.num_nodes,
         terminal=np.array([0, 0]),
         dynamic_capacity=np.array([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]),
@@ -54,6 +57,7 @@ def load_test_network(num_nodes: int = 7, line_type=ACLine) -> TestCase:
     net = PowerNetwork(num_nodes)
 
     generators = Generator(
+        name="generator",
         num_nodes=num_nodes,
         terminal=np.array([0, 1, 3]),
         dynamic_capacity=np.array(
@@ -70,6 +74,7 @@ def load_test_network(num_nodes: int = 7, line_type=ACLine) -> TestCase:
     )
 
     loads = Load(
+        name="load",
         num_nodes=num_nodes,
         terminal=np.array([0]),
         load=np.array([[30.0, 40.0, 45.0, 80.0]]),
@@ -77,6 +82,7 @@ def load_test_network(num_nodes: int = 7, line_type=ACLine) -> TestCase:
     )
 
     line_kwargs = {
+        "name": "line",
         "num_nodes": num_nodes,
         "source_terminal": np.array([0, 1, 3]),
         "sink_terminal": np.array([1, 3, 0]),
@@ -92,6 +98,7 @@ def load_test_network(num_nodes: int = 7, line_type=ACLine) -> TestCase:
         lines = DCLine(**line_kwargs)
 
     batteries = Battery(
+        name="battery",
         num_nodes=num_nodes,
         terminal=np.array([1]),
         power_capacity=np.array([5.0]),
@@ -123,6 +130,7 @@ def load_garver_network(
     net = PowerNetwork(6)
 
     loads = Load(
+        name="load",
         num_nodes=net.num_nodes,
         terminal=np.array([0, 1, 2, 3, 4]),
         load=np.array([80.0, 240.0, 40.0, 160.0, 40.0]),
@@ -132,6 +140,7 @@ def load_garver_network(
     # Three generators
     # A (gas) peaker, a solar farm, and a (coal) base load plant
     generators = Generator(
+        name="generator",
         num_nodes=net.num_nodes,
         terminal=np.array([0, 2, 5]),
         nominal_capacity=np.array([150.0, 360.0, init_solar]),
@@ -143,7 +152,23 @@ def load_garver_network(
 
     # Raw data
     wire_reactance = np.array(
-        [0.4, 0.38, 0.6, 0.2, 0.68, 0.2, 0.4, 0.31, 0.3, 0.59, 0.2, 0.48, 0.63, 0.3, 0.61]
+        [
+            0.4,
+            0.38,
+            0.6,
+            0.2,
+            0.68,
+            0.2,
+            0.4,
+            0.31,
+            0.3,
+            0.59,
+            0.2,
+            0.48,
+            0.63,
+            0.3,
+            0.61,
+        ]
     )
     wire_capacity = np.array(
         [100.0, 100, 80, 100, 70, 100, 100, 100, 100, 82, 100, 100, 75, 100, 78]
@@ -158,6 +183,7 @@ def load_garver_network(
     susceptance = susceptance / wire_capacity  # Susceptance in Siemens / MW
 
     lines = ACLine(
+        name="line",
         num_nodes=net.num_nodes,
         # Correct for silly 0-indexing
         source_terminal=np.array([1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 5]) - 1,
