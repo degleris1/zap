@@ -2,10 +2,13 @@ import torch
 import numpy as np
 
 import zap.util as util
+from typing import Union
+
 from zap.network import DispatchOutcome
 from zap.layer import DispatchLayer
 from zap.planning.operation_objectives import AbstractOperationObjective
 from zap.planning.investment_objectives import AbstractInvestmentObjective
+from zap.planning.constraints import BudgetConstraintSet
 
 from .problem_abstract import AbstractPlanningProblem
 
@@ -22,13 +25,19 @@ class PlanningProblemCVX(AbstractPlanningProblem):
         upper_bounds: dict = None,
         regularize=1e-6,
         snapshot_weight: float = 1.0,
+        budget_constraints: Union[str, BudgetConstraintSet, None] = None,
     ):
         # Call super initializer
         self.la = np
         self.regularize = regularize
         self.snapshot_weight = snapshot_weight
         super().__init__(
-            operation_objective, investment_objective, layer, lower_bounds, upper_bounds
+            operation_objective,
+            investment_objective,
+            layer,
+            lower_bounds,
+            upper_bounds,
+            budget_constraints,
         )
 
     def forward(self, requires_grad: bool = False, batch=None, **kwargs):
@@ -84,9 +93,7 @@ class PlanningProblemCVX(AbstractPlanningProblem):
         dy.ground = self.state.ground
 
         # Backward pass through layer
-        dtheta_op = self.layer.backward(
-            self.state, dy, regularize=self.regularize, **self.kwargs
-        )
+        dtheta_op = self.layer.backward(self.state, dy, regularize=self.regularize, **self.kwargs)
 
         # Combine gradients
         dtheta = {k: v + dtheta_op[k] for k, v in dtheta_direct.items()}

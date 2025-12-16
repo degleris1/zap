@@ -1,4 +1,5 @@
 import time
+from typing import Union
 import torch
 import numpy as np
 from copy import deepcopy
@@ -6,6 +7,7 @@ from copy import deepcopy
 from zap.layer import DispatchLayer
 from zap.planning.operation_objectives import AbstractOperationObjective
 from zap.planning.investment_objectives import AbstractInvestmentObjective
+from zap.planning.constraints import BudgetConstraintSet, ProjectionQP
 
 from .trackers import DEFAULT_TRACKERS, TRACKER_MAPS, LOSS
 from .solvers import GradientDescent
@@ -23,6 +25,7 @@ class AbstractPlanningProblem:
         layer: DispatchLayer,
         lower_bounds: dict = None,
         upper_bounds: dict = None,
+        budget_constraints: Union[str, BudgetConstraintSet, None] = None,
     ):
         self.operation_objective = operation_objective
         self.investment_objective = investment_objective
@@ -51,6 +54,41 @@ class AbstractPlanningProblem:
             for p, (ind, pname) in self.parameter_names.items():
                 if self.upper_bounds[p] is None:
                     self.upper_bounds[p] = np.inf * self.la.ones_like(self.lower_bounds[p])
+
+        # Initialize budget constraints and projection QP
+        self._init_budget_constraints(budget_constraints, layer)
+
+    def _init_budget_constraints(
+        self,
+        budget_constraints: Union[str, BudgetConstraintSet, None],
+        layer: DispatchLayer,
+    ):
+        """Initialize budget constraints and projection QP.
+
+        Args:
+            budget_constraints: Either a CSV path, BudgetConstraintSet, or None
+            layer: The dispatch layer (for device info)
+        """
+        if budget_constraints is None:
+            self.budget_constraints = None
+            self._projection_qp = None
+            return
+
+        # Parse CSV if string path provided
+        if isinstance(budget_constraints, str):
+            budget_constraints = BudgetConstraintSet.from_csv(
+                budget_constraints, self.parameter_names, layer.devices
+            )
+
+        self.budget_constraints = budget_constraints
+
+        # Create projection QP
+        self._projection_qp = ProjectionQP(
+            self.parameter_names,
+            self.lower_bounds,
+            self.upper_bounds,
+            self.budget_constraints,
+        )
 
     @property
     def parameter_names(self):
@@ -229,11 +267,27 @@ class AbstractPlanningProblem:
         return history
 
     def project(self, state: dict):
-        for param in state.keys():
-            state[param] = self.la.clip(
-                state[param], self.lower_bounds[param], self.upper_bounds[param]
-            )
-        return state
+        """Project state onto the feasible region.
+
+        If budget constraints are specified, solves a QP to project onto the
+        intersection of box constraints and budget constraints. Otherwise,
+        falls back to simple box clipping.
+
+        Args:
+            state: Dict mapping param_name -> array
+
+        Returns:
+            Projected state dict
+        """
+        if self._projection_qp is not None:
+            return self._projection_qp.project(state, la=self.la)
+        else:
+            # Fallback to simple box projection
+            for param in state.keys():
+                state[param] = self.la.clip(
+                    state[param], self.lower_bounds[param], self.upper_bounds[param]
+                )
+            return state
 
     def get_state(self):
         return self.state
@@ -257,7 +311,12 @@ class AbstractPlanningProblem:
 class StochasticPlanningProblem(AbstractPlanningProblem):
     """Weighted mixture of planning problems."""
 
-    def __init__(self, subproblems: list[AbstractPlanningProblem], weights: list[float] = None):
+    def __init__(
+        self,
+        subproblems: list[AbstractPlanningProblem],
+        weights: list[float] = None,
+        budget_constraints: Union[str, BudgetConstraintSet, None] = None,
+    ):
         la = subproblems[0].la
 
         if weights is None:
@@ -309,6 +368,16 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
             }
 
         assert len(self.subproblems) == len(self.weights)
+
+        # Initialize budget constraints (inherit from first subproblem if not specified)
+        if budget_constraints is None:
+            # Check if any subproblem has budget constraints
+            for sub in self.subproblems:
+                if hasattr(sub, "budget_constraints") and sub.budget_constraints is not None:
+                    budget_constraints = sub.budget_constraints
+                    break
+
+        self._init_budget_constraints(budget_constraints, self.layer)
 
     @property
     def inv_cost(self):
