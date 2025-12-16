@@ -26,6 +26,8 @@ cvxpy = "1.7.1"
 ortools = "9.11.4210"
 scikit-sparse = { version = "^0.4.16", optional = true }
 h5py = "^3.14.0"
+linopy = "0.3.14"
+xarray = "2024.9.0"
 
 [tool.poetry.extras]
 pypsa = ["pypsa"]
