@@ -1,0 +1,6 @@
+constraint_name,attribute,device_name,multiplier,rhs_value,sense
+max_wind,nominal_capacity,node_01_wind,1,,
+max_wind,nominal_capacity,node_02_wind,1,,
+max_wind,nominal_capacity,node_03_wind,1,,
+max_wind,nominal_capacity,node_04_wind,1,,
+max_wind,rhs,,,100,le
