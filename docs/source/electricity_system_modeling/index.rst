@@ -10,3 +10,4 @@ Electricity System Modeling
    :maxdepth: 1
 
    Basic Usage<basic>
+   Using Zap with PyPSA Networks<pypsa_example>
