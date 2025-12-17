@@ -223,7 +223,8 @@ def _admm_prox_update(
         linear_cost = torch.zeros_like(set_p)
 
     rho_feat = rho_power.expand_as(set_p)
-    emb = embedding.unsqueeze(0).expand(set_p.shape[0], -1, -1)
+    emb0 = 0.5 * torch.nn.functional.layer_norm(embedding, (embedding.shape[-1],))
+    emb = emb0.unsqueeze(0).expand(set_p.shape[0], -1, -1)
 
     inp = torch.stack(
         (
