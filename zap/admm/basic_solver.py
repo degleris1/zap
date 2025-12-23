@@ -126,6 +126,7 @@ class ADMMSolver:
     verbose: int = 1
     scale_dual_residuals: bool = None  # Deprecated
     embedding: Optional[torch.Tensor] = None
+    num_backprop_iterations: Optional[int] = None  # None = backprop through all iterations
 
     def __post_init__(self):
         if self.machine is None:
@@ -214,7 +215,66 @@ class ADMMSolver:
             print("Initial value of rho_power:", self.rho_power)
             print("Initial value of rho_angle:", self.rho_angle)
 
-        for iteration in range(self.num_iterations):
+        # Calculate number of detached iterations for truncated backprop
+        if self.num_backprop_iterations is None:
+            num_detached = 0
+        else:
+            num_detached = max(0, self.num_iterations - self.num_backprop_iterations)
+
+        # Phase 1: Detached iterations (no gradient tracking)
+        if num_detached > 0:
+            with torch.no_grad():
+                for iteration in range(num_detached):
+                    self.iteration = iteration + 1
+                    self.cumulative_iteration += 1
+
+                    # (1) Device proximal updates
+                    st = self.device_updates(
+                        st, devices, parameters, num_contingencies, contingency_device, contingency_mask
+                    )
+
+                    # (2) Update averages and residuals
+                    last_avg_phase = st.avg_phase
+                    last_resid_power = st.resid_power
+                    st = self.update_averages_and_residuals(
+                        st, net, devices, time_horizon, num_contingencies
+                    )
+
+                    # (3) Update scaled prices
+                    st = self.price_updates(st, net, devices, time_horizon)
+
+                    # (4) History, convergence checks, numerical checks
+                    if self.track_objective:
+                        st = st.update(objective=self.compute_objective(st, devices, parameters))
+
+                    self.update_history(history, st, last_avg_phase, last_resid_power, nu_star)
+
+                    self.converged = self.has_converged(st, history, num_contingencies)
+                    if iteration + 1 >= self.minimum_iterations and self.converged:
+                        print(f"ADMM converged in {len(history.power)} iterations.")
+                        # Early convergence during detached phase - return immediately
+                        if self.verbose >= 2:
+                            print("Final value of rho_power:", self.rho_power)
+                            print("Final value of rho_angle:", self.rho_angle)
+                        for k, v in original_settings.items():
+                            setattr(self, k, v)
+                        return st, history
+
+                    if self.adaptive_rho and self.iteration % self.adaptation_frequency == 0:
+                        if self.relative_rho_angle:
+                            st = self.adjust_rho(st, history)
+                        else:
+                            st = self.adjust_rho_power_and_angle(st, history)
+
+                    if self.safe_mode:
+                        self.dimension_checks(st, net, devices, time_horizon)
+                        self.numerical_checks(st, net, devices, time_horizon)
+
+            # Detach state to break gradient graph before gradient phase
+            st = st.copy()
+
+        # Phase 2: Gradient-tracked iterations
+        for iteration in range(num_detached, self.num_iterations):
             self.iteration = iteration + 1
             self.cumulative_iteration += 1
 
@@ -233,7 +293,7 @@ class ADMMSolver:
             # (3) Update scaled prices
             st = self.price_updates(st, net, devices, time_horizon)
 
-            # (4) Hisory, convergence checks, numerical checks
+            # (4) History, convergence checks, numerical checks
             if self.track_objective:
                 st = st.update(objective=self.compute_objective(st, devices, parameters))
 
