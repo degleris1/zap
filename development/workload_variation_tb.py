@@ -385,11 +385,15 @@ def _(cp, n_dc, np, pypsa_devices_dc, pypsa_net, zap):
         upper_bounds=upper_bounds,
     )
 
-    # Add in simplex constraint
-    # P.extra_projections = {}
+    # Enforce per-site caps AND the budget jointly. NOTE: SimplexBudgetProjection
+    # only enforces x>=0 and sum(x)==budget -- it SILENTLY IGNORES the 0.25 GW
+    # per-site upper_bounds (a single node could grab the whole budget). Use
+    # BoxBudgetProjection to enforce 0 <= x <= cap together with sum(x)==budget.
     P.extra_projections = {
-        "dc_capacity": zap.planning.SimplexBudgetProjection(
-            budget=TOTAL_DC_BUDGET, strict=True
+        "dc_capacity": zap.planning.BoxBudgetProjection(
+            budget=TOTAL_DC_BUDGET,
+            lower_bounds=lower_bounds["dc_capacity"],
+            upper_bounds=upper_bounds["dc_capacity"],
         )
     }
 

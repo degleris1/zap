@@ -450,7 +450,6 @@ class PowerNetwork:
             parameters = parameters + [{}]
 
         # Type checks
-        print()
         assert all([d.num_nodes == self.num_nodes for d in devices])
         assert time_horizon > 0
         assert all([d.time_horizon in [0, time_horizon] for d in devices])

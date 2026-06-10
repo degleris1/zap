@@ -14,13 +14,22 @@ class SimplexBudgetProjection(Projection):
 
     def __call__(self, x):
         """
-        Simplex projection algorithm from Duchi et al. (2008)
+        Euclidean projection onto {x >= 0, sum(x) == budget} (strict) or
+        {x >= 0, sum(x) <= budget} (non-strict), via Duchi et al. (2008).
         https://ai.stanford.edu/~jduchi/projects/jd_ss_ys_l1.pdf
+
+        NB: the Duchi algorithm must run on the RAW input, not a >=0-clipped copy.
+        Pre-clipping negatives discards the mass they should redistribute onto the
+        surviving coordinates and yields an incorrect projection (e.g. inputs with
+        negative entries, which routinely arise from a gradient step).
         """
-        x = np.maximum(x, 0.0)
-        s = x.sum()
-        if (self.strict and abs(s - self.budget) < 1e-12) or (not self.strict and s <= self.budget):
-            return x
+        x = np.asarray(x, dtype=float).ravel()
+        if not self.strict:
+            # Projection onto {x >= 0, sum <= budget}: if clipping to the positive
+            # orthant already satisfies the budget, that IS the projection.
+            clipped = np.maximum(x, 0.0)
+            if clipped.sum() <= self.budget:
+                return clipped
         u = np.sort(x)[::-1]
         cssv = np.cumsum(u)
         rho = np.nonzero(u * np.arange(1, len(u) + 1) > (cssv - self.budget))[0][-1]
@@ -44,7 +53,9 @@ class BoxBudgetProjection(Projection):
             raise ValueError(f"Budget {budget} too large for sum of upper bounds {np.sum(self.upper_bounds)}")
 
     def __call__(self, y):
-        y = np.asarray(y).ravel()
+        if hasattr(y, "detach"):
+            y = y.detach().cpu().numpy()
+        y = np.asarray(y, dtype=float).ravel()
         x = cp.Variable(self.n)
         objective = cp.Minimize(cp.sum_squares(x - y))
         constraints = [
@@ -53,5 +64,7 @@ class BoxBudgetProjection(Projection):
             cp.sum(x) == self.budget
         ]
         problem = cp.Problem(objective, constraints)
-        problem.solve()
+        problem.solve(solver=cp.CLARABEL)
+        if problem.status not in ("optimal", "optimal_inaccurate") or x.value is None:
+            raise ValueError(f"BoxBudgetProjection failed with status {problem.status}")
         return x.value

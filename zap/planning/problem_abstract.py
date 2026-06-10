@@ -116,6 +116,23 @@ class AbstractPlanningProblem:
         self.lower_bound = lower_bound
         self.extra_wandb_trackers = extra_wandb_trackers
 
+        # Guard against a silent footgun: SimplexBudgetProjection only enforces
+        # x >= 0 and sum(x) == budget -- it ignores per-coordinate upper_bounds.
+        # If a user supplies binding per-site caps with a simplex projection, those
+        # caps would be silently violated; require BoxBudgetProjection instead.
+        for p, proj in (self.extra_projections or {}).items():
+            if isinstance(proj, SimplexBudgetProjection) and self.upper_bounds is not None:
+                ub = self.upper_bounds.get(p)
+                if ub is not None:
+                    ub_np = ub.detach().cpu().numpy() if hasattr(ub, "detach") else np.asarray(ub)
+                    if np.any(np.isfinite(ub_np) & (ub_np < proj.budget - 1e-9)):
+                        raise ValueError(
+                            f"Parameter '{p}' has binding upper_bounds but uses "
+                            f"SimplexBudgetProjection, which ignores them. Use "
+                            f"BoxBudgetProjection(budget, lower_bounds, upper_bounds) "
+                            f"to enforce per-site caps together with the budget."
+                        )
+
         # Setup initial state and history
         state = self.initialize_parameters(deepcopy(initial_state))
         history = self.initialize_history(trackers)
@@ -152,18 +169,21 @@ class AbstractPlanningProblem:
             if (self.iteration) % checkpoint_every == 0:
                 checkpoint_func(state, history)
 
-            # Project gradient onto simplex null space (preserves sum constraint)
-            print(grad)
+            # Project gradient onto the budget tangent space (1^T d = 0) so the
+            # step preserves sum(x) == budget. Only valid when a budget-type
+            # projection is in play; without one, removing the mean would corrupt
+            # the gradient (e.g. plain box-bounded transmission/generation expansion).
+            if verbosity >= 3:
+                print(grad)
             proj_grad = {k: grad[k] - grad[k].mean() for k in grad}
-            print(proj_grad)
+            if verbosity >= 3:
+                print(proj_grad)
 
-            # Gradient step and project
-            if any(
-                isinstance(proj, BoxBudgetProjection) for proj in self.extra_projections.values()
-            ):
-                state = algorithm.step(state, proj_grad)
-            else:
-                state = algorithm.step(state, grad)
+            has_budget = any(
+                isinstance(proj, (SimplexBudgetProjection, BoxBudgetProjection))
+                for proj in (self.extra_projections or {}).values()
+            )
+            state = algorithm.step(state, proj_grad if has_budget else grad)
             assert state is not None
             # print("after step:", 5 * softmax_np(state["theta"]))
             state = self.project(state)
@@ -190,7 +210,8 @@ class AbstractPlanningProblem:
                 history, trackers, J, grad, state, last_state, wandb, log_wandb_every
             )
 
-            print(state)
+            if verbosity >= 3:
+                print(state)
             # print(5 * softmax_np(state["theta"]))
 
         return state, history
@@ -262,15 +283,22 @@ class AbstractPlanningProblem:
         return history
 
     def project(self, state: dict):
-        # for param in state.keys():
-        #     state[param] = self.la.clip(
-        #         state[param], self.lower_bounds[param], self.upper_bounds[param]
-        #     )
-        # Perform extra projections (like simplex or box budget projection)
+        # Perform extra projections (like simplex or box budget projection).
+        # Projections operate in numpy (BoxBudgetProjection solves a cvxpy QP and
+        # returns numpy); cast the result back to the planner's array type so the
+        # torch (ADMM/SCOPF) path keeps working.
         for param in state.keys():
             proj = getattr(self, "extra_projections", {}).get(param)
             if proj is not None:
-                state[param] = proj(state[param])
+                ref = state[param]
+                projected = proj(ref)
+                if self.la is torch and not torch.is_tensor(projected):
+                    projected = torch.as_tensor(
+                        np.asarray(projected),
+                        dtype=ref.dtype if torch.is_tensor(ref) else torch.float32,
+                        device=ref.device if torch.is_tensor(ref) else "cpu",
+                    )
+                state[param] = projected
         return state
 
     def get_state(self):
