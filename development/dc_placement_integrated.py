@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dc_placement_study import (
     POWER_UNIT, COST_UNIT, VOLL,
     load_dc_profile, sample_panel_indices, with_dc, metrics, summarize, summarize_all,
-    feas_frac, load_land_weights, draw_fleet, screen_usable,
+    feas_frac, load_land_weights, draw_fleet, screen_usable, dev_index,
 )
 from zap.importers.pypsa import load_pypsa_network
 from copy import deepcopy
@@ -48,7 +48,7 @@ def build_raw_hour(pn, snaps, h, ls, gs, lns):
     devices = deepcopy(devices)
     devices[1].load *= ls
     devices[0].dynamic_capacity *= gs
-    devices[3].nominal_capacity *= lns
+    devices[dev_index(devices, "ACLine")].nominal_capacity *= lns
     ts = snaps[h]
     hod = int(pd.Timestamp(ts[-1] if isinstance(ts, tuple) else ts).hour)
     return net, devices, str(ts), hod

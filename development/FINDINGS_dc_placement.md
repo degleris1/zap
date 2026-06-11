@@ -219,6 +219,46 @@ network and it selects a summer-peak window in the requested year (or warns + fa
 build recipe in `development/PYPSA_USA_HIGHRES_2025.md`; a **runnable build kit** (config +
 `build_2025.sh` + `verify_2025_network.py`) is in `development/build_2025/`.
 
+> **UPDATE 2026-06-11 — higher-resolution networks ARE now built (supersedes the
+> "not obtainable" note above).** Three higher-res TAMU/2025 PyPSA-USA networks were
+> built on Sherlock and fixed (see `diagnostics/PILOT_NETWORKS.md` for the build bug
+> and fix): ERCOT `elec_s500_c500` (500 buses / 1065 lines), a hi-res WECC
+> `elec_s1493_c1493` (1493 / 3012), and the Eastern Interconnect `elec_s3000_c3000`
+> (3000 / 7884), all at `/scratch/users/gfw/pypsa-usa/resources/Default/{texas,western,eastern}/`.
+
+## Multi-network generalization (2026-06-11): the headline reproduces beyond WECC-490
+
+Ran `dc_placement_study.py` (the Q1 siting + Q2 concentrate-vs-distribute pipeline,
+natural caps, `load*1.0`) on all three new networks. **The WECC-490 headline is NOT an
+artifact of that one network — "distribute beats concentrate, concentrate hits a
+feasibility wall first" reproduces, and sharpens on the larger, more-congested grids.**
+
+| network (buses, AC lines) | base Σu² / p95 LMP / shed | distribute-wins frac (small<big) by budget | concentrate (1-GW sites) |
+|---|---|---|---|
+| `elec_s500_c500` ERCOT | 76 / $46 / 0% | 0.20 → 0.60 → 0.80 (B=2,4,6 GW) | feasible to 6 GW (267% reserve) |
+| `elec_s1493_c1493` WECC hi-res | 103 / $55 / 0% | 1.00 / 0.60 / 0.40 (B=3,6,9) | **INFEASIBLE at B=3 and B=9** |
+| `elec_s3000_c3000` Eastern | 391 / $77 / 1.5% | **1.00 at every budget** (B=4,8,12) | **INFEASIBLE at B=8 and B=12** |
+
+- **Eastern is the cleanest reproduction:** concentrating 1-GW sites is INFEASIBLE at 8 GW
+  while the same budget over 40–60 small sites stays feasible at ~+3% stress; distribute
+  wins 100% of matched random draws. This is the "1×100 MW ≫ 100×1 MW feasibility wall"
+  result from the 490-node Q2, now on the Eastern Interconnect.
+- **ERCOT is the weakest** (small grid, 267% reserve margin) — concentrate stays feasible
+  at these budgets, but the distribute-wins fraction still climbs 0.20 → 0.80 with budget.
+- **Grid stress grows monotonically and prices stay physical** (gen costs 0–234/3818,
+  LMP medians $33–73) on every network — Q1 holds.
+
+**These are DIRECTIONAL validation runs, NOT citable.** Fast knobs were used: short panels
+(3–4 hours), few fleets (8–10), and a capped candidate set (`--max-nodes` = first 100–250
+node indices, *not* the strided clean-node sampling the 490 study uses). No bus cleaning was
+applied, so the known ±10⁴ price pockets / weakly-connected buses are still present — visible
+as western's worst-case p95 = $8028 at B=6 and eastern's pinned 1.54% base shed (its 2 stray
+buses). Before any citable multi-network claim: re-derive each net's `find_bad_buses` cleaning
+manifest (the 25-bad list is WECC-490-specific), use all clean nodes with strided sampling, and
+match fleets to each net's penetration (ERCOT B≈10, Eastern B≈41 — see `PILOT_NETWORKS.md`).
+Repro: `dc_placement_study.py --network <net> --n-snaps 4 --n-fleets 10 --max-nodes N --budgets "..."`;
+outputs under `/scratch/users/gfw/study_{texas,western,eastern}/`.
+
 ## N-1 / SCOPF-aware placement — `development/dc_placement_scopf.py`
 
 Two engines:

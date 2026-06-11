@@ -28,7 +28,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pypsa  # noqa: E402
-from dc_placement_study import COST_UNIT, metrics  # noqa: E402
+from dc_placement_study import COST_UNIT, metrics, dev_index  # noqa: E402
 from dc_placement_integrated import build_raw_hour  # noqa: E402
 
 # WECC-490 reference for penetration matching (scaled load at the wall study's
@@ -67,7 +67,7 @@ def main():
     net, devs, date, hod = build_raw_hour(pn, snaps, hours[0], 1.0, 1.0, 1.0)
     print(f"[build] one-hour zap network in {time.time() - t0:.1f}s | "
           f"devices: {[type(d).__name__ for d in devs]}")
-    G, L, A = devs[0], devs[1], devs[3]
+    G, L, A = devs[0], devs[1], devs[dev_index(devs, "ACLine")]
     gen_cost = np.asarray(G.linear_cost).ravel() * COST_UNIT
     load_gw = float((np.asarray(L.load) * np.asarray(L.nominal_capacity)).sum())
     avail_gw = float((np.asarray(G.dynamic_capacity).ravel()

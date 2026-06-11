@@ -323,6 +323,13 @@ def load_pypsa_network(
         ),
     ]
 
+    # Drop device classes with no members. ERCOT, for instance, has zero DC links, and
+    # zap would otherwise build a cp.Variable((0, T)) for the empty DCLine device, which
+    # CVXPY rejects. An absent class is equivalent to an empty one for dispatch. NOTE:
+    # this means the device list is network-dependent -- consumers must locate devices
+    # by type (see dc_placement_study.dev_index), not by a fixed positional index.
+    devices = [d for d in devices if d.num_devices > 0]
+
     for d in devices:
         d.scale_costs(cost_unit)
         d.scale_power(power_unit)

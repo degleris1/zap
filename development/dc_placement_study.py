@@ -44,6 +44,17 @@ POWER_UNIT, COST_UNIT, VOLL = 1.0e3, 100.0, 1000.0
 DEFAULT_DC_PROFILE = "development/load_profiles/example_inference_azure_conv.csv"
 
 
+def dev_index(devices, name):
+    """Index of the device whose class name == `name`. The zap importer omits device
+    classes with no members, so the device list is network-dependent -- e.g. ERCOT has
+    no DC links, so DCLine is absent and ACLine/Battery shift forward. Transmission
+    metrics must locate the AC line device by type, never by a fixed position."""
+    for i, d in enumerate(devices):
+        if type(d).__name__ == name:
+            return i
+    raise KeyError(f"{name} not among {[type(d).__name__ for d in devices]}")
+
+
 # --------------------------------------------------------------------------- #
 def load_dc_profile(path):
     """Load a real DC workload trace (per-unit 0-1) and reduce it to a 24-element
@@ -80,7 +91,7 @@ def build_hour(pn, snaps, h, ls, gs, lns, hourly_lf):
     devices = deepcopy(devices)
     devices[1].load *= ls
     devices[0].dynamic_capacity *= gs
-    devices[3].nominal_capacity *= lns
+    devices[dev_index(devices, "ACLine")].nominal_capacity *= lns
     lf = float(hourly_lf[_hour_of_day(snaps[h])])
     return net, devices, str(snaps[h]), lf
 
@@ -137,12 +148,13 @@ def metrics(net, devs, devices, T, dc_terminals=None, price_nodes=None, oc=None)
                 "cong_rent": np.inf, "lmp_disp": np.inf, "cong_rent_lines": np.inf}
     p = np.asarray(oc.prices) * COST_UNIT          # RAW $/MWh, unclipped
     pn = p if price_nodes is None else p[np.asarray(price_nodes)]
-    A = devices[3]
-    flow = np.abs(np.asarray(oc.power[3][1]))
+    ai = dev_index(devices, "ACLine")
+    A = devices[ai]
+    flow = np.abs(np.asarray(oc.power[ai][1]))
     limit = np.maximum(np.asarray(A.max_power) * np.asarray(A.nominal_capacity), 1e-9)
     u = flow / limit
-    mu = (np.asarray(oc.local_inequality_duals[3][0]) +
-          np.asarray(oc.local_inequality_duals[3][1]))
+    mu = (np.asarray(oc.local_inequality_duals[ai][0]) +
+          np.asarray(oc.local_inequality_duals[ai][1]))
     n_binding = int(np.sum(mu.max(axis=1) > 1e-4))
     # line-dual congestion rent (cross-check only): sum mu * limit, $/h
     cong_rent_lines = float((mu.max(axis=1) * np.asarray(limit).ravel()).sum() * COST_UNIT * POWER_UNIT)
@@ -388,7 +400,7 @@ def main():
              for h in idx]
     dates = [d for (_, _, d, _) in panel]
     n_nodes = panel[0][0].num_nodes
-    n_lines = panel[0][1][3].nominal_capacity.shape[0]
+    n_lines = panel[0][1][dev_index(panel[0][1], "ACLine")].nominal_capacity.shape[0]
     nodes = list(range(n_nodes))
     if args.max_nodes:
         nodes = nodes[:args.max_nodes]

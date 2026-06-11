@@ -4,7 +4,27 @@ Pilot tool: `development/diagnostics/pilot_network.py` (uses the studies' own
 loader/metrics: `load_pypsa_network`, POWER_UNIT=1e3, COST_UNIT=100). Run before
 ANY citable study on a new network.
 
+> **STATUS 2026-06-11: FIXED.** All three broken builds were rebuilt and now pass
+> the pilot + a `dc_placement_study` datacenter smoke test. See "RESOLVED" below.
+
 ## Verdicts
+
+### CURRENT (after the fix)
+
+| network | buses | AC lines | lines/bus | islands | largest island | base shed ×1.0 | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `western_elec_s490_c490.nc` (reference) | 490 | 1250 | 2.55 | 1 | 490 | ~0% | **GO** (canonical) |
+| `elec_s500_c500.nc` (texas/ERCOT) | 500 | 1065 | 2.13 | 2 | 499 | 0.00% | **GO** (rebuilt) |
+| `elec_s1493_c1493.nc` (western hi-res) | 1493 | 3012 | 2.02 | 1 | 1493 | 0.00% | **GO** (rebuilt) |
+| `elec_s3000_c3000.nc` (eastern) | 3000 | 7884 | 2.63 | 2 | 2998 | 1.55% | **GO** (rebuilt) |
+
+Rebuilt files: `/scratch/users/gfw/pypsa-usa/resources/Default/{texas,western,eastern}/`.
+The 1–2 residual islands are single stray buses (the giant component holds all but
+1–2); routine `find_bad_buses`/`clean_devices` candidates, not structural breakage.
+All three run pilot + datacenter smokes end-to-end with genuine congestion (copperplate
+risk: low). intra-zone lines: texas 976, western 2603, eastern 6163 (were ~0 when broken).
+
+### ORIGINAL (broken builds, pre-fix — kept for the record)
 
 | network | buses | AC lines | lines/bus | islands | largest island | stranded load buses | verdict |
 |---|---:|---:|---:|---:|---:|---:|---|
@@ -46,6 +66,39 @@ or pin pypsa-usa before `f38d756`; give each build a distinct `run: name:`;
 force-rerun from `cluster_network`; re-verify with `pilot_network.py`
 (expect 1 sub-network, lines/bus ≈ 2–3, intra-zone lines ≫ 0). Note: the new
 builds carry **2022 weather** relabeled to 2025 horizons (WECC-490 is 2023 weather).
+
+## RESOLVED (2026-06-11): fix applied + all three rebuilt and smoke-tested
+
+Two code changes, then a rebuild of only the `cluster_network` step (the cached
+simplified `elec_s{N}.nc` intermediates predate the calibration, so no cutout/
+renewable rebuild was needed — `snakemake --configfile config/config.{texas,default,
+eastern}.yaml resources/Default/{ic}/elec_s{N}_c{N}.nc`):
+
+1. **`pypsa-usa/workflow/scripts/cluster_network.py`** (`calibrate_tamu_transmission_capacity`,
+   the `lines_not_in_reeds` branch ~line 745): guard the removal with `if region0 != region1:`
+   so intra-zonal lines (no REEDS interface by construction) are kept. Rebuild logs now read
+   e.g. eastern "1712 lines updated, **39** removed" (was: nearly all intra-zonal removed).
+
+2. **`zap/zap/importers/pypsa.py`** (`load_pypsa_network`): drop empty device classes
+   (`devices = [d for d in devices if d.num_devices > 0]`). ERCOT has **zero DC links**, and
+   zap otherwise built `cp.Variable((0,T))` → CVXPY "Invalid dimensions (0,1)". Because this
+   makes the device list network-dependent, the consumers now locate devices **by type**:
+   added `dev_index(devices, name)` in `dc_placement_study.py` and replaced every fixed
+   ACLine index (`devices[3]`, `oc.power[3]`, `local_inequality_duals[3]`, `panel[0][1][3]`)
+   in `dc_placement_study.py`, `dc_placement_integrated.py`, and `pilot_network.py`.
+   Behavior-preserving for nets that have DC links (ACLine stays at index 3). Generator(0)/
+   Load(1) precede DCLine so their indices never move.
+
+**Pilot numbers (×1.0 / ×1.2):** texas LMP-disp ~3–60 $/MWh, binding 8–35, shed ≤0.5%;
+western disp ~10–635, binding 8–17, shed ≤0.8%; eastern disp ~30–173, binding 28–41,
+shed 0.6–2.9%, load 321 GW (matches the projection below). All "copperplate risk: low".
+**Datacenter smoke (`dc_placement_study`, tiny knobs)** completed on all three incl. the
+no-DC texas: base grid-stress / p95-price / shed = texas 76 / $46 / 0%, western 112 / $55 /
+0%, eastern 410 / $77 / 1.55%; DC-growth, BIG-vs-SMALL, HEADLINE, JSON+PNG all produced.
+
+Still TODO before *citable* runs (not blockers for "the build works"): re-derive each net's
+cleaning manifest (the 25-bad list is WECC-490-specific) for the 1–2 stray buses; the
+eastern 2022-vs-2023 weather caveat stands.
 
 ## (superseded) earlier hypothesis: ReEDS zonal topology instead of TAMU nodal
 
