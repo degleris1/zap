@@ -1,0 +1,87 @@
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.11`.
+INFO:pypsa.io:Imported network elec_s490_c490.nc has buses, carriers, generators, lines, links, loads, storage_units
+/Users/grantwilkins/zap/.venv/lib/python3.11/site-packages/cvxpy/problems/problem.py:1504: UserWarning: Solution may be inaccurate. Try another solver, adjusting the solver settings, or solve with verbose=True for more information.
+  warnings.warn(
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+# CO-LOCATED GAS OPEX (DC-operator private cost)  network=elec_s490_c490.nc
+# load x1.2  bad buses 25  clean nodes 465  n_snaps 24
+# COST ASSUMPTIONS: on-site gas CAPEX $84,954/MW-yr ($900/kW overnight x CRF 0.0944); OpEx GAS_MARGINAL_USD_PER_MWH = $35/MWh (HR ~7.5 MMBtu/MWh x $4/MMBtu + $5 VOM); OpEx sensitivity (30.0, 35.0, 50.0) $/MWh
+# pool wall-depth scan (infeasible candidate hours / 48): {0: 42, 1: 48, 2: 0, 3: 47} -> picked deepest-wall seed 1 (48/48 infeasible)
+# CONCENTRATED fleet B=10 GW at 10 buses [193, 420, 65, 419, 112, 146, 357, 138, 208, 21]
+# kept 24/48 most-congested candidate hours (idx [0, 186, 372, 559, 745, 931, 1118, 1304, 1490, 1677, 1863, 2049, 2236, 2422, 2609, 2795, 2981, 3168, 3354, 3540, 3727, 3913, 4099, 4286]); bare-fleet must-serve feasible in 0/24 kept hours (0/48 across all candidates)
+# on-site gas to clear the wall: 7.0 GW (search lattice 0.5 GW)
+
+=== DC-OPERATOR PRIVATE COST (on-site gas) ===
+  on-site gas CAPACITY      : 7.00 GW (7,000 MW)  [~ the un-deliverable DC; fleet 10 GW, mean DC draw 6.96 GW]
+  on-site gas mean dispatch : 6.55 GW  (capacity factor 0.94  -> runs near-continuously to backfill the deficit)
+  annual generation         : 57.34 TWh/yr  (57,344,371 MWh/yr = mean power x 8760)
+  CAPEX (private)           : $0.595 B/yr  (= 7,000 MW x $84,954/MW-yr)
+  OPEX  (private, recurring): $2.007 B/yr @ $35/MWh central
+          OpEx @ $30/MWh    : $1.720 B/yr
+          OpEx @ $35/MWh    : $2.007 B/yr
+          OpEx @ $50/MWh    : $2.867 B/yr
+  CARBON adder              : $1.061 B/yr @ 0.37 tCO2/MWh and $50/tCO2
+          carbon @ $25/tCO2 : $0.530 B/yr
+          carbon @ $50/tCO2 : $1.061 B/yr
+          carbon @ $100/tCO2 : $2.122 B/yr
+  fuel + carbon OpEx        : $3.068 B/yr
+  OPEX / CAPEX              : 3.38x  (OPEX DOMINATES (recurring fuel >> annualized capex))
+
+=== GRID / RATEPAYER comparison (SEPARATE payer -- never summed) ===
+  transmission (uniform), grid/ratepayer capex: $80.03 B/yr for only PARTIAL relief (feas -> 0.87, wall NOT cleared)
+  -> on-site gas is the DC OPERATOR's PRIVATE cost; transmission is the GRID's. They are different payers and are reported on different axes.
+
+=== SMOKE SANITY ===
+  all panel hours feasible with gas : True
+  gas capacity ~ the deficit         : True  (gas 7.0 GW vs fleet 10 GW, mean draw 6.96 GW)
+  OpEx dominates CAPEX               : True  (ratio 3.38x)
+  SANITY HELD                        : True
+
+saved -> development/results/placement_levers/colocated_opex_24h.json

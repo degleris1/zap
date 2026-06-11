@@ -1,0 +1,208 @@
+{
+  "line_cost_mult": [
+    0.5,
+    1.0,
+    1.5
+  ],
+  "gen_cost_mult": [
+    0.5,
+    1.0,
+    1.5
+  ],
+  "dc_capex_per_mw": [
+    9000000.0,
+    12000000.0,
+    15000000.0
+  ],
+  "land_mult": [
+    0.5,
+    1.0,
+    2.0
+  ],
+  "results": {
+    "inference": {
+      "3": {
+        "frontier_match_usd_primary": {
+          "0.5": null,
+          "1.0": null,
+          "1.5": null
+        },
+        "frontier_match_note": "lever frontier never reaches distributed feasibility within swept range",
+        "phaseb_crossover_usd_secondary": {
+          "0.5": 40015910361.61403,
+          "1.0": 80031820723.22806,
+          "1.5": 120047731084.84209
+        },
+        "phaseb_crossover_note": null,
+        "gen_expansion_usd": {
+          "0.5": 89117532.31271796,
+          "1.0": 178235064.62543592,
+          "1.5": 267352596.93815386
+        },
+        "dc_invest_usd": {
+          "capex9M_land0.5": 2548669161.5063014,
+          "capex9M_land1.0": 2548729327.9447,
+          "capex9M_land2.0": 2548849660.8214965,
+          "capex12M_land0.5": 3398205493.1956024,
+          "capex12M_land1.0": 3398265659.634001,
+          "capex12M_land2.0": 3398385992.5107975,
+          "capex15M_land0.5": 4247741824.8849034,
+          "capex15M_land1.0": 4247801991.323302,
+          "capex15M_land2.0": 4247922324.2000985
+        }
+      },
+      "6": {
+        "frontier_match_usd_primary": {
+          "0.5": 10003977590.403507,
+          "1.0": 20007955180.807014,
+          "1.5": 30011932771.21052
+        },
+        "frontier_match_note": null,
+        "phaseb_crossover_usd_secondary": {
+          "0.5": null,
+          "1.0": null,
+          "1.5": null
+        },
+        "phaseb_crossover_note": "no phaseB crossover available",
+        "gen_expansion_usd": {
+          "0.5": 80860970.33322246,
+          "1.0": 161721940.66644493,
+          "1.5": 242582910.9996674
+        },
+        "dc_invest_usd": {
+          "capex9M_land0.5": 5097338323.012603,
+          "capex9M_land1.0": 5097458655.8894,
+          "capex9M_land2.0": 5097699321.642993,
+          "capex12M_land0.5": 6796410986.391205,
+          "capex12M_land1.0": 6796531319.268002,
+          "capex12M_land2.0": 6796771985.021595,
+          "capex15M_land0.5": 8495483649.769807,
+          "capex15M_land1.0": 8495603982.646604,
+          "capex15M_land2.0": 8495844648.400197
+        }
+      },
+      "10": {
+        "frontier_match_usd_primary": {
+          "0.5": null,
+          "1.0": null,
+          "1.5": null
+        },
+        "frontier_match_note": "lever frontier never reaches distributed feasibility within swept range",
+        "phaseb_crossover_usd_secondary": {
+          "0.5": null,
+          "1.0": null,
+          "1.5": null
+        },
+        "phaseb_crossover_note": "no phaseB crossover available",
+        "gen_expansion_usd": {
+          "0.5": 72345004.33037831,
+          "1.0": 144690008.66075662,
+          "1.5": 217035012.99113494
+        },
+        "dc_invest_usd": {
+          "capex9M_land0.5": 8495563871.687672,
+          "capex9M_land1.0": 8495764426.482333,
+          "capex9M_land2.0": 8496165536.071656,
+          "capex12M_land0.5": 11327351643.98534,
+          "capex12M_land1.0": 11327552198.780003,
+          "capex12M_land2.0": 11327953308.369326,
+          "capex15M_land0.5": 14159139416.283012,
+          "capex15M_land1.0": 14159339971.077673,
+          "capex15M_land2.0": 14159741080.666996
+        }
+      }
+    },
+    "training": {
+      "3": {
+        "frontier_match_usd_primary": {
+          "0.5": null,
+          "1.0": null,
+          "1.5": null
+        },
+        "frontier_match_note": "lever frontier never reaches distributed feasibility within swept range",
+        "phaseb_crossover_usd_secondary": {
+          "0.5": 10003977590.403507,
+          "1.0": 20007955180.807014,
+          "1.5": 30011932771.21052
+        },
+        "phaseb_crossover_note": null,
+        "gen_expansion_usd": {
+          "0.5": 89483733.12845187,
+          "1.0": 178967466.25690374,
+          "1.5": 268451199.3853556
+        },
+        "dc_invest_usd": {
+          "capex9M_land0.5": 2548669161.5063014,
+          "capex9M_land1.0": 2548729327.9447,
+          "capex9M_land2.0": 2548849660.8214965,
+          "capex12M_land0.5": 3398205493.1956024,
+          "capex12M_land1.0": 3398265659.634001,
+          "capex12M_land2.0": 3398385992.5107975,
+          "capex15M_land0.5": 4247741824.8849034,
+          "capex15M_land1.0": 4247801991.323302,
+          "capex15M_land2.0": 4247922324.2000985
+        }
+      },
+      "6": {
+        "frontier_match_usd_primary": {
+          "0.5": null,
+          "1.0": null,
+          "1.5": null
+        },
+        "frontier_match_note": "lever frontier never reaches distributed feasibility within swept range",
+        "phaseb_crossover_usd_secondary": {
+          "0.5": null,
+          "1.0": null,
+          "1.5": null
+        },
+        "phaseb_crossover_note": "no phaseB crossover available",
+        "gen_expansion_usd": {
+          "0.5": 82079251.2599915,
+          "1.0": 164158502.519983,
+          "1.5": 246237753.7799745
+        },
+        "dc_invest_usd": {
+          "capex9M_land0.5": 5097338323.012603,
+          "capex9M_land1.0": 5097458655.8894,
+          "capex9M_land2.0": 5097699321.642993,
+          "capex12M_land0.5": 6796410986.391205,
+          "capex12M_land1.0": 6796531319.268002,
+          "capex12M_land2.0": 6796771985.021595,
+          "capex15M_land0.5": 8495483649.769807,
+          "capex15M_land1.0": 8495603982.646604,
+          "capex15M_land2.0": 8495844648.400197
+        }
+      },
+      "10": {
+        "frontier_match_usd_primary": {
+          "0.5": null,
+          "1.0": null,
+          "1.5": null
+        },
+        "frontier_match_note": "lever frontier never reaches distributed feasibility within swept range",
+        "phaseb_crossover_usd_secondary": {
+          "0.5": null,
+          "1.0": null,
+          "1.5": null
+        },
+        "phaseb_crossover_note": "no phaseB crossover available",
+        "gen_expansion_usd": {
+          "0.5": 72688326.41169703,
+          "1.0": 145376652.82339406,
+          "1.5": 218064979.2350911
+        },
+        "dc_invest_usd": {
+          "capex9M_land0.5": 8495563871.687672,
+          "capex9M_land1.0": 8495764426.482333,
+          "capex9M_land2.0": 8496165536.071656,
+          "capex12M_land0.5": 11327351643.98534,
+          "capex12M_land1.0": 11327552198.780003,
+          "capex12M_land2.0": 11327953308.369326,
+          "capex15M_land0.5": 14159139416.283012,
+          "capex15M_land1.0": 14159339971.077673,
+          "capex15M_land2.0": 14159741080.666996
+        }
+      }
+    }
+  }
+}

@@ -290,9 +290,10 @@ contingencies are outages *of the corridors already congested in base*, N-1-awar
 base-congestion-aware: full N-1 **does not reorder placements**, it reproduces the base-case
 siting story (same sign, "siting dominates spreading", gap grows with fleet). So this section's
 job is to *foreclose the obvious objection* — "your base-case relief is an artifact; under
-contingencies smart siting might be bad" — by showing the deliverable-GW siting thesis **survives
-under full, exact N-1**. It confirms the thesis under a stricter operating standard; it is not a
-fourth metric. (Making N-1 a distinct contribution would require a priced/standard N-1
+contingencies smart siting might be bad" — by showing the siting direction is preserved in the
+tested single-hour, B≤5, site-cap-0.5 N-1 regime. It does **not** cover the B=10 headline wall
+configuration and should be cited only as directional robustness, not as a stricter-standard
+confirmation of the headline. (Making N-1 a distinct contribution would require a priced/standard N-1
 deliverability metric AND a network whose contingency-binding corridors are not already
 base-congested — out of scope here.) The "~4%" wash-out of the old `dc_placement_scopf.py` was
 the corridor-limited grid, not the method.
@@ -357,6 +358,138 @@ clean nodes ranked):**
 Files: `development/dc_spread_frontier.py` (study), `plot_spread_frontier.py` (4-panel
 figures), `spread_frontier_power.py` (pilot-then-size). Base-case only; N-1 deferred.
 Also removed a stray per-dispatch debug `print()` in `zap/network.py`.
+
+## Drift-repair guardrails (2026-06-09)
+
+- **Frozen cleaning.** Citable reruns must use
+  `development/results/cleaning/bad_buses_490_load1p0_25.json` and report the
+  manifest path, the 25 bus IDs, `n_bad`, and the relevant cost assumptions.
+  The manifest was verified against the existing lever and congestion artifacts;
+  spread-frontier's old JSON did not record the actual list.
+- **Wall-statistic hierarchy.** The 24h seed-pinned Phase-B Part A artifact
+  (`phaseB_finish_partA_25bad_24h.json`, generated 2026-06-10, structural checks
+  PASSED) **is the headline**. The 12h seed-pinned artifact is a consistency check;
+  its brackets are 8-seed ranges, not confidence intervals (the 24h artifact
+  carries seed×pool bootstrap CIs). The 24-pool lever frontier
+  (`levers_full.json` / `levers_24h.json`) is the lever-frontier statistic
+  and must not be quoted as "the wall."
+- **Deliverable frontier vs spread frontier.** `dc_deliverable_frontier.py` answers
+  a different question from forced-uniform `g(k)`: it permits free continuous
+  allocation and therefore estimates a free-allocation hosting level. Under
+  free allocation, siting can look nearly insensitive near the hosting ceiling.
+  That does not undercut the spread-frontier mechanism; it clarifies it. Siting
+  and spreading matter in the paper because real fleets are lumpy, capped,
+  must-serve, and payer-constrained, not because the grid lacks aggregate hosting
+  capacity when allocation is free.
+  The accepted 12-hour, load×1.2 guardrail is now
+  `development/results/deliverable_frontier/deliverable_frontier_full.json`
+  (`n_bad=25`, `--skip-n1`): LP-optimal free allocation reaches 8.58 GW
+  (inference) and 6.72 GW (training) at large kappa, with only 6 alive nodes after
+  year-firm screening. The policy-order sanity check is intentionally not used as
+  a headline because cheap-land and grid-strength nearly tie or swap order at high
+  kappa under free allocation.
+- **N-1 deliverable-frontier rows are non-citable.** The script now has `--skip-n1`
+  and records `n1_citable: false`; the accepted guardrail encodes skipped rows as
+  `status: skipped_non_citable` with `gw: NaN`. Do not quote old N-1
+  deliverable-frontier rows.
+- **Onsite generation.** `development/results/placement_levers/colocated_opex.json`
+  is refreshed under the frozen 25-bad protocol. In the selected deep-wall 10 GW
+  concentrated case, 7.0 GW onsite gas clears all 12 kept hours, with $0.595B/yr
+  annualized capex and $2.064B/yr central fuel OpEx (OpEx/capex 3.47x). This is
+  the payer-axis result: the lever shifts cost from grid/ratepayer transmission
+  capital to private operator capex plus recurring fuel. The accepted B=10
+  canonical lever frontier (`placement_levers/levers_full.json`, 24 pools, 12
+  hours, `_partial: false`) confirms the onsite story in both workloads:
+  inference clears at ~8.0 GW onsite ($0.678B/yr capex-only lever accounting),
+  training at ~10.0 GW onsite ($0.848B/yr), while uniform transmission does not
+  fully clear either workload even at ~$80.0B/yr.
+- **Transmission crossover, accepted numbers.** In the B=10 lever frontier,
+  near-uniform transmission must spend about $35.8B/yr (inference) and $62.4B/yr
+  (training) to match the distributed fleet's feasibility; targeted transmission
+  improves dispersion but not feasibility. The seed-pinned Phase-B Part A uniform
+  crossover is less conservative: B=10 inference crosses at +100% / ~$20.0B/yr,
+  B=10 training at +200% / ~$40.0B/yr. Frontier-match is the primary cost convention;
+  crossover is secondary. Quote the source and axis.
+- **Legacy status.** `placement_robustness/phaseB_finish_full.json` is legacy
+  `n_bad=17`, not 25-bad. New Part A wall and uniform-tx crossover claims must
+  come from `phaseB_finish_partA_25bad_24h.json` after it is generated, with
+  `phaseB_finish_partA_25bad.json` retained only as the 12h consistency check;
+  old Parts B/C remain qualitative.
+  The accepted 25-bad Part A result is seed-separated for B=10 and B=6 in both
+  workloads. The canonical lever frontier currently carries the B=10 headline
+  fleet; do not cite B=3/B=6 lever curves from it unless those cells are rerun.
+  Old season robustness is under-documented because the JSON did not record
+  sampled window indices; reruns now record them.
+- **Deferred SHOULD robustness.** Exact bad-count `{17,25,30}`, shed-tolerance
+  sensitivity, solver cross-check, and refreshed spread-frontier provenance are
+  deferred from the full evidence repair pass unless explicit artifacts are added.
+
+## 24h evidence pass — accepted results (2026-06-10)
+
+All four 24h artifacts are generated, `_partial: false`, structural checks pass
+(`check_canonical_outputs.py`), frozen 25-bad manifest recorded in every file.
+**The 24h artifacts are now the headline sources** per the wall-statistic hierarchy.
+
+- **Wall (headline, `phaseB_finish_partA_25bad_24h.json`; 8 seeds × 24 pools × 24
+  snaps, panel indices recorded; brackets = seed×pool bootstrap CIs):**
+
+  | B (GW) | workload | concentrate | distribute | seed-separated |
+  |---:|---|---|---|---|
+  | 3 | inference | 0.705 [0.640, 0.769] | 0.896 [0.849, 0.938] | **No** |
+  | 3 | training | 0.590 [0.520, 0.658] | 0.859 [0.807, 0.906] | Yes |
+  | 6 | inference | 0.532 [0.464, 0.600] | 0.859 [0.807, 0.906] | Yes |
+  | 6 | training | 0.365 [0.299, 0.430] | 0.755 [0.693, 0.813] | Yes |
+  | 10 | inference | 0.350 [0.288, 0.413] | 0.748 [0.687, 0.806] | Yes |
+  | 10 | training | 0.206 [0.151, 0.263] | 0.648 [0.581, 0.714] | Yes |
+
+  B=10 matches the 12h pin (0.345/0.746; 0.207/0.646) almost exactly →
+  **panel-robust**. The B=3 cells complete the emergence story: at 3 GW
+  inference is NOT seed-separated (concentration still mostly deliverable),
+  while **training separates already at B=3** — workload shape moves the wall's
+  onset, sharpening "training is strictly worse."
+- **Crossover moved at 24h (quote carefully).** All crossing cells (B=6 both,
+  B=10 both) now cross at **+200% / ~$40.0B/yr**; the 12h B=10-inference
+  +100%/$20B cell no longer reaches distribution's bar with the doubled panel.
+  The crossover is a discrete-grid statistic and panel-sensitive between grid
+  cells; the frontier-match convention (primary) is stable: **$35.7B/yr
+  (inference) / $62.8B/yr (training)** in `levers_24h.json` vs $35.8B/$62.4B at
+  12h. Inference primary ($35.7B) now sits inside the $20–40B grid cell —
+  conventions are coherent. Never quote the old flat "$20B" for 24h results.
+- **Lever frontier panel-robust (`levers_24h.json`):** conc/dist feasibility
+  0.186/0.783 (inference), 0.083/0.724 (training) vs 0.188/0.781, 0.083/0.722 at
+  12h. Targeted tx and grid-side gen still never reach distribution; joint
+  gen+tx does not beat tx-alone; uniform tx at ~$80B/yr tops out ≈0.87/0.84.
+  Colocated full-clear: ~8 GW / $0.678B/yr (inference), ~10 GW / $0.848B/yr
+  (training) — same as 12h.
+- **Flexible-DC lever (NEW, `levers_24h.json flexible_dc`; curtailment penalty
+  just below base VOLL = physical-headroom semantics, `flex_voll` recorded):**
+  making a concentrated B=10 fleet partially curtailable raises firm
+  feasibility 0.186 → 0.201 / 0.248 / 0.347 at 5/10/20% flex (inference) and
+  0.083 → 0.083 / 0.083 / 0.170 (training). The curtailable slice is itself
+  served only ~31% of hours (inference, 20% flex). **Modest demand flexibility
+  does NOT clear the wall** — it is dominated by distribution (0.75–0.78 at $0
+  grid capital) and onsite generation (full clear). This forecloses the
+  "just make the DC flexible" objection with data.
+- **Onsite gas + carbon (`colocated_opex_24h.json`, all sanity checks held):**
+  7.0 GW gas clears all 24 hours (CF 0.935, 57.3 TWh/yr); capex $0.595B/yr,
+  fuel OpEx $2.007B/yr central (3.38×), **carbon at $50/tCO₂ adds $1.061B/yr →
+  fuel+carbon $3.068B/yr ≈ 5.2× capex** ($25/$50/$100 sensitivity recorded).
+  The payer-axis claim strengthens under any carbon price.
+- **Cost sensitivity (`cost_sensitivity_24h.json`):** frontier-match primary
+  (training B=10: $31.4/62.8/94.1B for line-cost ×0.5/1/1.5), Phase-B crossover
+  secondary ($20/40/60B); DC investment $8.5/11.3/14.2B/yr; all linear.
+- **Caveats carried forward:** (i) 7 monotonicity violations in the
+  LMP-dispersion *outcome* curves (GEN/TXU; worst: training uniform-tx d_disp
+  70.8 at +10% → 195.3 at +25%) — dispersion-vs-$ curves are noisy across pools
+  (price pockets); feasibility curves are unaffected. Present dispersion as a
+  mechanism signal with this noise acknowledged. (ii) `dc_placement_levers.py`
+  does not record panel window indices (only `n_snaps`/`rep_hour`) — patch
+  before the next citable lever run. (iii) The levers frontier figure is now
+  tagged (`levers_frontier_{tag}.png`) after the 24h run overwrote the untagged
+  canonical PNG; `levers_frontier_full.png` (12h) was regenerated from
+  `levers_full.json`. (iv) Paper figures `fig_lever/fig_lever_bar/
+  fig_colocated_opex` now render from 24h inputs; `*_12h.{png,pdf}` backups kept.
+  `fig_phaseb_wall.{png,pdf}` (the headline figure) renders from the 24h artifact.
 
 ## Files
 

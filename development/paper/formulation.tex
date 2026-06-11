@@ -1,0 +1,54 @@
+\section{Problem Formulation}
+\label{sec:problem}
+
+Let the transmission network contain a finite set of buses
+$\mathcal{N}$ and let $\mathcal{K}\subseteq\mathcal{N}$ denote the
+\emph{candidate} buses identified via the node-selection heuristic
+in Section~\ref{sec:node-selection}. The planner allocates a
+total capacity budget $C\;[\mathrm{MW}]$ across $K=|\mathcal{K}|$ sites.
+The continuous decision variables $\boldsymbol{\eta}\in\mathbb{R}_{+}^{K}$
+specify the nameplate IT capacity $\eta_k$ assigned to each site $k$.
+
+Data center power consumption depends on the application mix~\cite{patel2024llms}.
+We consider a set of \emph{workload scenarios} $\mathcal{S}$
+representing distinct operational profiles -- for example,
+inference-dominated deployments with diurnal demand patterns~\cite{dynamollm}
+versus training-dominated deployments with sustained high
+utilization and periodic synchronization transients~\cite{stabilization}.
+Each scenario $s \in \mathcal{S}$ is characterized by a
+normalized load-factor trace $\boldsymbol{\ell}_s \in [0,1]^T$
+over $T$ time periods; the power injected at site $k$
+under scenario $s$ is then
+$P_{k,s}(t) = \eta_k \cdot \ell_s(t)$.
+Section~\ref{sec:workload} details how these traces are generated.
+
+\noindent\textbf{Bilevel optimization model.} Following \citet{degleris2024gradient}, the \textit{upper level} of our planner minimizes
+investment cost plus expected operating cost:
+\begin{equation}
+\label{eq:upper}
+\min_{\boldsymbol{\eta}\ge 0}\;
+  \boldsymbol{\gamma}^{\!\top}\boldsymbol{\eta}
+  + \sum_{s\in\mathcal{S}} w_s\, h_s\bigl(x_s^\star(\boldsymbol{\eta})\bigr)
+\quad\text{s.t.}\;\;
+  \mathbf{1}^{\!\top}\boldsymbol{\eta}=C,
+\end{equation}
+where $\boldsymbol{\gamma}\in\mathbb{R}_{+}^{K}$ is the site-specific
+capital cost (Section~\ref{sec:investment-cost}), $w_s$ are
+scenario weights summing to one, and $h_s(\cdot)$ extracts
+total generation cost from the dispatch solution.
+
+Then, the \textit{lower level} of our model performs economic dispatch.
+Given our fixed $\boldsymbol{\eta}$, each scenario $s$ solves a
+network-constrained optimal power flow:
+\begin{equation}
+\label{eq:lower}
+x_s^\star(\boldsymbol{\eta})
+= \arg\min_{p,\theta}\;
+  \sum_{g \in \mathcal{G}} c_g(p_g)
+\end{equation}
+where $p_g$ is generation from unit $g$, $c_g$ is its cost curve,
+and $\theta$ are voltage angles determining line flows.
+Data center loads enter as fixed withdrawals at their assigned buses.
+The dispatch model, implemented via Zap~\citep{degleris2024gpu},
+is differentiable in $\boldsymbol{\eta}$, enabling gradient-based
+solution of~\eqref{eq:upper}.

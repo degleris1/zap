@@ -1,0 +1,159 @@
+% \section{Methods: Our Modular Approach}\label{sec:methods}
+\section{Methods}
+
+\subsection{Planning Pipeline Overview}
+\edit{GRANT TO MAKE FIGURE}
+
+Figure \ref{fig:pipeline_overview} shows the high level overview of determining an optimal data center capacity allocation within our framework. We leverage Zap, an open-source Python package for differentiable electricity systems modeling, to formulate and solve both the bilevel capacity expansion planning problem in (\ref{eq:dc_plan}) and the underlying dispatch model given in (\ref{eq:dc-opf-full}). A full Zap planning instance is specified given power network data, data center workload models, a set of candidate interconnection sites, and problem data ($\mathcal{E}$, $h$, $\gamma$).
+
+To generate the underlying power network data needed for a Zap instance, we use PyPSA-USA \cite{tehranchi5029120pypsa} to generate a realistic model of the U.S. Western Interconnection (WECC). PyPSA-USA provides an open-source modeling platform built on top of PyPSA that enables high spatial and temporal resolution modeling of generation, storage, and transmission infrastructure across the continental United States. We give a detailed description of our PyPSA network model in Section \ref{sec:pypsa_network}. We provide details for the candidate set construction and the workload models below. 
+
+\subsection{Cost Models}\label{sec:investment-cost}
+One of the primary variables to compare different levers against is cost. However, cost can be a complicated variable to reason about due to the different owners of assets and time scales over which acquisition takes place. For simplicity, we treat all costs as annualized over 20 years with a 7\% discount rate, meaning that all costs are represented as annual investment and not total nameplate costs. Investment 
+
+\noindent\textbf{Datacenter build-out cost.} For each candidate bus $k \in \mathcal{K}$ we 
+assign a power-normalized site cost $\gamma_k$ (\$/MW) that enters the upper-level objective in
+Equation~\eqref{eq:upper}. Reported hyperscale datacenter development costs
+(often expressed per MW of critical IT load) commonly fall in the range
+\$9--15M/MW~\cite{CushWakeCostGuide_2025}, with variation due to 
+environmental variables, electrical design, cooling requirements, and other
+choices~\cite{stojkovic2025rearchitectingdatacenterlifecycleai}.
+To mitigate this variance, we model site cost as a fixed construction 
+baseline plus a location-specific land term:
+\begin{equation}\label{eqn:investment-cost}
+    \gamma_k = \Gamma_{\text{build}} + A_{\text{MW}} \cdot P^{\text{land}}_k.
+\end{equation}
+We set $\Gamma_{\text{build}} = \$12$M/MW (median of the above range), and
+compute $P^{\text{land}}_k$ by mapping each bus's FIPS county code to an
+estimated land value surface~\cite{land-cost}. To relate land area to 
+provisioned capacity, we use recommended hyperscaler site and power sizes to 
+set $A_{\text{MW}} = 0.25$ acres per MW. We then show 
+robustness as a sensitivity parameter \cite{stream_landowners_2025}.
+
+\noindent\textbf{Transmission expansion cost.}\edit{ADD TRANSMISSION COSTS} When enabling transmission expansion, we allow a subset of
+lines to be added with their corresponding investment costs to the
+planning objective. We use the PyPSA-USA default annualized transmission expansion costs which are parameterized as a function of length and MW capacity
+and are derived from NREL ReEDS transmission cost assumptions~\cite{nrel-reeds, tehranchi5029120pypsa}. 
+Following prior work using the same dataset, we take expansion costs directly 
+from the dataset and scale capital costs to the simulated horizon~\cite{degleris2024gradient}.
+
+\noindent\textbf{Generator upgrade cost.} \edit{ADD GENERATOR ASSUMPTIONS}
+
+\noindent\textbf{Dispatch cost.} \edit{ADD DISPATCH COSTS} As previously discussed, Zap solves the dispatch problem based on the planned PyPSA devices. Dispatch cost is the cost of operating the grid by supplying generation to all loads over the course of the simulated day 
+
+
+
+\subsection{Candidate Set Construction}
+\edit{GRANT WRITE THIS}
+
+* Start with a realistic candidate list (not “any bus”)
+  * proxy constraints: land, zoning, proximity to infrastructure, etc.
+* Heuristics we already use:
+  * generation-rich / existing-load ranking
+  * cheapest land nodes, etc.
+* Why it matters:
+  * avoids curious placements that win out because of missing constraints
+* Firmly state that many such candidates exist and we limit to some for DC operator operational simplicity
+  * further, we are pinning land cost and value to the FIPS code from PyPSA for the transmission bus
+  * not indicative of an actual site, but instead just where the interconnect would be
+  * land price from (2020) work and is a fuzzy estimator for site value
+  * assuming some other ~0.56MW/Acre (Cushman Wakefield), 1.3x inflation adjuster (Fed), and \$12.5M/MW (Cushman Wakefield)
+
+\subsection{Workload Scenario Modeling}\label{sec:workload}
+\edit{GRANT REFINE THIS}
+Our framework evaluates how adding a large load at bus $k$ alters both operating outcomes
+(dispatch cost, congestion, and LMPs) and siting decisions. To do so, we represent each
+workload scenario $s \in \mathcal{S}$ as a normalized demand profile $\ell_s(t)\in[0,1]$ over the study
+horizon $t=1,\dots,T$ (every 15 mins). The decision variable $x_k$ denotes the
+provisioned \emph{utility/interconnect} capacity (MW) at bus $k$, and the realized demand injected
+into the dispatch model is
+\begin{equation*}
+p_{k,s}(t) = x_k \, \ell_s(t).
+\end{equation*}
+This construction allows a single set of shape traces $\{\ell_s(t)\}$ to be scaled to alternative
+provisioned capacities and compared on equal footing.
+
+
+Existing transmission planning practice often emphasizes a small set of snapshot conditions
+(e.g., peak and off-peak cases). Recent reliability guidance cautions that the operational behavior of
+emerging large loads can induce risks outside of traditional peak/off-peak scenarios and recommends
+that planners modify study assumptions and analyze a diversity of loading patterns~\cite{nerc2025largeloads, nerc2026}.
+Therefore, we evaluate multiple workload shapes rather than a single peak-only
+assumption.
+
+We do not assume a single canonical ``AI'' load shape. Instead, to bound 
+uncertainty and test how temporal characteristics interact with network 
+constraints, we construct a small scenario set of (i) diurnal interactive 
+profiles (representative of user-facing services, including inference-heavy 
+front-ends), (ii) high-utilization sustained profiles (representative of long-
+running, tightly coupled compute jobs), and (iii) ramp/step stress cases that 
+capture rapid startup events or abrupt load loss as observed in HPC 
+clusters~\cite{bates2015, shin2021revealing, patki2025global}. 
+The goal is not to predict any operator’s exact utilization, but to demonstrate 
+that plausible differences in temporal load shape can change which buses are 
+attractive under the upper-level siting objective, as well as the downstream 
+dispatch and LMP impacts under the same provisioned capacity.
+
+\subsection{Solution Methods}
+
+Solving Problem (\ref{eq:bilevel_problem}) requires choosing design variables $\eta$ (e.g. the allocation of interconnection capacity across candidate buses) subject to the convex constraints $\eta \in \mathcal{E}$. For any fixed choice of $\eta$, the system operations are given by solving the convex dispatch problem specified in Problem (\ref{eq:dc-opf-full}). The solution map of this problem is denoted by $z^{\star}(\eta)$. We denote the planning objective as 
+
+\begin{equation}
+    J(\eta) \;=\; \gamma^\top \eta \;+\; h\!\left(z^\star(\eta)\right),
+    \label{eq:planning_objective_compact}
+\end{equation}
+where $\gamma^\top \eta$ captures linear investment costs and $h(\cdot)$ measures operational impacts of interest.
+
+Although $h(z^\star(\eta))$ is defined implicitly through an optimization problem, the map $\eta \mapsto z^\star(\eta)$ is differentiable under standard regularity assumptions for convex programs. 
+
+Consequently, $J(\eta)$ is differentiable, and minimizing~\eqref{eq:planning_objective_compact} reduces to a smooth optimization problem over a convex set. We therefore use \emph{projected gradient descent}, which iterates
+\begin{equation}
+\eta^{(i+1)} \;=\; \proj_{\mathcal{E}}\!\left(\eta^{(i)} - s \nabla J(\eta^{(i)})\right),
+\label{eq:pgd_compact}
+\end{equation}
+with step size $s>0$.
+
+Each gradient evaluation $\nabla J(\eta^{(i)})$ is computed by \emph{implicit differentiation} through the dispatch optimum. We solve the dispatch problem at $\eta^{(i)}$, then differentiate its KKT optimality conditions to obtain the sensitivity of $z^\star(\eta)$ to $\eta$. Zap provides an interface to to specify and solve planning problems via projected gradient descent. We refer the reader to \cite{degleris2024gradient} for the full derivation, convergence guarantees, and implementation details. 
+
+% We give a brief overview of the gradient based methods used in Zap to solve the bilevel problems in (\ref{eq:bilevel_problem}) and (\ref{eq:dc_plan}). 
+
+% Zap solves the bilevel Problems in (\ref{eq:dc_plan}) and (\ref{eq:dc_plan}) using gradient based methods. 
+
+% Because we are able to differentiate through the solution map of the dispatch problem given in (\ref{eq:dc-opf-full}), we can compute the gradient of objective in (\ref{eq:dc_plan}) with respect to the capacities $\eta$. Thus, we leverage projected gradient descent to converge to a local solution of (\ref{eq:dc_plan}). More formally, we have 
+
+
+
+
+% \subsubsection{Planning Objectives}
+
+% We consider planning objectives of the following form. Formally, we follow \cite{degleris2024gradient} in specifying the bilevel optimization planning problem:
+
+% \begin{equation}
+% \begin{aligned}
+%           \min_{\eta\ge0}\;\gamma^\top \eta + \sum_s w_s\,h_s\bigl(x_s^*(\eta)\bigr)
+%           \quad\text{s.t.}\;\sum_i \eta_i = C
+% \end{aligned}
+% \label{eq:bilevel_problem}
+% \end{equation}
+
+% where \( \eta \in \mathbb{R}^K \) are the design variables representing data center capacities, \( \gamma \in \mathbb{R}^K \) defines the linear investment costs associated with the network capacities (this term captures the capital expenditure of expansion), and \( w_s \in \mathbb{R}_{++} \) are the scenario weights, which sum to one across all scenarios. The functions \( h_s : \mathbb{R}^N \to \mathbb{R} \) are the planner's operational objectives. While there are a multitude of different plausible planning objectives from the operational side, we consider minimizing the overall dispatch cost of the system. \(x_s^*(\eta)\) is the dispatch solution under data center addition \(\eta\). We additionally enforce the constraint that the total allocation of data center capacity must respect a capacity budget $C$.
+
+% \subsection{Dispatch Model}
+
+% The lower level optimization problem in the bilevel optimization framework is the following dispatch problem. We require that the solution map to the dispatch be differentiable with respect to the data center capacities. The dispatch problem is given by:
+
+%     \begin{equation} \label{eq:dc-opf-full}
+% \begin{array}{llr}
+%     \text{minimize} \quad 
+%     & \sum_d c_d(p_d, v_d; z_{d}) \quad\\
+%     \text{subject to} \quad 
+%     & \sum_d A_d p_d = 0,
+%         \quad\quad & (\lambda) \\
+%     & A_d^T v_d = u, \quad d = 1, \ldots, D& (\omega_d)
+% \end{array}
+% \end{equation}
+% where $c_{d}$ represents the cost function of a device $d$ in the network, $p_{d}$ are the associated power flows, and $v_{d}$ are the phase angles. $\lambda$ and $\omega_{d}$ are the associated dual variables. Because we are able to differentiate through this problem, we can solve the Eq. \ref{eq:bilevel_problem} by running projected gradient descent, where we project onto the simplex to respect the allocation budget constraint. For more details, the reader is referred to \cite{ degleris2024gpu}.
+
+
+
+

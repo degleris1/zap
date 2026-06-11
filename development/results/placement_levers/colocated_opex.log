@@ -1,0 +1,55 @@
+INFO:pypsa.io:Imported network elec_s490_c490.nc has buses, carriers, generators, lines, links, loads, storage_units
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+# CO-LOCATED GAS OPEX (DC-operator private cost)  network=elec_s490_c490.nc
+# load x1.2  bad buses 25  clean nodes 465  n_snaps 12
+# COST ASSUMPTIONS: on-site gas CAPEX $84,954/MW-yr ($900/kW overnight x CRF 0.0944); OpEx GAS_MARGINAL_USD_PER_MWH = $35/MWh (HR ~7.5 MMBtu/MWh x $4/MMBtu + $5 VOM); OpEx sensitivity (30.0, 35.0, 50.0) $/MWh
+# pool wall-depth scan (infeasible candidate hours / 24): {0: 21, 1: 24, 2: 0, 3: 24} -> picked deepest-wall seed 1 (24/24 infeasible)
+# CONCENTRATED fleet B=10 GW at 10 buses [193, 420, 65, 419, 112, 146, 357, 138, 208, 21]
+# kept 12/24 most-congested candidate hours (idx [0, 380, 761, 1142, 1523, 1904, 2284, 2665, 3046, 3427, 3808, 4189]); bare-fleet must-serve feasible in 0/12 kept hours (0/24 across all candidates)
+# on-site gas to clear the wall: 7.0 GW (search lattice 0.5 GW)
+
+=== DC-OPERATOR PRIVATE COST (on-site gas) ===
+  on-site gas CAPACITY      : 7.00 GW (7,000 MW)  [~ the un-deliverable DC; fleet 10 GW, mean DC draw 7.12 GW]
+  on-site gas mean dispatch : 6.73 GW  (capacity factor 0.96  -> runs near-continuously to backfill the deficit)
+  annual generation         : 58.96 TWh/yr  (58,958,712 MWh/yr = mean power x 8760)
+  CAPEX (private)           : $0.595 B/yr  (= 7,000 MW x $84,954/MW-yr)
+  OPEX  (private, recurring): $2.064 B/yr @ $35/MWh central
+          OpEx @ $30/MWh    : $1.769 B/yr
+          OpEx @ $35/MWh    : $2.064 B/yr
+          OpEx @ $50/MWh    : $2.948 B/yr
+  OPEX / CAPEX              : 3.47x  (OPEX DOMINATES (recurring fuel >> annualized capex))
+
+=== GRID / RATEPAYER comparison (SEPARATE payer -- never summed) ===
+  transmission (uniform), grid/ratepayer capex: $80.03 B/yr for only PARTIAL relief (feas -> 0.87, wall NOT cleared)
+  -> on-site gas is the DC OPERATOR's PRIVATE cost; transmission is the GRID's. They are different payers and are reported on different axes.
+
+=== SMOKE SANITY ===
+  all panel hours feasible with gas : True
+  gas capacity ~ the deficit         : True  (gas 7.0 GW vs fleet 10 GW, mean draw 7.12 GW)
+  OpEx dominates CAPEX               : True  (ratio 3.47x)
+  SANITY HELD                        : True
+
+saved -> development/results/placement_levers/colocated_opex.json

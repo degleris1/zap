@@ -1,0 +1,52 @@
+# PyPSA-USA config OVERRIDE for a higher-resolution, 2025-weather-year western network.
+# Snakemake deep-merges this over config.default.yaml / config.common.yaml, so only the
+# changed keys are needed. Place at:  pypsa-usa/workflow/config/config.yaml
+# (or pass via:  snakemake --configfile config/config.western_2025_highres.yaml ...)
+#
+# WHY each change:
+#  - renewable.dataset: atlite   -> GODEEEP is historical-only and lacks 2025; atlite builds
+#                                   renewable profiles from an ERA5 cutout we generate ourselves.
+#  - enable.build_cutout: true   -> the 2025 ERA5 cutout is NOT on Zenodo (only 2019-2023), so
+#                                   atlite must build it locally (needs a Copernicus CDS API key).
+#  - atlite.cutouts.era5_2025    -> build_cutout.py parses `era5_2025` as module=era5, year=2025.
+#  - scenario.clusters/simpl     -> higher spatial resolution (490 -> 1000; try 2000 if you want).
+
+run:
+  name: "western_2025_s1000"
+
+renewable:
+  dataset: atlite
+
+scenario:
+  interconnect: [western]
+  clusters: [1000]      # final node count (TAMU western max = 4919; 1000 is fine)
+  simpl: [1000]         # pre-cluster simplification; match clusters (mirrors elec_s490_c490)
+  opts: [REM-3h]
+  ll: [v1.0]
+
+# --- transmission topology ---
+# The repo default is the ReEDS NARIS network, whose western zonal min is only 34 nodes,
+# so it CANNOT cluster to 1000. The TAMU synthetic nodal network supports an arbitrary
+# cluster count between its min and max (western max = 4919), which is what high-res needs.
+model_topology:
+  transmission_network: 'tamu'
+  topological_boundaries: 'county'
+
+# --- weather / demand year = 2025 ---
+renewable_weather_years: [2025]
+snapshots:
+  start: "2025-01-01"
+  end: "2026-01-01"
+  inclusive: "left"
+
+enable:
+  build_cutout: true    # build the 2025 cutout locally (CDS API key required)
+
+atlite:
+  default_cutout: era5_2025
+  nprocesses: 8
+  cutouts:
+    era5_2025:
+      module: era5
+      time: ['2025', '2025']
+  # western bounds + grid spacing come from config.common.yaml (x:[-126,-99], y:[27,50], dx:0.3)

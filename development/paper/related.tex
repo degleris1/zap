@@ -1,0 +1,20 @@
+\section{Related Works}
+
+\noindent\textbf{Geographic load balancing.}
+Since the onset of cloud-based computing, geographic load balancing has been proposed as a way to balance compute across multiple regions towards lowering electricity prices and carbon intensity~\cite{qureshi2009cutting,liu2015greening}.
+Within this GLB framing, work incorporates intermittency by coupling load shifting with renewable generation, storage, and backup-grid usage~\cite{liu2011geoloadbalance,goiri2011greenslot,berral2014buildinggreencloud}.
+More broadly, “green cloud” control planes combine request routing, VM migration, admission control, and storage-aware scheduling to improve renewable utilization or reduce cost/carbon emissions~\cite{zhang2011greenware,radovanovic2023carbonaware, johnson2025signalawareworkloadshiftingalgorithms}.
+
+\noindent\textbf{Grid-aware datacenter siting and placement.}
+A smaller set of work directly couples datacenter siting decisions to power-system feasibility, moving beyond site-local signals to include transmission-network effects.
+These models capture how placement choices interact with congestion, losses, and operational constraints (e.g., line overload and voltage violations)~\cite{goiri2011intelligentplacement,wang2015griddcwind}.
+By embedding grid physics into the placement objective and constraints, this line motivates treating datacenters as grid-sited assets whose system-level impacts depend on \emph{where} capacity is added, not just on total demand.
+
+\noindent\textbf{Datacenters for demand response.}
+Complementary work studies datacenters as controllable demand capable of providing flexibility through policy-driven load modulation, workload shifting, and local generation/storage~\cite{irwin2011continuousdr,liu2013coincidentpeak}.
+This literature primarily targets \emph{operational} coupling (minutes to hours), characterizing which forms of datacenter flexibility are practical, what signals they can respond to, and how these choices interact with utility cost structures and grid stress.
+
+\noindent\textbf{Capacity Expansion Modeling Tools}
+Grid-aware planning relies on optimization frameworks to explore new situations under uncertainty.
+PyPSA and PyPSA-USA enable network-constrained, multi-period studies with renewables and storage~\cite{PyPSA,tehranchi5029120pypsa}, while capacity-expansion platforms such as SWITCH, Calliope, and oemof support multi-decade planning with high renewable penetration~\cite{nelson2012switch,johnston2019switch2,pfenninger2018calliope,hilpert2018oemof}.
+Bilevel and expansion-planning formulations are well established in power systems~\cite{baringo2011wind}. Gradient-based methods can maker multi-scenario expansion planning scalable to larger problem sizes~\cite{degleris2024gradient,degleris2024gpu}.

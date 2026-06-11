@@ -1,0 +1,115 @@
+
+\documentclass[sigconf, anonymous]{acmart}
+%%
+%% \BibTeX command to typeset BibTeX logo in the docs
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    Bib\TeX}}}
+\let\Bbbk\relax
+\usepackage{threeparttable}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{subcaption}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{colortbl}
+\usepackage{xcolor}
+
+\setcopyright{acmlicensed}
+\copyrightyear{2026}
+\acmYear{2026}
+\acmDOI{XXXXXXX.XXXXXXX}
+%% These commands are for a PROCEEDINGS abstract or paper.
+\acmConference[e-Energy'26]{17th ACM International Conference on Future and Sustainable Energy Systems}{June 22--25,
+  2026}{Banff, CN}
+
+%% Added macros
+\newcommand{\minimize}{\text{minimize}}
+\newcommand{\subjectto}{\text{subject to}}
+\newcommand{\edit}[1]{{\color{red}#1}} 
+\newcommand{\proj}{\mathbf{proj}}
+
+\begin{document}
+\title{On the Grid: Differentiable }
+
+% \author{Grant Wilkins}
+% \authornotemark[1]
+% \email{gfw@stanford.edu}
+% \affiliation{%
+%   \institution{Stanford University}
+%   \city{Stanford}
+%   \state{CA}
+%   \country{USA}
+% }
+
+% \author{Akshay Sreekumar}
+% \authornote{Both authors contributed equally to this research.}
+% \email{akshay81@stanford.edu}
+% \affiliation{%
+%   \institution{Stanford University}
+%   \city{Stanford}
+%   \state{CA}
+%   \country{USA}
+% }
+
+% \author{Fiodar Kazahmiaka}
+% \email{fkazhamiaka@microsoft.com}
+% \affiliation{%
+%   \institution{Microsoft, Inc.}
+%   \city{Redmond}
+%   \state{WA}
+%   \country{USA}
+% }
+
+% \author{Ram Rajagopal}
+% \email{ramr@stanford.edu}
+% \affiliation{%
+%   \institution{Stanford University}
+%   \city{Stanford}
+%   \state{CA}
+%   \country{USA}
+% }
+
+\renewcommand{\shortauthors}{Anonymous et al.}
+
+\begin{abstract}
+
+The rapid expansion of AI computing infrastructure has led to datacenter interconnection requests at an unprecedented rate, with individual campuses now proposed at the many gigawatt scale. These large loads can cause congestion, raising locational marginal prices (LMPs) and systemwide operating costs; effects that can be socialized to other regional consumers.
+
+We develop a framework for stress-testing large-load placement decisions that couples datacenter capacity allocation with network-constrained dispatch. We treat distributed siting as a load-side lever to manage congestion, in contrast to typical grid-side levers such as transmission and generation expansion. Using a bilevel optimization formulation that minimizes dispatch costs and LMPs, we evaluate how optimally distributing capacity across candidate buses affects datacenter capital expenditure, grid upgrades, and congestion. We apply the framework to a 101-bus representation of the U.S. Western Interconnection from PyPSA-USA under load injections ranging from hundreds of megawatts to multiple gigawatts, with varied workload-characteristic profiles.
+
+Our results reveal sensitivities in placement, as adding capacity with certain load profiles at specific locations can trigger sharp LMP increases once critical transmission constraints bind. Distributing load across multiple sites reduces peak LMP impacts by over 42.6\% compared to single-site injection at equivalent capacity. Combining distributed placement with grid-side levers enables deploying 1 GW more datacenter capacity before the same constraints bind. Finally, differences in workload profiles -- e.g., training vs. inference -- can materially alter optimal placements, motivating scenario-based stress testing as a necessary planning tool.
+\end{abstract}
+
+\keywords{Grid, Computing}
+\maketitle
+
+\input{intro}
+
+\input{motivation}
+
+\input{problem-setting}
+
+% \input{formulation}
+
+\input{methods}
+
+\input{experiment}
+
+\input{results}
+
+% \input{planning-workloads}
+
+\input{related}
+
+\input{conclusion}
+
+% \section*{Acknowledgment}
+
+\bibliographystyle{ACM-Reference-Format.bst}
+\bibliography{sample-base}
+
+\end{document}

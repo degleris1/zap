@@ -1,0 +1,39 @@
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.11`.
+INFO:pypsa.io:Imported network elec_s490_c490.nc has buses, carriers, generators, lines, links, loads, storage_units
+/Users/grantwilkins/zap/.venv/lib/python3.11/site-packages/cvxpy/problems/problem.py:1504: UserWarning: Solution may be inaccurate. Try another solver, adjusting the solver settings, or solve with verbose=True for more information.
+  warnings.warn(
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+# PHASE-B FINISH  load x1.2  bad 25  clean 465  seeds 8 pools 24  usd_line 8.76e+08
+
+## PART A -- seed-pinned wall + uniform-line crossover
+   B= 3.0 inference: conc 0.71[0.60,0.84] dist 0.90[0.79,0.96] sep=False | uniform-line reaches dist at uniform-line curve skipped for this non-crossover fleet
+   B= 3.0 training : conc 0.59[0.39,0.71] dist 0.86[0.75,0.92] sep=True | uniform-line reaches dist at uniform-line curve skipped for this non-crossover fleet
+   B= 6.0 inference: conc 0.53[0.46,0.64] dist 0.86[0.75,0.92] sep=True | uniform-line reaches dist at x=2.0 ($40B)
+   B= 6.0 training : conc 0.37[0.26,0.61] dist 0.76[0.67,0.88] sep=True | uniform-line reaches dist at x=2.0 ($40B)
+   B=10.0 inference: conc 0.35[0.19,0.60] dist 0.75[0.66,0.87] sep=True | uniform-line reaches dist at x=2.0 ($40B)
+   B=10.0 training : conc 0.21[0.08,0.45] dist 0.65[0.55,0.73] sep=True | uniform-line reaches dist at x=2.0 ($40B)
+
+saved -> development/results/placement_robustness/phaseB_finish_partA_25bad_24h.json

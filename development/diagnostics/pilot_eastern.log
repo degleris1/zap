@@ -1,0 +1,26 @@
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.11`.
+INFO:pypsa.io:Imported network eastern_elec_s3000_c3000.nc has buses, carriers, generators, lines, links, loads, storage_units
+[load] 145.9s | buses 3000 | AC lines 1721 | links 10 | gens 8389 | loads 2994 | storage 203 | snapshots 8760 [(2025, Timestamp('2025-01-01 00:00:00')) .. (2025, Timestamp('2025-12-31 23:00:00'))]
+[hours] peak/median/p90-load snapshots: ["(2025, Timestamp('2025-04-19 18:00:00'))", "(2025, Timestamp('2025-05-25 07:00:00'))", "(2025, Timestamp('2025-07-07 20:00:00'))"]
+[load]  raw total load: peak 539.9 GW, mean 327.9 GW
+Dropping empty generators.
+[build] one-hour zap network in 1.2s | devices: ['Generator', 'Load', 'DCLine', 'ACLine', 'Battery']
+[units] gen marginal cost: 0.0 .. 3818.0 $/MWh (median 13.4) -- expect ~0-100, NOT 0-10000
+[units] total load 321.2 GW | available gen 770.6 GW | reserve margin 140% (peak hour)
+Dropping empty generators.
+[dispatch] (2025, Timestamp('2025-04-19 18:00:00')) x1.0 |    0.3s | feas True | LMP med     49.8 p95   1851.8 disp   1851.8 $/MWh | binding   21 | max_u 1.00 | shed 39.27%
+Dropping empty generators.
+[dispatch] (2025, Timestamp('2025-05-25 07:00:00')) x1.0 |    0.3s | feas True | LMP med     60.3 p95   2004.8 disp   1995.1 $/MWh | binding   16 | max_u 1.00 | shed 40.84%
+Dropping empty generators.
+[dispatch] (2025, Timestamp('2025-07-07 20:00:00')) x1.0 |    0.2s | feas True | LMP med     83.7 p95   1789.0 disp   1760.5 $/MWh | binding   21 | max_u 1.00 | shed 44.85%
+Dropping empty generators.
+[dispatch] (2025, Timestamp('2025-04-19 18:00:00')) x1.2 |    0.3s | feas True | LMP med     60.0 p95   1871.8 disp   1871.8 $/MWh | binding   23 | max_u 1.00 | shed 40.87%
+Dropping empty generators.
+[dispatch] (2025, Timestamp('2025-05-25 07:00:00')) x1.2 |    0.3s | feas True | LMP med     67.7 p95   2001.6 disp   1988.2 $/MWh | binding   18 | max_u 1.00 | shed 41.96%
+Dropping empty generators.
+[dispatch] (2025, Timestamp('2025-07-07 20:00:00')) x1.2 |    0.3s | feas True | LMP med    205.7 p95   1752.4 disp   1720.4 $/MWh | binding   24 | max_u 1.00 | shed 46.42%
+
+[verdict] median binding lines 21 | median LMP dispersion 1861.8 $/MWh | mean dispatch 0.3s
+[verdict] copperplate risk: low (genuine congestion)
+[verdict] full wall replication (8 seeds x 24 pools x 24 snaps x 3 fleets) ~ 1h at this dispatch speed (reduced 4x12 pin ~ 0h)
+[penetration] B equivalent to WECC-490's 10 GW: 40.9 GW (this net 321 GW vs WECC 79 GW peak)

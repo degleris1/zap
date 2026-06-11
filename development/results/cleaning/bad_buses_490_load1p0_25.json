@@ -1,0 +1,42 @@
+{
+  "description": "Canonical pathological-bus cleaning manifest for corrected 490-node DC-placement runs. Verified identical between development/results/placement_levers/levers_full.json and development/results/placement_congestion/congestion_results.json before freezing. development/results/spread_frontier/spread_frontier_full.json reports n_bad=25 but does not record the bus list, so it is not a source for this manifest.",
+  "network": "elec_s490_c490.nc",
+  "detection_regime": {
+    "load_scale": 1.0,
+    "generator_scale": 1.0,
+    "line_scale": 1.0,
+    "method": "development.dc_placement_study.find_bad_buses"
+  },
+  "bad_buses": [
+    76,
+    104,
+    107,
+    125,
+    137,
+    150,
+    151,
+    155,
+    156,
+    160,
+    161,
+    166,
+    398,
+    407,
+    408,
+    425,
+    427,
+    430,
+    441,
+    447,
+    448,
+    450,
+    477,
+    482,
+    486
+  ],
+  "source_checks": {
+    "placement_levers/levers_full.json": "matches",
+    "placement_congestion/congestion_results.json": "matches",
+    "spread_frontier/spread_frontier_full.json": "n_bad=25 only; bus list absent"
+  }
+}

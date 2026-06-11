@@ -1,0 +1,127 @@
+warning: No `requires-python` value found in the workspace. Defaulting to `>=3.11`.
+INFO:pypsa.io:Imported network elec_s490_c490.nc has buses, carriers, generators, lines, links, loads, storage_units
+/Users/grantwilkins/zap/.venv/lib/python3.11/site-packages/cvxpy/problems/problem.py:1504: UserWarning: Solution may be inaccurate. Try another solver, adjusting the solver settings, or solve with verbose=True for more information.
+  warnings.warn(
+/Users/grantwilkins/zap/.venv/lib/python3.11/site-packages/cvxpy/problems/problem.py:1504: UserWarning: Solution may be inaccurate. Try another solver, adjusting the solver settings, or solve with verbose=True for more information.
+  warnings.warn(
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+# DC PLACEMENT LEVERS (fair sum_u^2 frontier)  network=elec_s490_c490.nc
+# load x1.2  bad buses 25 (fixed at x1.0)  clean nodes 465
+# fleets [10.0] GW  eps_line [0.02, 0.05, 0.1, 0.2]  eps_gen [0.025, 0.05, 0.1]  n_pools 24
+# representative congested hour = panel[16] (23 binding lines)  binding counts=[19, 21, 21, 19, 18, 20, 21, 19, 20, 20, 20, 18, 17, 20, 21, 22, 23, 22, 18, 18, 21, 18, 21, 21]
+# engine = shadow_greedy  |  $/internal  line=8.76e+08 (calibrated=True)  gen=8.76e+08 (calibrated=True)
+# CO-LOCATED gen cost: $900/kW overnight x CRF 0.0944 = $85.0/kW-yr ($84,954/MW-yr); equivalent internal capital_cost 9.698e-05 (in-place-gen units)
+
+## WORKLOAD=inference  base(no DC) LMP-disp $233
+
+   --- fleet B=10 GW ---
+      [TX] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $  124.5 feas 0.19[0.06,0.34]
+      [TX] eps=0.020 inv=$     0.3M exp=  24 relax=0.74 Ddisp $  109.7 feas 0.19[0.06,0.35]
+      [TX] eps=0.050 inv=$     0.6M exp=  24 relax=0.74 Ddisp $  106.2 feas 0.19[0.05,0.35]
+      [TX] eps=0.100 inv=$     1.2M exp=  24 relax=0.74 Ddisp $  101.8 feas 0.19[0.06,0.34]
+      [TX] eps=0.200 inv=$     2.4M exp=  24 relax=0.74 Ddisp $   95.0 feas 0.19[0.06,0.36]
+      [GEN] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $  124.5 feas 0.19[0.06,0.35]
+      [GEN] eps=0.025 inv=$   169.2M exp= 162 relax=0.74 Ddisp $  122.2 feas 0.19[0.05,0.35]
+      [GEN] eps=0.050 inv=$   338.3M exp= 164 relax=0.74 Ddisp $  110.4 feas 0.19[0.06,0.35]
+      [GEN] eps=0.100 inv=$   676.8M exp= 162 relax=0.74 Ddisp $  113.5 feas 0.19[0.06,0.35]
+      [TXU] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $  124.5 feas 0.19[0.05,0.34]
+      [TXU] eps=0.100 inv=$  2000.8M exp=1250 relax=0.00 Ddisp $   95.5 feas 0.22[0.08,0.39]
+      [TXU] eps=0.250 inv=$  5002.0M exp=1250 relax=0.00 Ddisp $   99.1 feas 0.32[0.16,0.51]
+      [TXU] eps=0.500 inv=$ 10004.0M exp=1250 relax=0.00 Ddisp $   59.3 feas 0.35[0.17,0.54]
+      [TXU] eps=1.000 inv=$ 20008.0M exp=1250 relax=0.00 Ddisp $   91.6 feas 0.50[0.31,0.69]
+      [TXU] eps=2.000 inv=$ 40015.9M exp=1250 relax=0.00 Ddisp $   47.1 feas 0.86[0.73,0.98]
+      [TXU] eps=4.000 inv=$ 80031.8M exp=1250 relax=0.00 Ddisp $   46.0 feas 0.87[0.74,0.99]
+      [DIST+TX] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $   44.7 feas 0.78[0.62,0.92]
+      [DIST+TX] eps=0.020 inv=$     0.2M exp=  23 relax=0.18 Ddisp $   44.7 feas 0.78[0.62,0.92]
+      [DIST+TX] eps=0.050 inv=$     0.6M exp=  23 relax=0.18 Ddisp $   44.6 feas 0.78[0.62,0.94]
+      [DIST+TX] eps=0.100 inv=$     1.2M exp=  23 relax=0.18 Ddisp $   44.6 feas 0.78[0.62,0.94]
+      [DIST+TX] eps=0.200 inv=$     2.3M exp=  24 relax=0.18 Ddisp $   44.0 feas 0.78[0.61,0.94]
+      [COLO] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $  124.5 feas 0.19[0.06,0.35]
+      [COLO] eps=2.000 inv=$   169.9M exp=  10 relax=0.00 Ddisp $   44.9 feas 0.38[0.21,0.54]
+      [COLO] eps=4.000 inv=$   339.8M exp=  10 relax=0.00 Ddisp $   22.4 feas 0.70[0.55,0.85]
+      [COLO] eps=6.000 inv=$   509.7M exp=  10 relax=0.00 Ddisp $    0.0 feas 0.89[0.74,1.00]
+      [COLO] eps=8.000 inv=$   679.6M exp=  10 relax=0.00 Ddisp $   -4.7 feas 1.00[1.00,1.00]
+      [COLO] eps=10.000 inv=$   849.5M exp=  10 relax=0.00 Ddisp $  -15.0 feas 1.00[1.00,1.00]
+      [JOINT] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $  124.5 feas 0.19[0.06,0.34]
+      [JOINT] eps=0.050 inv=$   338.1M exp= 186 relax=0.83 Ddisp $  106.4 feas 0.19[0.05,0.35]
+      [JOINT] eps=0.100 inv=$   665.8M exp= 186 relax=0.83 Ddisp $  104.4 feas 0.19[0.06,0.35]
+      [JOINT] eps=0.200 inv=$  1307.1M exp= 185 relax=0.83 Ddisp $   94.9 feas 0.19[0.06,0.35]
+      [FLEX] frac=0.00 firm-feas 0.19[0.06,0.35] served-flex 1.00 Ddisp $  124.5
+      [FLEX] frac=0.05 firm-feas 0.20[0.07,0.36] served-flex 0.19 Ddisp $  104.7
+      [FLEX] frac=0.10 firm-feas 0.25[0.10,0.41] served-flex 0.22 Ddisp $  106.5
+      [FLEX] frac=0.20 firm-feas 0.35[0.18,0.54] served-flex 0.31 Ddisp $  109.6
+      [DC-dist] grid-$0  m 10->40 | dist feas 0.78[0.62,0.92] vs conc feas 0.19[0.06,0.34] SIG | relief Ddisp $79.8 | DC build $11328M/yr
+      [MATCH] distribution feas 0.78 @ grid-$0 (conc 0.19) | UNIFORM-tx $ to clear wall: $35654M | targeted-tx: n/a (never reaches) | gen: n/a (never reaches)
+      [WALL]  CO-LOCATED gen full-clear (feas->1.0): 8.0 GW on-site = $678M/yr | max feas 1.00 @ 10GW ($850M/yr) | UNIFORM-tx full-clear n/a (never reaches)
+      [JOINT] gen+tx max feas 0.19 ($1307M/yr)  vs  tx-alone max feas 0.87 ($80032M/yr) -> does NOT beat tx-alone
+
+## WORKLOAD=training  base(no DC) LMP-disp $233
+
+   --- fleet B=10 GW ---
+      [TX] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $  213.6 feas 0.08[0.00,0.21]
+      [TX] eps=0.020 inv=$     0.2M exp=  23 relax=0.82 Ddisp $  196.3 feas 0.08[0.00,0.21]
+      [TX] eps=0.050 inv=$     0.6M exp=  23 relax=0.82 Ddisp $  181.8 feas 0.08[0.00,0.21]
+      [TX] eps=0.100 inv=$     1.2M exp=  23 relax=0.82 Ddisp $   87.1 feas 0.08[0.00,0.21]
+      [TX] eps=0.200 inv=$     2.3M exp=  23 relax=0.82 Ddisp $   81.4 feas 0.08[0.00,0.21]
+      [GEN] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $  213.6 feas 0.08[0.00,0.21]
+      [GEN] eps=0.025 inv=$   164.7M exp= 160 relax=0.82 Ddisp $  213.6 feas 0.08[0.00,0.21]
+      [GEN] eps=0.050 inv=$   329.4M exp= 160 relax=0.82 Ddisp $  216.8 feas 0.08[0.00,0.21]
+      [GEN] eps=0.100 inv=$   658.7M exp= 159 relax=0.82 Ddisp $  223.8 feas 0.08[0.00,0.21]
+      [TXU] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $  213.6 feas 0.08[0.00,0.21]
+      [TXU] eps=0.100 inv=$  2000.8M exp=1250 relax=0.00 Ddisp $   70.8 feas 0.08[0.00,0.21]
+      [TXU] eps=0.250 inv=$  5002.0M exp=1250 relax=0.00 Ddisp $  195.3 feas 0.17[0.04,0.33]
+      [TXU] eps=0.500 inv=$ 10004.0M exp=1250 relax=0.00 Ddisp $  154.7 feas 0.27[0.11,0.45]
+      [TXU] eps=1.000 inv=$ 20008.0M exp=1250 relax=0.00 Ddisp $   90.3 feas 0.33[0.17,0.54]
+      [TXU] eps=2.000 inv=$ 40015.9M exp=1250 relax=0.00 Ddisp $   99.9 feas 0.58[0.38,0.78]
+      [TXU] eps=4.000 inv=$ 80031.8M exp=1250 relax=0.00 Ddisp $   68.2 feas 0.83[0.67,0.96]
+      [DIST+TX] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $   59.3 feas 0.72[0.54,0.89]
+      [DIST+TX] eps=0.020 inv=$     0.2M exp=  23 relax=0.22 Ddisp $   57.9 feas 0.72[0.54,0.89]
+      [DIST+TX] eps=0.050 inv=$     0.6M exp=  23 relax=0.22 Ddisp $   56.7 feas 0.72[0.54,0.89]
+      [DIST+TX] eps=0.100 inv=$     1.2M exp=  23 relax=0.22 Ddisp $   56.9 feas 0.72[0.54,0.88]
+      [DIST+TX] eps=0.200 inv=$     2.3M exp=  24 relax=0.22 Ddisp $   57.1 feas 0.72[0.54,0.88]
+      [COLO] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $  213.6 feas 0.08[0.00,0.21]
+      [COLO] eps=2.000 inv=$   169.9M exp=  10 relax=0.00 Ddisp $   97.8 feas 0.17[0.04,0.34]
+      [COLO] eps=4.000 inv=$   339.8M exp=  10 relax=0.00 Ddisp $   41.3 feas 0.38[0.17,0.58]
+      [COLO] eps=6.000 inv=$   509.7M exp=  10 relax=0.00 Ddisp $   14.7 feas 0.67[0.48,0.83]
+      [COLO] eps=8.000 inv=$   679.6M exp=  10 relax=0.00 Ddisp $    0.1 feas 0.88[0.75,1.00]
+      [COLO] eps=10.000 inv=$   849.5M exp=  10 relax=0.00 Ddisp $   -5.8 feas 1.00[1.00,1.00]
+      [JOINT] eps=0.000 inv=$     0.0M exp=   0 relax=0.00 Ddisp $  213.6 feas 0.08[0.00,0.21]
+      [JOINT] eps=0.050 inv=$   330.3M exp= 188 relax=0.92 Ddisp $  181.8 feas 0.08[0.00,0.21]
+      [JOINT] eps=0.100 inv=$   660.5M exp= 183 relax=0.92 Ddisp $   89.1 feas 0.08[0.00,0.21]
+      [JOINT] eps=0.200 inv=$  1319.5M exp= 187 relax=0.92 Ddisp $   85.5 feas 0.08[0.00,0.21]
+      [FLEX] frac=0.00 firm-feas 0.08[0.00,0.21] served-flex 1.00 Ddisp $  213.6
+      [FLEX] frac=0.05 firm-feas 0.08[0.00,0.21] served-flex 0.08 Ddisp $  132.0
+      [FLEX] frac=0.10 firm-feas 0.08[0.00,0.21] served-flex 0.08 Ddisp $   91.4
+      [FLEX] frac=0.20 firm-feas 0.17[0.04,0.34] served-flex 0.15 Ddisp $  188.6
+      [DC-dist] grid-$0  m 10->40 | dist feas 0.72[0.54,0.89] vs conc feas 0.08[0.00,0.21] SIG | relief Ddisp $154.3 | DC build $11328M/yr
+      [MATCH] distribution feas 0.72 @ grid-$0 (conc 0.08) | UNIFORM-tx $ to clear wall: $62765M | targeted-tx: n/a (never reaches) | gen: n/a (never reaches)
+      [WALL]  CO-LOCATED gen full-clear (feas->1.0): 10.0 GW on-site = $848M/yr | max feas 1.00 @ 10GW ($850M/yr) | UNIFORM-tx full-clear n/a (never reaches)
+      [JOINT] gen+tx max feas 0.08 ($1319M/yr)  vs  tx-alone max feas 0.83 ($80032M/yr) -> does NOT beat tx-alone
+
+# WARNING: 7 monotonicity violation(s) logged
+
+saved -> development/results/placement_levers/levers_24h.json
+saved -> development/results/placement_levers/levers_frontier.png

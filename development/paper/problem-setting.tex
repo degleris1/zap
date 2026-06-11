@@ -1,0 +1,113 @@
+\section{Problem Setting}
+
+\subsection{Bilevel Capacity Expansion Planning}
+Following \cite{degleris2024gradient}, we specify the general bilevel expansion planning problem as
+\begin{equation}
+\begin{aligned}
+\minimize\quad & \gamma^\top \eta + h(z^{\star}\left(\eta)\right) \\
+\subjectto\quad & \eta \in \mathcal{E},
+\end{aligned}
+\label{eq:bilevel_problem}
+\end{equation}
+where $\eta \in \mathbb{R}^K$ are the design variables representing capacities of power system components and $\gamma \in \mathbb{R}^K$ defines the linear investment costs associated with expanding those capacities. The function $h: \mathbb{R}^N \to \mathbb{R}$ represents the planner's operational objective. The set $\mathcal{E}$ denotes the constraints on the expansion plan, which in our case are typically box or budget constraints on $\eta$.
+
+The term $z^{\star}(\eta)$ denotes the \emph{solution map} of the dispatch problem, giving the optimal primal and dual variables expressed as a function of the expansion plan. Formally, we define $z^{\star}(\eta) = (p^{\star}, v^{\star}, \lambda^{\star}, \omega^{\star}, \mu^{\star})$, comprising power injections $p$, phase angles $v$, and dual variables $\lambda$, $\omega$, and $\mu$ associated with the dispatch constraints. We now describe the dispatch problem.
+
+\subsection{Dispatch Model}
+The lower level optimization problem in the bilevel framework is the dispatch problem, formulated as DC Optimal Power Flow (DC-OPF). We require that the solution map $z^{\star}(\eta)$ be differentiable with respect to the data center capacities. The dispatch problem is given by:
+\begin{equation} \label{eq:dc-opf-full}
+\begin{array}{llr}
+    \text{minimize} \quad 
+    & \sum_d c_d(p_d, v_d; \theta_{d}) \quad\\
+    \text{subject to} \quad 
+    & \sum_d A_d p_d = 0,
+        \quad\quad & (\lambda) \\
+    & A_d^T v_d = u, \quad d = 1, \ldots, D & (\omega_d)
+\end{array}
+\end{equation}
+where $c_{d}$ represents the cost function of device $d$ in the network, $p_{d}$ are the associated power injections, and $v_{d}$ are the phase angles. The parameters $\theta_d$ capture device-specific data such as capacity limits and marginal costs. The dual variables $\lambda$ and $\omega_{d}$ correspond to the power balance and device coupling constraints, respectively.
+
+Additional operational constraints, such as transmission line flow limits, are encoded implicitly within the device cost functions $c_d$. For example, a transmission line's cost function includes indicator terms that enforce flow limits, with associated dual variables $\mu_\ell^+$ and $\mu_\ell^-$. Similarly, generator capacity bounds enter through the generator cost functions. This device-oriented formulation, implemented in Zap \cite{degleris2024gpu}, maintains differentiability of the solution map while capturing standard network constraints. For further details, the reader is referred to \cite{degleris2024gpu}.
+
+\subsection{Base Problem Formulation}
+In this work, we consider several different instances and variants of Problem \ref{eq:bilevel_problem} to understand how different siting decisions and mitigation levers interact. 
+
+In the base data center planning experiment, we allocate a fixed data center interconnect capacity across a set of candidate buses. We assume that these candidate buses are a fixed subset of all the buses in the network, and that they have been selected based on multiple criteria such as land cost, regulatory concerns, and logistics. Given this, we ignore the linear investment cost term in our base planning experiment, choosing to calculate it after the fact. This reflects limitations in planning flexibility where we know data centers must sit at one of a few proposed sites (already screened for cost), and we are interested in choosing from among the best of these possible options. We solve
+
+\begin{equation}
+\begin{aligned}
+\minimize\quad &  h_{\text{LMP}}(z^{\star}\left(\eta)\right) \\
+\subjectto\quad & \eta \in \mathcal{E}_{\text{DC}},
+\label{eq:dc_plan}
+\end{aligned}
+\end{equation}
+
+where $\eta \in \mathbb{R}^K$ now represents the data center capacity allocated across each of $K$ candidate locations, and $h_{\text{LMP}}$ is an objective related to the LMPs in the system. More formally, we have
+
+\begin{equation}
+\begin{aligned}
+h_{\text{LMP}}(\Lambda)
+&=
+\beta \sum_{t=1}^{T}\frac{1}{\alpha}\log\!\left(\sum_{i=1}^{N}\exp\!\left(\alpha\,\Lambda_{i,t}\right)\right),
+\end{aligned}
+\label{eq:h_lmp}
+\end{equation}
+
+where $\Lambda \in \mathbb{R}^{N \times T}$ is the matrix of nodal LMPs across the $N$ buses in the system for a time horizon of $T$ steps. The function $h_{\text{LMP}}$ is a sum of the smooth maximums of the system LMPs, with $\alpha \in \mathbb{R}$ controlling the smoothness of the approximation, and $\beta$ acting as a scaling factor to control the magnitude of the objective. 
+
+In the base experiment, we define the constraint set as
+
+\begin{equation}
+\begin{aligned}
+\mathcal{E}_{\text{DC}}
+\;:=\;
+\Bigl\{
+\eta \in \mathbb{R}^{K}
+\;\Big|\;
+\underline{\eta} \le \eta \le \overline{\eta},\;
+\mathbf{1}^\top \eta = B
+\Bigr\}.
+\end{aligned}
+\end{equation}
+
+where $\underline{\eta}$ and $\overline{\eta}$ represent lower and upper bounds on data center capacity at a site, while $B$ is the total amount of allocated data center capacity. We note that solving Problem \ref{eq:dc_plan} gives us an expansion plan for data center capacities optimized to control the effects of pricing peaks in the system. Problem \ref{eq:dc_plan} also permits a wide design space, with variables such as the number of sites $K$, the total budget $B$, and the box constraints $(\underline{\eta}, \overline{\eta})$ allowing us to model different scenarios and optimal allocations. 
+
+We also utilize the form of Problem \ref{eq:bilevel_problem} to plan transmission and generation expansion as mitigation levers. For these, we solve
+
+\begin{equation}
+\begin{aligned}
+\minimize\quad & \gamma^{\top}\eta + h_{\text{dispatch}}(z^{\star}\left(\eta)\right) \\
+\subjectto\quad & \eta \in \mathcal{E},
+\label{eq:grid_expansion}
+\end{aligned}
+\end{equation}
+
+where $h_{\text{dispatch}}(z^{\star}(\eta))$ returns the dispatch cost (i.e., the objective of Problem \ref{eq:dc-opf-full}) and $\gamma^{\top}\eta$ reflects the investment cost of expanding transmission or generation. The constraint sets for transmission and generation are
+
+\begin{equation}
+\begin{aligned}
+\mathcal{E}_{\text{trans}}
+\;:=\;
+\Bigl\{
+\eta \in \mathbb{R}^{L}
+\;\Big|\;
+\eta^{0}_{\text{L}} \le \eta \le \overline{\eta}_{\text{L}}
+\Bigr\},
+\end{aligned}
+\end{equation}
+
+\begin{equation}
+\begin{aligned}
+\mathcal{E}_{\text{gen}}
+\;:=\;
+\Bigl\{
+\eta \in \mathbb{R}^{G}
+\;\Big|\;
+\eta^{0}_{\text{G}} \le \eta \le \overline{\eta}_{\text{G}}
+\Bigr\},
+\end{aligned}
+\end{equation}
+
+where $L$ is the number of transmission lines and $G$ is the number of generators. The lower bounds $\eta^{0}_{\text{L}}$ and $\eta^{0}_{\text{G}}$ represent existing capacity, reflecting that we are expanding (not retiring) infrastructure. The upper bounds are parameterized by expansion factors $\epsilon_{\text{L}}$ and $\epsilon_{\text{G}}$ relative to existing capacity, i.e., $\overline{\eta}_{\text{L}} = (1 + \epsilon_{\text{L}}) \cdot \eta^{0}_{\text{L}}$ and $\overline{\eta}_{\text{G}} = (1 + \epsilon_{\text{G}}) \cdot \eta^{0}_{\text{G}}$.
+
+We note that the expansion planning objectives are \emph{different} for data center expansion versus conventional transmission and generation expansion. Transmission and generation expansions are system upgrades, possibly triggered by large load interconnection, where the operator's objective is to benefit the system by minimizing investment and dispatch cost. Data center capacity is not a system upgrade, and so our objective instead mitigates negative externalities (i.e., price spikes) associated with the interconnection.

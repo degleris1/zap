@@ -1,0 +1,92 @@
+## DC DELIVERABLE FRONTIER (tag=full) load_scale=1.2 kappa=[0.5, 1.0, 2.0, 4.0, 8.0]
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+Dropping empty generators.
+   network: 490 nodes, 25 pathological, 465 clean, 12h panel
+
+-- workload=inference
+   baseline non-DC shed: total=31.576 GW over 12h
+   headroom progress: 1/465 candidates
+   headroom progress: 25/465 candidates
+   headroom progress: 50/465 candidates
+   headroom progress: 75/465 candidates
+   headroom progress: 100/465 candidates
+   headroom progress: 125/465 candidates
+   headroom progress: 150/465 candidates
+   headroom progress: 175/465 candidates
+   headroom progress: 200/465 candidates
+   headroom progress: 225/465 candidates
+   headroom progress: 250/465 candidates
+   headroom progress: 275/465 candidates
+   headroom progress: 300/465 candidates
+   headroom progress: 325/465 candidates
+   headroom progress: 350/465 candidates
+   headroom progress: 375/465 candidates
+   headroom progress: 400/465 candidates
+   headroom progress: 425/465 candidates
+   headroom progress: 450/465 candidates
+   headroom progress: 465/465 candidates
+   year-firm headroom computed for 465 candidates; excluded 459 dead buses (h_firm < 0.1 GW), 6 alive
+   policy weights from hour 5: 20 binding corridors; LMP range [-4.1, 6.14e-08]
+   N-1 deliverable rows skipped (non-citable guardrail run)
+   kappa= 0.50  LP=  3.00/  6s  N1=   nan/  0s  GS=  3.00/  6s  CL=  3.00/  6s  CP=  3.00/  6s  PT=  3.00/  6s  max_dn=0.50
+   kappa= 1.00  LP=  6.00/  6s  N1=   nan/  0s  GS=  6.00/  6s  CL=  6.00/  6s  CP=  6.00/  6s  PT=  6.00/  6s  max_dn=1.00
+   kappa= 2.00  LP=  8.01/  6s  N1=   nan/  0s  GS=  7.61/  5s  CL=  6.61/  5s  CP=  6.64/  4s  PT=  7.27/  5s  max_dn=2.00
+   kappa= 4.00  LP=  8.58/  4s  N1=   nan/  0s  GS=  7.87/  3s  CL=  7.91/  4s  CP=  5.37/  4s  PT=  8.18/  4s  max_dn=3.20
+   kappa= 8.00  LP=  8.58/  4s  N1=   nan/  0s  GS=  7.86/  3s  CL=  7.93/  4s  CP=  5.37/  4s  PT=  8.17/  4s  max_dn=3.20
+
+   SANITY CHECKS:
+     [PASS] lp_gw_nondecreasing
+     [PASS] lp_sites_nonincreasing
+     [FAIL] ordering_lp>=gs>=cl
+     [PASS] all_positive
+     [PASS] multi_dc_per_node
+
+-- workload=training
+   baseline non-DC shed: total=31.576 GW over 12h
+   headroom progress: 1/465 candidates
+   headroom progress: 25/465 candidates
+   headroom progress: 50/465 candidates
+   headroom progress: 75/465 candidates
+   headroom progress: 100/465 candidates
+   headroom progress: 125/465 candidates
+   headroom progress: 150/465 candidates
+   headroom progress: 175/465 candidates
+   headroom progress: 200/465 candidates
+   headroom progress: 225/465 candidates
+   headroom progress: 250/465 candidates
+   headroom progress: 275/465 candidates
+   headroom progress: 300/465 candidates
+   headroom progress: 325/465 candidates
+   headroom progress: 350/465 candidates
+   headroom progress: 375/465 candidates
+   headroom progress: 400/465 candidates
+   headroom progress: 425/465 candidates
+   headroom progress: 450/465 candidates
+   headroom progress: 465/465 candidates
+   year-firm headroom computed for 465 candidates; excluded 459 dead buses (h_firm < 0.1 GW), 6 alive
+   policy weights from hour 0: 18 binding corridors; LMP range [-0.123, 0.104]
+   N-1 deliverable rows skipped (non-citable guardrail run)
+   kappa= 0.50  LP=  3.00/  6s  N1=   nan/  0s  GS=  3.00/  6s  CL=  3.00/  6s  CP=  3.00/  6s  PT=  3.00/  6s  max_dn=0.50
+   kappa= 1.00  LP=  5.85/  6s  N1=   nan/  0s  GS=  5.83/  6s  CL=  5.31/  6s  CP=  5.85/  6s  PT=  5.85/  6s  max_dn=1.00
+   kappa= 2.00  LP=  6.57/  5s  N1=   nan/  0s  GS=  6.12/  4s  CL=  5.54/  5s  CP=  6.37/  4s  PT=  6.35/  4s  max_dn=2.00
+   kappa= 4.00  LP=  6.72/  4s  N1=   nan/  0s  GS=  6.14/  3s  CL=  6.23/  4s  CP=  6.36/  4s  PT=  6.33/  4s  max_dn=2.45
+   kappa= 8.00  LP=  6.72/  4s  N1=   nan/  0s  GS=  6.14/  3s  CL=  6.23/  4s  CP=  6.36/  4s  PT=  6.33/  4s  max_dn=2.45
+
+   SANITY CHECKS:
+     [PASS] lp_gw_nondecreasing
+     [PASS] lp_sites_nonincreasing
+     [FAIL] ordering_lp>=gs>=cl
+     [PASS] all_positive
+     [PASS] multi_dc_per_node
+
+saved -> development/results/deliverable_frontier/deliverable_frontier_full.json

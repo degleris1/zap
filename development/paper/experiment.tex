@@ -1,0 +1,10 @@
+\section{Experimental Setup}
+
+\subsection{PyPSA Network and Calibration}
+\label{sec:pypsa_network}
+
+We use a model of the U.S. Western Interconnection from the historical year 2023 constructed using PyPSA-USA~\cite{tehranchi5029120pypsa} to run all of our experiments. Detailed generator, demand, and transmission representation is clustered to 101 terminals, 488 generators, 251 AC Lines, 3 HVDC links, 101 loads, and 52 batteries. The temporal resolution of the dataset is one hour. For our experiments, we consider the 24 hour time window for the day of 8/16/23 upsampled to a resolution of 15 minutes to better capture the granularity of the workload profiles. The dataset includes generator fuel costs, infrastructure capital costs, and maximum allowable renewable expansion limits. It also provides a realistic network model with line susceptances and capacity limits. Battery locations are included along with their corresponding energy and power parameters. 
+
+We scale up all loads by $27\%$ and all generator capacities by $24\%$ to empirically match more recent capacity numbers in WECC \cite{eia or wecc or something}. We additionally scale down all transmission capacities by $30\%$ to simulate retirements and account for constrained network conditions under typical maintenance and new load addition.  
+
+ 

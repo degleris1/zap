@@ -1,0 +1,310 @@
+{
+  "load_scale": 1.2,
+  "n_snaps": 1,
+  "site_cap": 0.5,
+  "budgets": [
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0
+  ],
+  "kappas": [
+    3.0,
+    1.0,
+    0.5,
+    0.25,
+    0.1
+  ],
+  "footprints": [
+    5,
+    10,
+    20,
+    40
+  ],
+  "eps_lodf": 0.06,
+  "workloads": {
+    "inference": {
+      "n_candidates": 20,
+      "n_pairs": 24155,
+      "overload_no_dc": 12.939472368018592,
+      "site_cap": 0.5,
+      "budget_sweep": [
+        {
+          "B": 1.0,
+          "added_aware": -0.161,
+          "added_uniform": 0.281,
+          "added_concentrated": -0.268,
+          "sites_aware": 3,
+          "secs": 3.6
+        },
+        {
+          "B": 2.0,
+          "added_aware": -0.161,
+          "added_uniform": 0.575,
+          "added_concentrated": -0.27,
+          "sites_aware": 5,
+          "secs": 3.5
+        },
+        {
+          "B": 3.0,
+          "added_aware": -0.161,
+          "added_uniform": 0.928,
+          "added_concentrated": -0.27,
+          "sites_aware": 7,
+          "secs": 3.9
+        },
+        {
+          "B": 4.0,
+          "added_aware": -0.161,
+          "added_uniform": 1.318,
+          "added_concentrated": -0.27,
+          "sites_aware": 8,
+          "secs": 3.9
+        },
+        {
+          "B": 5.0,
+          "added_aware": -0.101,
+          "added_uniform": 1.76,
+          "added_concentrated": -0.267,
+          "sites_aware": 11,
+          "secs": 4.0
+        }
+      ],
+      "spread_sweep": [
+        {
+          "kappa": 3.0,
+          "added": -0.283,
+          "sites": 3
+        },
+        {
+          "kappa": 1.0,
+          "added": -0.275,
+          "sites": 4
+        },
+        {
+          "kappa": 0.5,
+          "added": -0.161,
+          "sites": 7
+        },
+        {
+          "kappa": 0.25,
+          "added": 0.018,
+          "sites": 12
+        },
+        {
+          "kappa": 0.1,
+          "added": null,
+          "sites": 0
+        }
+      ],
+      "siting_orderings": {
+        "5": {
+          "grid_strength": -0.188,
+          "cheap_land": 0.717,
+          "random": 0.62
+        },
+        "10": {
+          "grid_strength": -0.066,
+          "cheap_land": 0.582,
+          "random": 0.586
+        },
+        "20": {
+          "grid_strength": 0.928,
+          "cheap_land": 0.928,
+          "random": 0.928
+        },
+        "40": {
+          "grid_strength": 0.425,
+          "cheap_land": 0.425,
+          "random": 0.425
+        }
+      },
+      "node_n1_marginal": {
+        "0": 0.2367799562695101,
+        "24": 0.2356983827226724,
+        "48": 0.04867431148300483,
+        "72": 0.02873073856295072,
+        "96": -0.07889326326522372,
+        "120": 0.1251981126123951,
+        "145": 0.19348946740331385,
+        "175": 0.0001256284586812484,
+        "199": 0.03175452037145021,
+        "223": 0.0,
+        "247": 0.0,
+        "271": 0.0,
+        "295": -6.116328785310543e-05,
+        "319": -5.321941178237921e-05,
+        "343": 0.0,
+        "367": 0.23287592344844477,
+        "391": 0.25520838163202697,
+        "415": 0.0584334951011396,
+        "440": 0.036813466787643634,
+        "465": -0.004716593459145102
+      },
+      "candidates": [
+        0,
+        24,
+        48,
+        72,
+        96,
+        120,
+        145,
+        175,
+        199,
+        223,
+        247,
+        271,
+        295,
+        319,
+        343,
+        367,
+        391,
+        415,
+        440,
+        465
+      ]
+    },
+    "training": {
+      "n_candidates": 20,
+      "n_pairs": 24155,
+      "overload_no_dc": 12.939472368018592,
+      "site_cap": 0.5,
+      "budget_sweep": [
+        {
+          "B": 1.0,
+          "added_aware": -0.196,
+          "added_uniform": 0.354,
+          "added_concentrated": -0.27,
+          "sites_aware": 3,
+          "secs": 4.6
+        },
+        {
+          "B": 2.0,
+          "added_aware": -0.196,
+          "added_uniform": 0.747,
+          "added_concentrated": -0.27,
+          "sites_aware": 5,
+          "secs": 4.8
+        },
+        {
+          "B": 3.0,
+          "added_aware": -0.196,
+          "added_uniform": 1.224,
+          "added_concentrated": -0.27,
+          "sites_aware": 7,
+          "secs": 3.7
+        },
+        {
+          "B": 4.0,
+          "added_aware": -0.195,
+          "added_uniform": 1.767,
+          "added_concentrated": -0.266,
+          "sites_aware": 9,
+          "secs": 3.9
+        },
+        {
+          "B": 5.0,
+          "added_aware": -0.12,
+          "added_uniform": 2.389,
+          "added_concentrated": 0.347,
+          "sites_aware": 11,
+          "secs": 3.8
+        }
+      ],
+      "spread_sweep": [
+        {
+          "kappa": 3.0,
+          "added": -0.283,
+          "sites": 4
+        },
+        {
+          "kappa": 1.0,
+          "added": -0.283,
+          "sites": 4
+        },
+        {
+          "kappa": 0.5,
+          "added": -0.196,
+          "sites": 7
+        },
+        {
+          "kappa": 0.25,
+          "added": 0.024,
+          "sites": 12
+        },
+        {
+          "kappa": 0.1,
+          "added": null,
+          "sites": 0
+        }
+      ],
+      "siting_orderings": {
+        "5": {
+          "grid_strength": -0.225,
+          "cheap_land": 0.974,
+          "random": 0.891
+        },
+        "10": {
+          "grid_strength": -0.081,
+          "cheap_land": 0.809,
+          "random": 0.802
+        },
+        "20": {
+          "grid_strength": 1.224,
+          "cheap_land": 1.224,
+          "random": 1.224
+        },
+        "40": {
+          "grid_strength": 0.537,
+          "cheap_land": 0.537,
+          "random": 0.537
+        }
+      },
+      "node_n1_marginal": {
+        "0": 0.29875788824685046,
+        "24": 0.29747301927342384,
+        "48": 0.061093441055788844,
+        "72": 0.03605151500952708,
+        "96": -0.09890017424301334,
+        "120": 0.15849636290407254,
+        "145": 0.2446313135122189,
+        "175": 0.00015845505670064597,
+        "199": 0.039838479770159196,
+        "223": -1.0570264663556372e-09,
+        "247": 0.0,
+        "271": 0.0,
+        "295": -7.5770101041428e-05,
+        "319": -6.571410408184875e-05,
+        "343": -1.0570264663556372e-09,
+        "367": 0.29403215681302264,
+        "391": 0.32159951549935784,
+        "415": 0.07558294761984286,
+        "440": 0.04786232651857247,
+        "465": -0.005908807726576981
+      },
+      "candidates": [
+        0,
+        24,
+        48,
+        72,
+        96,
+        120,
+        145,
+        175,
+        199,
+        223,
+        247,
+        271,
+        295,
+        319,
+        343,
+        367,
+        391,
+        415,
+        440,
+        465
+      ]
+    }
+  }
+}
