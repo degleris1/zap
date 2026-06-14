@@ -67,7 +67,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dc_spread_frontier import build_panels  # noqa: E402
 from dc_placement_integrated import WORKLOADS  # noqa: E402
 from n1_hosting import HostingCapacityProblem  # noqa: E402
-from dc_placement_study import load_land_weights, dispatch, POWER_UNIT, COST_UNIT  # noqa: E402
+from dc_placement_study import load_land_weights, dispatch, dev_index, POWER_UNIT, COST_UNIT  # noqa: E402
 from dc_cleaning import DEFAULT_BAD_BUSES_JSON, cleaning_metadata  # noqa: E402
 
 # HiGHS-via-scipy: clean LP duals + fast. Used for the (small) N-1-aware optimizer.
@@ -305,11 +305,12 @@ def extra_orderings(panel, alive, hour, util_thresh=0.9):
     oc = dispatch(net, devs, 1)  # no-DC base dispatch
     lmp_all = np.asarray(oc.prices).ravel()
 
-    ac = devs[3]
+    ai = dev_index(devs, "ACLine")  # NOT a fixed index: ERCOT has no DCLine, so ACLine shifts
+    ac = devs[ai]
     A = build_signed_incidence(ac, n_nodes)
     b = branch_susceptance(ac)
     ptdf = build_ptdf(A, b)  # L x N
-    f = np.asarray(oc.power[3][1]).ravel()
+    f = np.asarray(oc.power[ai][1]).ravel()
     fbar = np.maximum(thermal_limits(ac).ravel(), 1e-9)
     binding = (np.abs(f) / fbar) > util_thresh
     if binding.sum() == 0:  # fall back to the most-loaded decile if nothing hits thresh
@@ -324,7 +325,7 @@ def extra_orderings(panel, alive, hour, util_thresh=0.9):
 # --------------------------------------------------------------------------- #
 # per-workload study over the kappa grid
 # --------------------------------------------------------------------------- #
-def run_workload(panel, clean, weights, args):
+def run_workload(panel, clean, weights, args, on_row=None):
     t0 = time.time()
     # candidate set: clean nodes, subsampled by cand-stride for tractability.
     cand = [int(n) for n in clean]
@@ -433,6 +434,9 @@ def run_workload(panel, clean, weights, args):
               f"N1={n1_gw:6.2f}/{n1_sites:3d}s  GS={gs_gw:6.2f}/{gs_sites:3d}s  "
               f"CL={cl_gw:6.2f}/{cl_sites:3d}s  CP={cp_gw:6.2f}/{cp_sites:3d}s  "
               f"PT={pt_gw:6.2f}/{pt_sites:3d}s  max_dn={max_dn:.2f}", flush=True)
+        out["seconds"] = round(time.time() - t0, 1)
+        if on_row is not None:  # incremental: flush after each kappa to survive timeout/preempt
+            on_row(out)
 
     out["seconds"] = round(time.time() - t0, 1)
     return out
@@ -524,15 +528,20 @@ def main():
            "n1_note": "N-1 rows are non-citable diagnostics and are skipped in canonical runs"
                       if args.skip_n1 else "N-1 rows are non-citable diagnostics",
            "workloads": {}}
+    path = os.path.join(args.outdir, f"deliverable_frontier_{args.tag}.json")
     for w in args.workloads:
         print(f"\n-- workload={w}", flush=True)
-        r = run_workload(panels[w], clean, land, args)  # land used as cheap-order key
+
+        def _flush(partial, w=w):  # per-kappa incremental save: a timeout keeps finished kappas
+            out["workloads"][w] = partial
+            json.dump(out, open(path, "w"), indent=2, default=float)
+
+        r = run_workload(panels[w], clean, land, args, on_row=_flush)  # land = cheap-order key
         if "error" not in r:
             sanity_checks(r)
         out["workloads"][w] = r
-
-    path = os.path.join(args.outdir, f"deliverable_frontier_{args.tag}.json")
-    json.dump(out, open(path, "w"), indent=2, default=float)
+        json.dump(out, open(path, "w"), indent=2, default=float)  # incremental: survive timeout/preempt
+        print(f"   saved (incremental, {len(out['workloads'])} workload(s)) -> {path}", flush=True)
     print(f"\nsaved -> {path}")
 
 

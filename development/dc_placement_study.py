@@ -256,7 +256,13 @@ def summarize_all(ms):
 # land is cheap, drawn at random -- so we report the DISTRIBUTION of grid impact
 # over many realistic layouts, not one hand-built (degenerate) optimum.
 def load_land_weights(path, n_nodes):
-    """Per-location siting weight ~ 1/land_cost (cheap land -> more data centers)."""
+    """Per-location siting weight ~ 1/land_cost (cheap land -> more data centers).
+    If `path` is falsy, return UNIFORM weights (no land data) so the siting arm is
+    honestly uniform rather than silently median-filled -- the old 490 CSV indexes
+    nodes 0..489 and would median-fill every node on a different-sized network."""
+    if not path:
+        ones = np.ones(n_nodes)
+        return ones, ones
     import pandas as pd
     df = pd.read_csv(path).set_index("node")["land_usd_per_acre"]
     land = np.array([float(df.get(i, df.median())) for i in range(n_nodes)])
@@ -272,6 +278,33 @@ def screen_usable(panel, nodes, probe):
         ms = panel_eval(panel, [nd], [probe])
         if all(m["feasible"] for m in ms):
             usable.append(nd)
+    return usable
+
+
+def _load_or_screen_usable(args, panel, nodes, probe):
+    """screen_usable with an on-disk cache. The screen is deterministic in
+    (network, panel config, probe) and is re-paid by every study/seed, so cache it
+    once (precedent: results/placement_grid_opt/usable_nodes.json)."""
+    path = getattr(args, "usable_json", None)
+    meta = {"network": os.path.basename(args.network), "n_snaps": args.n_snaps,
+            "win_start": args.win_start, "win_len": args.win_len,
+            "probe": float(probe), "n_nodes": len(nodes)}
+    if path and os.path.exists(path):
+        with open(path) as f:
+            uc = json.load(f)
+        same = (all(uc.get(k) == meta[k] for k in
+                    ("network", "n_snaps", "win_start", "win_len", "n_nodes"))
+                and abs(float(uc.get("probe", -1)) - meta["probe"]) < 1e-9)
+        if same:
+            print(f"# usable: loaded {len(uc['usable'])} cached <- {os.path.basename(path)}")
+            return uc["usable"]
+        print(f"# usable cache MISMATCH at {path} -- recomputing")
+    usable = screen_usable(panel, nodes, probe=probe)
+    if path:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({**meta, "usable": usable}, f)
+        print(f"# usable: cached {len(usable)} -> {os.path.basename(path)}")
     return usable
 
 
@@ -371,8 +404,18 @@ def main():
                     help="site size in the 'many small sites' strategy (GW)")
     ap.add_argument("--n-fleets", type=int, default=24,
                     help="how many random realistic fleets to draw per (fleet size, site size)")
-    ap.add_argument("--land-cost", default="development/results/placement_study/node_land_cost.csv",
-                    help="per-location land $/acre (cheap land -> more likely to be sited)")
+    ap.add_argument("--land-cost", default=None,
+                    help="per-location land $/acre CSV (cheap land -> more likely sited). "
+                         "Omit for UNIFORM siting over usable nodes (the cross-network default); "
+                         "the old 490 CSV is 490-specific and would silently median-fill other nets.")
+    ap.add_argument("--bad-buses-json", default=None,
+                    help="frozen per-network cleaning manifest (list or {'bad_buses':[...]}). "
+                         "LOADED, never re-detected per run, so cleaning is reproducible across "
+                         "panel/seed. Omit to run uncleaned (the original behavior).")
+    ap.add_argument("--usable-json", default=None,
+                    help="cache file for the screen_usable result. If it exists and matches "
+                         "(network, panel config, probe) it is loaded; else computed and saved -- "
+                         "turns the dominant per-node screen into a one-time cost.")
     ap.add_argument("--dc-profile", default=DEFAULT_DC_PROFILE,
                     help="real DC workload trace (per-unit) -- DC draw = nameplate * load_factor(hour)")
     ap.add_argument("--max-nodes", type=int, default=None,
@@ -406,7 +449,18 @@ def main():
         nodes = nodes[:args.max_nodes]
     print(f"# panel: {len(panel)} hours  idx={idx}")
     print(f"#   dates={dates}")
-    print(f"# nodes={n_nodes} lines={n_lines}  | realistic siting (cheap land, random draws)")
+    print(f"# nodes={n_nodes} lines={n_lines}  | realistic siting (random draws)")
+
+    # ---- network cleaning: frozen per-network manifest (load, never re-detect) ----
+    bad = []
+    if args.bad_buses_json:
+        with open(args.bad_buses_json) as _bf:
+            _bb = json.load(_bf)
+        bad = [int(b) for b in (_bb.get("bad_buses", _bb) if isinstance(_bb, dict) else _bb)]
+        panel = [(net, clean_devices(devs, bad), d, lf) for (net, devs, d, lf) in panel]
+        print(f"# cleaned {len(bad)} bad buses from {os.path.basename(args.bad_buses_json)}")
+    else:
+        print("# no cleaning manifest (--bad-buses-json) given -- running uncleaned")
 
     # ---- base (no DC) across the panel ----
     base_ms = [metrics(net, devs, devs, 1) for (net, devs, _, _) in panel]
@@ -420,18 +474,22 @@ def main():
     B = args.budget
     budgets = [float(x) for x in args.budgets.split(",")]
 
-    # ---- realistic siting setup: cheap-land weights + drop dead-end locations ----
+    # ---- realistic siting setup: land weights (or uniform) + drop dead-end locations ----
     land, weights = load_land_weights(args.land_cost, n_nodes)
-    print(f"\n# land $/acre: cheapest={land.min():.0f}  median={np.median(land):.0f}  "
-          f"priciest={land.max():.0f}  (data centers favor cheap land)")
-    usable = screen_usable(panel, nodes, probe=small)
+    siting_mode = "land_weighted" if args.land_cost else "uniform"
+    if args.land_cost:
+        print(f"\n# land $/acre: cheapest={land.min():.0f}  median={np.median(land):.0f}  "
+              f"priciest={land.max():.0f}  (data centers favor cheap land)")
+    else:
+        print("\n# siting = UNIFORM over usable nodes (no --land-cost; weights=1, no land bias)")
+    usable = _load_or_screen_usable(args, panel, nodes, small)
     print(f"# usable locations (a {small} GW site works every panel hour): {len(usable)}/{len(nodes)} "
           f"(dropped {len(nodes)-len(usable)} dead-end/overloaded corners)")
     rng = np.random.default_rng(args.seed)
 
     # ---- Part 1: AS THE FLEET GROWS (realistic small-site siting) ----
     print(f"\n## GRID STRESS AS REALISTIC DC DEMAND GROWS")
-    print(f"#  many {small} GW sites on cheap land, {args.n_fleets} random fleets each; "
+    print(f"#  many {small} GW sites ({siting_mode} siting), {args.n_fleets} random fleets each; "
           f"median across fleets [worst-case fleet in brackets]")
     print(f"#  base (no DC): grid-stress {base['sum_u2']['median']:.0f}, "
           f"p95 price ${base['p95_lmp']['median']:.0f}, shed {base['shed_pct']['median']:.2f}%")
@@ -447,7 +505,7 @@ def main():
               f"{pr['median']:10.0f} {pr['max']:9.0f} | {sh['median']:9.3f} {sh['max']:8.3f}")
 
     # ---- Part 2: FEW BIG vs MANY SMALL sites (realistic siting, same cheap-land draw) ----
-    print(f"\n## FEW BIG ({big} GW) vs MANY SMALL ({small} GW) SITES  -- realistic cheap-land siting")
+    print(f"\n## FEW BIG ({big} GW) vs MANY SMALL ({small} GW) SITES  -- realistic {siting_mode} siting")
     print(f"#  {args.n_fleets} random fleets each; median across fleets [worst-case in brackets]")
     print(f"  {'fleet':>6} | {'BIG: #':>6} {'stress':>8} {'[worst]':>8} {'p95$':>6} {'shed%':>6}"
           f" | {'SMALL: #':>8} {'stress':>8} {'[worst]':>8} {'p95$':>6} {'shed%':>6} | {'small<big':>9}")
@@ -467,7 +525,7 @@ def main():
               f"{ss['max']:8.0f} {qb['median']:6.0f} {qh['median']:6.2f} | {small_better:9.2f}")
 
     # ---- headline ----
-    print(f"\n## HEADLINE  (realistic cheap-land siting; medians over {args.n_fleets} fleets x {len(panel)} hours)")
+    print(f"\n## HEADLINE  (realistic {siting_mode} siting; medians over {args.n_fleets} fleets x {len(panel)} hours)")
     g3, g6 = grow[0], grow[-1]
     print(f"  base grid (no DC): stress {base['sum_u2']['median']:.0f}, "
           f"p95 price ${base['p95_lmp']['median']:.0f}, shed {base['shed_pct']['median']:.2f}%")
@@ -484,6 +542,7 @@ def main():
 
     out = {"network": os.path.basename(args.network), "panel_idx": idx, "dates": dates,
            "scaling": {"load": args.load_scale, "gen": args.gen_scale, "line": args.line_scale},
+           "siting_mode": siting_mode, "bad_buses": bad, "n_bad": len(bad),
            "budgets": budgets, "per_site_cap": big, "small_site": small, "n_fleets": args.n_fleets,
            "n_nodes": n_nodes, "n_usable": len(usable), "usable": usable, "base": base,
            "grow": grow, "big_vs_small": bvs}

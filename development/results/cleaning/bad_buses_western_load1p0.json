@@ -1,0 +1,23 @@
+{
+  "network": "elec_s1493_c1493.nc",
+  "n_snaps": 12,
+  "load_scale": 1.0,
+  "threshold": "default",
+  "panel_seed": 0,
+  "panel_idx": [
+    0,
+    796,
+    1592,
+    2388,
+    3185,
+    3981,
+    4777,
+    5573,
+    6370,
+    7166,
+    7962,
+    8759
+  ],
+  "n_bad": 0,
+  "bad_buses": []
+}

@@ -354,8 +354,8 @@ def build_panels(args):
     clean = [i for i in range(n_nodes) if i not in set(bad)]
     land, weights = load_land_weights(args.land_cost, n_nodes)
     panels = {}
-    for w, wpath in WORKLOADS.items():
-        hourly_lf = load_dc_profile(wpath)
+    for w in args.workloads:
+        hourly_lf = load_dc_profile(WORKLOADS[w])
         panels[w] = cleaned_panel(raw, hourly_lf, bad)
     return pn, n_nodes, bad, clean, weights, panels
 
@@ -449,9 +449,14 @@ def main():
     ap.add_argument("--node-stride", type=int, default=1, help="subsample nodes for headroom")
     ap.add_argument("--nboot", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--land-cost", default="development/results/placement_study/node_land_cost.csv")
+    ap.add_argument("--land-cost", default=None,
+                    help="land $/acre CSV; omit for UNIFORM siting (cross-network default).")
     ap.add_argument("--bad-buses-json", default=DEFAULT_BAD_BUSES_JSON,
                     help="frozen pathological-bus manifest for citable runs; pass '' to redetect")
+    ap.add_argument("--workloads", nargs="+", default=list(WORKLOADS.keys()),
+                    help="which DC workload profiles to run (default all). Use 'inference' for the "
+                         "primary arm; run 'training' as a separate job for the robustness arm so "
+                         "neither single-workload job risks a walltime timeout.")
     ap.add_argument("--outdir", default="development/results/spread_frontier")
     ap.add_argument("--tag", default="pilot")
     ap.add_argument("--quick", action="store_true")
@@ -474,7 +479,8 @@ def main():
     out = {"load_scale": args.load_scale, "n_snaps": args.n_snaps, "n_fleets": args.n_fleets,
            "n_clean": len(clean), **cleaning_metadata(bad_manifest, bad),
            "power_unit": POWER_UNIT, "cost_unit": COST_UNIT, "workloads": {}}
-    for w in WORKLOADS:
+    path = os.path.join(args.outdir, f"spread_frontier_{args.tag}.json")
+    for w in args.workloads:
         print(f"\n-- workload={w}")
         r = run_workload(panels[w], clean, weights, args, rng)
         st = r["slope_test"]
@@ -486,9 +492,8 @@ def main():
         if r["invariant_g_le_f_violations"]:
             print(f"   !! g>f invariant violated at k={r['invariant_g_le_f_violations']}")
         out["workloads"][w] = r
-
-    path = os.path.join(args.outdir, f"spread_frontier_{args.tag}.json")
-    json.dump(out, open(path, "w"), indent=2, default=float)
+        json.dump(out, open(path, "w"), indent=2, default=float)  # incremental: survive timeout/preempt
+        print(f"   saved (incremental, {len(out['workloads'])} workload(s)) -> {path}")
     print(f"\nsaved -> {path}")
 
 

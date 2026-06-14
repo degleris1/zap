@@ -64,7 +64,12 @@ def main():
     ap.add_argument("--fleets", default="6,10")
     ap.add_argument("--n-pools", type=int, default=24)
     ap.add_argument("--pool-size", type=int, default=40)
-    ap.add_argument("--land-cost", default="development/results/placement_study/node_land_cost.csv")
+    ap.add_argument("--land-cost", default=None,
+                    help="land $/acre CSV; omit for UNIFORM siting (cross-network default). "
+                         "The 490 CSV is 490-specific and would median-fill other nets. "
+                         "(This study re-detects bad buses per threshold by design -- that IS "
+                         "the robustness axis -- deterministically at seed=0, so it takes no "
+                         "frozen --bad-buses-json.)")
     ap.add_argument("--outdir", default="development/results/placement_robustness")
     ap.add_argument("--tag", default="full")
     ap.add_argument("--quick", action="store_true")
