@@ -41,14 +41,25 @@ CACHE_DIR = "development/results/placement_study"
 # Per-network config. budgets = study ladder ([3,4,5,6]*f); fleets = wall/frontier
 # ladder ([6,10]*f). mem sized to the .nc; cand_stride thins deliverable candidates
 # on the big nets to keep the LP tractable.
+# time_deliverable is SEPARATE from time_big: the deliverable-frontier headroom loop is the
+# long pole (the original eastern deliverable logged 38.4h > its 24h time_big and truncated at
+# 3/5 kappa). dc_deliverable_frontier.py is now resumable (h_firm cache + kappa-skip), so a
+# 2-day eastern walltime should finish in one shot; if not, resubmit the same job to continue.
 NETS = {
     "texas":   dict(nc=f"{RES}/texas/elec_s500_c500.nc",     mem="16G", cpus=4,
-                    budgets="1.5,2,2.5,3",   fleets="2.5,4",   cand_stride=1, spread_stride=1, time_big="08:00:00"),
+                    budgets="1.5,2,2.5,3",   fleets="2.5,4",   cand_stride=1, spread_stride=1,
+                    time_big="08:00:00", time_deliverable="08:00:00"),
     "western": dict(nc=f"{RES}/western/elec_s1493_c1493.nc", mem="32G", cpus=4,
-                    budgets="3,4,5,6",       fleets="6,10",    cand_stride=2, spread_stride=1, time_big="12:00:00"),
+                    budgets="3,4,5,6",       fleets="6,10",    cand_stride=2, spread_stride=1,
+                    time_big="12:00:00", time_deliverable="12:00:00"),
     "eastern": dict(nc=f"{RES}/eastern/elec_s3000_c3000.nc", mem="64G", cpus=8,
-                    budgets="12,16,20,24",   fleets="24,41",   cand_stride=4, spread_stride=2, time_big="24:00:00"),
+                    budgets="12,16,20,24",   fleets="24,41",   cand_stride=4, spread_stride=2,
+                    time_big="24:00:00", time_deliverable="2-00:00:00"),
 }
+
+# Networks that get the flat/training robustness arm (separate single-workload jobs). texas
+# already has both workloads complete; western + eastern still need training (Decision #8).
+TRAIN_NETS = {"western", "eastern"}
 
 # Decision #8: inference is the primary workload on ALL nets; the flat/training profile
 # is a robustness arm on EASTERN ONLY. Both frontier scripts now save per-workload
@@ -77,20 +88,22 @@ def study_cmds(net, cfg):
                    f"--n-snaps 12 --n-fleets 12 --node-stride {cfg['spread_stride']} "
                    f"--bad-buses-json {man} --land-cost '' --workloads inference "
                    f"--tag {net} --outdir {od('spread')}"),
-        "deliverable": (True, cfg["time_big"],
+        "deliverable": (True, cfg["time_deliverable"],
                         f"python development/dc_deliverable_frontier.py --network {cfg['nc']} "
                         f"--n-snaps 12 --kappa 0.5 1 2 4 8 --skip-n1 --cand-stride {cfg['cand_stride']} "
                         f"--bad-buses-json {man} --land-cost '' --workloads inference "
                         f"--tag {net} --outdir {od('deliverable')}"),
     }
-    # Eastern-only training robustness arm (separate single-workload jobs).
-    if net == "eastern":
+    # Training robustness arm (separate single-workload jobs) for the nets that still need it.
+    # deliverable is resumable: a timed-out training run resumes on resubmit from its h_firm
+    # cache + completed kappa, same as inference.
+    if net in TRAIN_NETS:
         cmds["spread_train"] = (True, cfg["time_big"],
                    f"python development/dc_spread_frontier.py --network {cfg['nc']} "
                    f"--n-snaps 12 --n-fleets 12 --node-stride {cfg['spread_stride']} "
                    f"--bad-buses-json {man} --land-cost '' --workloads training "
                    f"--tag {net}_train --outdir {od('spread')}")
-        cmds["deliverable_train"] = (True, cfg["time_big"],
+        cmds["deliverable_train"] = (True, cfg["time_deliverable"],
                         f"python development/dc_deliverable_frontier.py --network {cfg['nc']} "
                         f"--n-snaps 12 --kappa 0.5 1 2 4 8 --skip-n1 --cand-stride {cfg['cand_stride']} "
                         f"--bad-buses-json {man} --land-cost '' --workloads training "

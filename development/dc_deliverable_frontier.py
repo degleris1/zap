@@ -67,7 +67,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dc_spread_frontier import build_panels  # noqa: E402
 from dc_placement_integrated import WORKLOADS  # noqa: E402
 from n1_hosting import HostingCapacityProblem  # noqa: E402
-from dc_placement_study import load_land_weights, dispatch, dev_index, POWER_UNIT, COST_UNIT  # noqa: E402
+from dc_placement_study import (load_land_weights, dispatch, dev_index, sample_panel_indices,  # noqa: E402
+                                POWER_UNIT, COST_UNIT)
 from dc_cleaning import DEFAULT_BAD_BUSES_JSON, cleaning_metadata  # noqa: E402
 
 # HiGHS-via-scipy: clean LP duals + fast. Used for the (small) N-1-aware optimizer.
@@ -323,9 +324,110 @@ def extra_orderings(panel, alive, hour, util_thresh=0.9):
 
 
 # --------------------------------------------------------------------------- #
+# checkpoint / resume: the kappa-independent year-firm headroom (node_firm_headroom
+# over every candidate) is the dominant cost -- eastern spent ~38h there and the run
+# saved nothing until the first kappa finished. We cache h_firm to its own file,
+# flushed every 25 candidates, and skip kappa already in the result JSON, so a
+# timeout/node-death only ever costs <=25 candidates and the kappa frontier advances
+# forward across resubmits. Reuse is guarded by a FINGERPRINT: cached physics belongs
+# to one (network, panel, candidate set, cleaning); a mismatch recomputes fresh.
+# --------------------------------------------------------------------------- #
+def _fingerprint(args, workload, panel_idx, bad_buses):
+    """Identity of a deliverable-frontier computation. h_firm + completed-kappa rows are
+    only reusable across runs whose fingerprint matches exactly."""
+    return {
+        "network": os.path.basename(os.path.expanduser(args.network)),
+        "n_snaps": int(args.n_snaps),
+        "load_scale": float(args.load_scale),
+        "panel_idx": [int(i) for i in panel_idx],
+        "bad_buses": sorted(int(b) for b in bad_buses),
+        "cand_stride": int(args.cand_stride),
+        "max_candidates": (int(args.max_candidates) if args.max_candidates else None),
+        "dead_headroom": float(args.dead_headroom),
+        "workload": workload,
+    }
+
+
+def _fp_mismatch(a, b):
+    """Name of the first fingerprint field that differs (None if identical / either missing)."""
+    if a is None or b is None:
+        return "absent"
+    for k in b:
+        if a.get(k) != b.get(k):
+            return k
+    return None
+
+
+def _load_hfirm_cache(path, fp):
+    """(h_firm {int:float}, done set) from a fingerprint-matching cache, else ({}, set())."""
+    if not path or not os.path.exists(path):
+        return {}, set()
+    try:
+        d = json.load(open(path))
+    except Exception:  # noqa: BLE001 (a half-written cache must not crash the run)
+        print(f"   h_firm cache unreadable ({path}) -> recomputing", flush=True)
+        return {}, set()
+    miss = _fp_mismatch(d.get("fingerprint"), fp)
+    if miss is not None:
+        print(f"   h_firm cache fingerprint mismatch ({miss}) -> ignoring cache", flush=True)
+        return {}, set()
+    h = {int(k): float(v) for k, v in d.get("h_firm", {}).items()}
+    done = {int(x) for x in d.get("done", list(h.keys()))}
+    return h, done
+
+
+def _save_hfirm_cache(path, fp, h_firm, done):
+    """Atomic write (tmp + os.replace) so a SIGKILL mid-write never corrupts the cache."""
+    if not path:
+        return
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"fingerprint": fp, "done": sorted(int(x) for x in done),
+                   "h_firm": {int(k): float(v) for k, v in h_firm.items()}}, f, default=float)
+    os.replace(tmp, path)
+
+
+def _seed_hfirm_from_result(resume_block, cand):
+    """Fallback when no separate cache exists yet: lift a COMPLETE h_firm (covering every
+    current candidate) from a prior result JSON's workload block -- how the pulled-back
+    eastern run, whose h_firm is embedded in the result file, resumes without the headroom
+    loop. Returns ({}, set()) unless the block's h_firm covers all `cand` (a partial embedded
+    h_firm isn't resumable -- the result file records no per-candidate 'done' list). Caller
+    must already have fingerprint-gated `resume_block`."""
+    if not resume_block:
+        return {}, set()
+    h = {int(k): float(v) for k, v in (resume_block.get("h_firm") or {}).items()}
+    if h and all(int(n) in h for n in cand):
+        return h, {int(n) for n in cand}
+    return {}, set()
+
+
+def _result_block_compatible(blk, prev_doc, fp):
+    """Is a prior result workload-block safe to resume kappa/h_firm from? Prefer the block's
+    own embedded fingerprint (newer runs); fall back to the result file's top-level
+    cleaning/panel fields for legacy files that predate the fingerprint."""
+    bfp = blk.get("fingerprint")
+    if bfp is not None:
+        miss = _fp_mismatch(bfp, fp)
+        if miss:
+            print(f"   prior result fingerprint mismatch ({miss}) -> fresh kappa", flush=True)
+        return miss is None
+    legacy_ok = (
+        float(prev_doc.get("load_scale", -1)) == fp["load_scale"]
+        and int(prev_doc.get("n_snaps", -1)) == fp["n_snaps"]
+        and sorted(int(b) for b in prev_doc.get("bad_buses", [])) == fp["bad_buses"]
+        and float(prev_doc.get("dead_headroom_gw", -1)) == fp["dead_headroom"]
+    )
+    print("   legacy result (no fingerprint); top-level fields "
+          f"{'match -> resuming' if legacy_ok else 'differ -> fresh kappa'}", flush=True)
+    return legacy_ok
+
+
+# --------------------------------------------------------------------------- #
 # per-workload study over the kappa grid
 # --------------------------------------------------------------------------- #
-def run_workload(panel, clean, weights, args, on_row=None):
+def run_workload(panel, clean, weights, args, on_row=None, *, workload=None,
+                 fingerprint=None, cache_path=None, resume_block=None):
     t0 = time.time()
     # candidate set: clean nodes, subsampled by cand-stride for tractability.
     cand = [int(n) for n in clean]
@@ -341,11 +443,35 @@ def run_workload(panel, clean, weights, args, on_row=None):
           flush=True)
 
     # year-firm headroom per candidate; EXCLUDE dead buses (h_firm < threshold).
-    h_firm = {}
-    for i, n in enumerate(cand, 1):
+    # CHECKPOINT/RESUME: load any fingerprint-matching cache (or seed from a prior result
+    # JSON's embedded h_firm), compute only the candidates still missing, and flush every
+    # 25 newly-computed so a timeout/node-death costs <=25 candidates, not the whole loop.
+    h_firm, done = _load_hfirm_cache(cache_path, fingerprint)
+    if not h_firm:
+        h_firm, done = _seed_hfirm_from_result(resume_block, cand)
+        if h_firm:
+            print(f"   h_firm seeded from result JSON ({len(h_firm)} candidates) "
+                  f"-> skipping headroom loop", flush=True)
+    elif done:
+        print(f"   h_firm cache hit: {len(done & set(cand))}/{len(cand)} candidates cached",
+              flush=True)
+    computed = 0
+    for n in cand:
+        if n in done:
+            continue
         h_firm[n] = node_firm_headroom(panel, n, shed_cap_hour)
-        if i == 1 or i == len(cand) or i % 25 == 0:
-            print(f"   headroom progress: {i}/{len(cand)} candidates", flush=True)
+        done.add(n)
+        computed += 1
+        if computed % 25 == 0:
+            print(f"   headroom progress: {len(done & set(cand))}/{len(cand)} candidates "
+                  f"({computed} this run)", flush=True)
+            _save_hfirm_cache(cache_path, fingerprint, h_firm, done)
+    if computed:
+        _save_hfirm_cache(cache_path, fingerprint, h_firm, done)
+        print(f"   headroom complete: {len(cand)} candidates ({computed} computed this run)",
+              flush=True)
+    else:
+        print(f"   headroom: all {len(cand)} candidates from cache/seed", flush=True)
     alive = [n for n in cand if h_firm[n] >= args.dead_headroom]
     dead = [n for n in cand if h_firm[n] < args.dead_headroom]
     print(f"   year-firm headroom computed for {len(cand)} candidates; "
@@ -391,13 +517,22 @@ def run_workload(panel, clean, weights, args, on_row=None):
               f"(base-case floor {shed_cap_hour[n1_hour]:.2f} GW)", flush=True)
 
     out = {
+        "fingerprint": fingerprint,
         "candidates_alive": alive, "candidates_dead": dead,
         "h_firm": {int(n): float(h_firm[n]) for n in cand},
         "shed_cap_total": shed_cap_total, "n1_hour": n1_hour,
         "n1_shed_cap": n1_shed_cap, "kappa_grid": list(args.kappa), "rows": [],
     }
 
+    # RESUME kappa: reuse fingerprint-matched rows from a prior (truncated) run, keyed by
+    # kappa value, and only compute the kappa still missing -- forward work as we improve k.
+    done_kappa = {float(r["kappa"]): r for r in (resume_block or {}).get("rows", [])}
+    n_resumed = 0
     for kappa in args.kappa:
+        if float(kappa) in done_kappa:  # already computed in a prior run -- reuse in order
+            out["rows"].append(done_kappa[float(kappa)])
+            n_resumed += 1
+            continue
         # LP-optimal (base): full panel, all alive candidates. Default solver auto-pick
         # (HiGHS/CLARABEL) -- the base LP has no N-1 rows, so it is reliable at scale.
         lp_gw, lp_sites, lp_d, lp_st = solve_lp_optimal(
@@ -438,6 +573,9 @@ def run_workload(panel, clean, weights, args, on_row=None):
         if on_row is not None:  # incremental: flush after each kappa to survive timeout/preempt
             on_row(out)
 
+    if n_resumed:
+        print(f"   resumed {n_resumed} completed kappa; computed "
+              f"{len(args.kappa) - n_resumed} new this run", flush=True)
     out["seconds"] = round(time.time() - t0, 1)
     return out
 
@@ -499,6 +637,8 @@ def main():
                     help="skip fragile N-1 rows; canonical deliverable-frontier runs use this")
     ap.add_argument("--outdir", default="development/results/deliverable_frontier")
     ap.add_argument("--tag", default="pilot")
+    ap.add_argument("--fresh", action="store_true",
+                    help="ignore any h_firm cache / prior result and recompute from scratch")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
     if args.smoke:
@@ -514,6 +654,9 @@ def main():
     print(f"## DC DELIVERABLE FRONTIER (tag={args.tag}) load_scale={args.load_scale} "
           f"kappa={args.kappa}")
     pn, n_nodes, bad, clean, weights, panels = build_panels(args)
+    # panel_idx is a deterministic function of (network snapshots, n_snaps, seed=0) -- compute
+    # it from the already-loaded pn (no reload) for the resume fingerprint.
+    panel_idx = sample_panel_indices(len(pn.generators_t.p_max_pu.index), args.n_snaps, None, None, 0)
     # land cost per node (weights from build_panels is 1/normalized-land; we want the
     # raw land cost for the cheap-land ASCENDING order, lowest cost first).
     land, _w = load_land_weights(args.land_cost, n_nodes)
@@ -521,14 +664,25 @@ def main():
           f"{args.n_snaps}h panel", flush=True)
 
     bad_manifest = args.bad_buses_json or None
-    out = {"load_scale": args.load_scale, "n_snaps": args.n_snaps, "n_clean": len(clean),
+    path = os.path.join(args.outdir, f"deliverable_frontier_{args.tag}.json")
+    # read any prior (possibly truncated) result ONCE up front -- the per-kappa _flush below
+    # overwrites `path`, so capture resume material before the first write clobbers it.
+    prev_doc = {}
+    if not args.fresh and os.path.exists(path):
+        try:
+            prev_doc = json.load(open(path))
+        except Exception:  # noqa: BLE001
+            print(f"   prior result unreadable ({path}) -> fresh run", flush=True)
+    prev_workloads = prev_doc.get("workloads", {}) if isinstance(prev_doc, dict) else {}
+
+    out = {"network": os.path.basename(os.path.expanduser(args.network)),
+           "load_scale": args.load_scale, "n_snaps": args.n_snaps, "n_clean": len(clean),
            **cleaning_metadata(bad_manifest, bad), "power_unit": POWER_UNIT,
            "cost_unit": COST_UNIT, "kappa_grid": list(args.kappa),
            "dead_headroom_gw": args.dead_headroom, "n1_citable": False,
            "n1_note": "N-1 rows are non-citable diagnostics and are skipped in canonical runs"
                       if args.skip_n1 else "N-1 rows are non-citable diagnostics",
            "workloads": {}}
-    path = os.path.join(args.outdir, f"deliverable_frontier_{args.tag}.json")
     for w in args.workloads:
         print(f"\n-- workload={w}", flush=True)
 
@@ -536,7 +690,12 @@ def main():
             out["workloads"][w] = partial
             json.dump(out, open(path, "w"), indent=2, default=float)
 
-        r = run_workload(panels[w], clean, land, args, on_row=_flush)  # land = cheap-order key
+        fp = _fingerprint(args, w, panel_idx, bad)
+        cache_path = os.path.join(args.outdir, f"h_firm_{args.tag}_{w}.json")
+        blk = prev_workloads.get(w)
+        resume_block = blk if (blk and _result_block_compatible(blk, prev_doc, fp)) else None
+        r = run_workload(panels[w], clean, land, args, on_row=_flush, workload=w,  # land = cheap-order key
+                         fingerprint=fp, cache_path=cache_path, resume_block=resume_block)
         if "error" not in r:
             sanity_checks(r)
         out["workloads"][w] = r
