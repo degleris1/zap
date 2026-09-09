@@ -303,7 +303,7 @@ def o2_net_load(runs, *, window=None, year=None, method=None, block_size=None, *
 
 @register(
     "O3",
-    title="Capacity headroom over net load",
+    title="Capacity headroom over gross load",
     tier="debug",
     needs=("hourly",),
     columns=(
@@ -312,6 +312,8 @@ def o2_net_load(runs, *, window=None, year=None, method=None, block_size=None, *
         "year",
         "hour",
         "available_gw",
+        "load_gw",
+        "dispatchable_gw",
         "net_load_gw",
         "headroom_gw",
         "headroom_frac",
@@ -321,10 +323,14 @@ def o2_net_load(runs, *, window=None, year=None, method=None, block_size=None, *
 def o3_headroom(
     runs, *, window=None, year=None, method=None, block_size=None, threshold=0.05, **_
 ):
-    """Headroom = available capacity - net load, shaded below ``threshold``.
+    """Headroom = available capacity - gross load, shaded below ``threshold``.
 
-    ``available_gw`` is the same total O1 stacks, so the two figures agree.
-    Hours with unserved energy are marked.
+    ``available_gw`` is the same total O1 stacks (it already contains VRE
+    availability), so headroom is taken against gross ``load_gw``; the
+    equivalent dispatchable-vs-net-load split is written alongside as
+    ``dispatchable_gw`` and ``net_load_gw`` (``dispatchable - net_load`` is the
+    same number).  Subtracting net load from the *total* would count VRE
+    twice.  Hours with unserved energy are marked.
     """
     frame = collect_hourly(
         runs,
@@ -342,8 +348,10 @@ def o3_headroom(
 
     table = totals[["run_id", "label", "year", "hour"]].copy()
     table["available_gw"] = style.convert(totals["available_mw"], "power")
+    table["load_gw"] = style.convert(totals["load_mw"], "power")
+    table["dispatchable_gw"] = style.convert(totals["available_mw"] - totals["vre_mw"], "power")
     table["net_load_gw"] = style.convert(totals["net_load_mw"], "power")
-    table["headroom_gw"] = table["available_gw"] - table["net_load_gw"]
+    table["headroom_gw"] = table["available_gw"] - table["load_gw"]
     table["headroom_frac"] = np.where(
         table["available_gw"] > 0, table["headroom_gw"] / table["available_gw"], np.nan
     )
