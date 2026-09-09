@@ -9,7 +9,7 @@ includes:
   - ../heuristics/none.yaml
   - ../emissions/none.yaml
 name: plan_z4_smoke_48h
-dataset: {years: [2020], window: {start: 0, stop: 48}}
+dataset: {years: [2020], window: {start: 7, stop: 55}}
 # export_mode: drop — the export stores have e_nom = 0 as built, so unlimited
 # export sinks at the -178 $/MWh export price would dominate the objective.
 system: {export_mode: drop}

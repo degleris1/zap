@@ -10,10 +10,11 @@ Common options
 ``year``, ``method``, ``block_size``
     restrict the series; default everything present.
 
-Caveat repeated in several docstrings: ``available_capacity_mw`` is generators
-times weather times the outage/UCAP derate, plus storage *power* times its
-availability.  Storage availability here is **not** SoC-limited: a battery
-counts at full power for every hour of the year.
+Caveat repeated in several docstrings: ``available_capacity_mw`` is *in-state*
+generators (import rows excluded) times weather times the outage/UCAP derate,
+plus storage *power* times its availability.  Storage availability here is
+**not** SoC-limited: a battery counts at full power for every hour of the year.
+This is the same membership as ``available_mw_min`` in ``metrics.csv``.
 """
 
 from __future__ import annotations
@@ -175,8 +176,9 @@ def _stack(ax, pivot: pd.DataFrame, title: str, ylabel: str) -> None:
 def o1_available_capacity(runs, *, window=None, year=None, method=None, block_size=None, **_):
     """Stacked hourly available capacity per carrier, with the peak annotated.
 
-    ``available_capacity_mw`` is generators x weather x outage/UCAP derate plus
-    storage power x availability.  The storage term is **not** SoC-limited.
+    ``available_capacity_mw`` is in-state generators (imports excluded) x
+    weather x outage/UCAP derate plus storage power x availability.  The
+    storage term is **not** SoC-limited.
     """
     frame = collect_hourly(
         runs,
@@ -325,8 +327,9 @@ def o3_headroom(
 ):
     """Headroom = available capacity - gross load, shaded below ``threshold``.
 
-    ``available_gw`` is the same total O1 stacks (it already contains VRE
-    availability), so headroom is taken against gross ``load_gw``; the
+    ``available_gw`` is the same total O1 stacks -- in-state generators
+    (imports excluded) plus storage power, and it already contains VRE
+    availability -- so headroom is taken against gross ``load_gw``; the
     equivalent dispatchable-vs-net-load split is written alongside as
     ``dispatchable_gw`` and ``net_load_gw`` (``dispatchable - net_load`` is the
     same number).  Subtracting net load from the *total* would count VRE

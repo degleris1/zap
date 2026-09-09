@@ -225,6 +225,29 @@ class TestHourlyStore(PersistenceMixin):
                     total, float(m[metric]), delta=1e-9 * max(1.0, abs(float(m[metric])))
                 )
 
+            # One membership for available capacity (2026-09-09): the hourly
+            # rows and metrics.csv must agree exactly, and imports are in
+            # neither.
+            avail = block[block["quantity"] == "available_capacity_mw"]
+            self.assertFalse(avail.empty, task_id)
+            carriers = set(avail["carrier"].astype(str))
+            self.assertTrue(carriers, task_id)
+            self.assertFalse(
+                {c for c in carriers if "import" in c},
+                f"{task_id}: import carriers in available_capacity_mw: {carriers}",
+            )
+            per_hour = avail.groupby(avail["hour"].astype(int))["value"].sum()
+            self.assertAlmostEqual(
+                float(per_hour.min()),
+                float(m["available_mw_min"]),
+                delta=1e-6 * max(1.0, abs(float(m["available_mw_min"]))),
+            )
+            self.assertAlmostEqual(
+                float(per_hour.sum()),
+                float(m["available_mwh_total"]),
+                delta=1e-6 * max(1.0, abs(float(m["available_mwh_total"]))),
+            )
+
     def test_hourly_prices_are_load_buses_only(self):
         """T4 (D5)."""
         path = self.write_config("prices", {"output": {"save_hourly": "carrier_bus"}})
@@ -583,6 +606,17 @@ class TestOutputFlagsAndStatics(PersistenceMixin):
         available = np.broadcast_to(available, (available.shape[0], 24))
         in_state = ~np.asarray(loaded.index.import_mask, dtype=bool)
         per_hour = available[in_state, :].sum(axis=0)
+
+        # One membership (2026-09-09): in-state generators PLUS storage power
+        # capacity x power_availability.  Imports never count.
+        storage = devices[loaded.index.device_index["StorageUnit"]]
+        storage_available = np.asarray(storage.power_capacity, dtype=float).reshape(
+            -1, 1
+        ) * np.atleast_2d(np.asarray(storage.power_availability, dtype=float))
+        storage_available = np.broadcast_to(storage_available, (storage_available.shape[0], 24))
+        per_hour = per_hour + storage_available.sum(axis=0)
+        self.assertGreater(storage_available.sum(), 0.0)
+
         self.assertAlmostEqual(m["available_mw_min"], float(per_hour.min()), places=6)
         self.assertAlmostEqual(m["available_mwh_total"], float(per_hour.sum()), places=4)
 

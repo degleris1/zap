@@ -10,7 +10,7 @@ includes:
   - ../heuristics/none.yaml
   - ../emissions/none.yaml
 name: plan_z4_2020_stochastic_weeks
-dataset: {years: [2020], window: {start: 0, stop: 8736}}
+dataset: {years: [2020], window: {start: 7, stop: 8743}}
 system: {export_mode: drop}
 planning:
   single_level: {solver: GUROBI, solver_kwargs: {Method: 2, Crossover: 0}}

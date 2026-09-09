@@ -1,4 +1,9 @@
-# A $50/tCO2 price added to every subproblem's operation objective. Valid for
-# every method (D-W5); it constrains nothing, it only shifts the design.
+# A $50/tCO2 price applied in DISPATCH for every method (decision 2026-09-09):
+# `system.carbon_tax` adds price * emission_rate to each generator's marginal
+# cost when the system is built, so the LP, gradient and ADMM planners all see
+# the same priced dispatch. The planner-side `planning.emissions.price` (which
+# prices only the planner's objective on the gradient path) is not used for the
+# emissions matrix. It constrains nothing; it only shifts the design.
+system: {carbon_tax: 50.0}
 planning:
-  emissions: {mode: price, price: 50.0}
+  emissions: {mode: none}

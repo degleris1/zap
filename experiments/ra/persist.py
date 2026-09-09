@@ -53,7 +53,9 @@ HOURLY_COLUMNS = (
 #: The vocabulary of ``quantity``.  ``output.hourly_quantities`` is validated
 #: against this tuple.
 HOURLY_QUANTITIES = (
-    "available_capacity_mw",  # Generator nominal x dynamic; StorageUnit power x availability
+    # In-state Generator nominal x dynamic (imports excluded via
+    # ``index.import_mask``) plus StorageUnit power x power_availability.
+    "available_capacity_mw",
     "dispatch_mw",  # Generator injection, >= 0
     "load_mw",  # gross demand before shedding, >= 0
     "unserved_mw",  # demand + power[0] (the metrics.py definition), >= 0
@@ -441,7 +443,19 @@ def build_hourly_frame(
         if "dispatch_mw" in wanted:
             emit(dispatch, keys, "dispatch_mw")
         if "available_capacity_mw" in wanted:
-            emit(available, keys, "available_capacity_mw")
+            # One membership everywhere (decision 2026-09-09): available
+            # capacity is in-state generators only; import rows are excluded
+            # here exactly as they are in ``metrics.available_mw_min``.
+            import_mask = getattr(index, "import_mask", None) if index is not None else None
+            if import_mask is not None and np.size(import_mask) == n_rows:
+                in_state = ~np.asarray(import_mask, dtype=bool)
+            else:
+                in_state = np.ones(n_rows, dtype=bool)
+            emit(
+                available[in_state, :],
+                [k for k, m in zip(keys, in_state) if m],
+                "available_capacity_mw",
+            )
         if "curtailment_mw" in wanted:
             vre = getattr(index, "vre_mask", None) if index is not None else None
             if vre is not None and np.size(vre) == n_rows:

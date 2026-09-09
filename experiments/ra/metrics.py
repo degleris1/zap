@@ -192,8 +192,13 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
     curtailment = float("nan")
     curtailment_total = 0.0
     saw_vre = False
-    # Per-hour in-state available capacity (imports excluded), so `eval.parquet`
-    # has an exact minimum available capacity per design without hourly data.
+    # Per-hour available capacity, so `eval.parquet` has an exact minimum
+    # available capacity per design without hourly data.  One membership
+    # everywhere (decision 2026-09-09): in-state generators x weather x
+    # outage/UCAP derate (imports excluded via `index.import_mask`) PLUS
+    # storage power capacity x `power_availability`.  The storage term is not
+    # SoC-limited.  Same membership as `available_capacity_mw` in
+    # `persist.hourly_rows`.
     available_by_hour = np.zeros(int(block.hours), dtype=np.float64)
     saw_available = False
     for i in groups.get("Generator", []):
@@ -226,6 +231,24 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
             curtail = (available - power[i][0])[np.asarray(vre_mask, dtype=bool), :]
             curtailment_total += float(np.maximum(curtail, 0.0).sum())
             saw_vre = True
+    for i in groups.get("StorageUnit", []):
+        device = devices[i]
+        power_capacity = np.asarray(device.power_capacity, dtype=np.float64).reshape(-1, 1)
+        availability = np.asarray(
+            getattr(device, "power_availability", None)
+            if getattr(device, "power_availability", None) is not None
+            else 1.0,
+            dtype=np.float64,
+        )
+        storage_available = power_capacity * np.atleast_2d(availability)
+        if storage_available.shape[1] == 1:
+            storage_available = np.broadcast_to(
+                storage_available, (storage_available.shape[0], available_by_hour.size)
+            )
+        if storage_available.shape[1] == available_by_hour.size:
+            available_by_hour += storage_available.sum(axis=0)
+            saw_available = True
+
     metrics["generation_mwh_by_carrier"] = json.dumps(gen_by_carrier, sort_keys=True)
     metrics["curtailment_mwh"] = curtailment_total if saw_vre else curtailment
     metrics["available_mw_min"] = (
