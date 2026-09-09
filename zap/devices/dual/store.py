@@ -7,8 +7,19 @@ from zap.util import envelope_variable, use_envelope
 
 class DualBattery(StorageUnit):
     def __init__(self, battery: StorageUnit, max_price=None, **kwargs):
+        # The dual derivation below multiplies the initial / final SoC pins by
+        # their duals (`s1_term` / `sT_term`); the free cyclic boundary replaces
+        # those two constraints with `s_0 - s_T == 0` and has a different dual.
+        if getattr(battery, "soc_mode", "fixed") != "fixed":
+            raise NotImplementedError(
+                "DualBattery only supports soc_mode='fixed'; got "
+                f"{battery.soc_mode!r}. The strong-duality single-level path "
+                "has not been re-derived for the free cyclic boundary."
+            )
+
         self.primal = battery
         self.max_price = max_price
+        self.soc_mode = "fixed"
 
         self.num_nodes = battery.num_nodes
         self.terminal = battery.terminal

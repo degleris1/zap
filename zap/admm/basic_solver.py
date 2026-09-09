@@ -72,6 +72,12 @@ class ADMMLayout:
     device_shapes: tuple
     machine: str
     dtype: str
+    #: one entry per device carrying a `soc_mode` (StorageUnit): (index, mode).
+    #: The storage boundary condition changes the prox's constraint matrix and
+    #: its box bounds, so a state from the other mode is not a valid warm start.
+    #: Declared last (with a default) so the older positional constructor still
+    #: works; :attr:`_FIELD_ORDER` still reports it before `machine`.
+    storage_soc_modes: tuple = ()
 
     #: Compared in this order by :meth:`explain_mismatch`.
     _FIELD_ORDER = (
@@ -80,6 +86,7 @@ class ADMMLayout:
         "num_contingencies",
         "contingency_device",
         "device_shapes",
+        "storage_soc_modes",
         "machine",
         "dtype",
     )
@@ -108,6 +115,11 @@ class ADMMLayout:
                     bool(d.is_ac),
                 )
                 for d in devices
+            ),
+            storage_soc_modes=tuple(
+                (i, str(d.soc_mode))
+                for i, d in enumerate(devices)
+                if getattr(d, "soc_mode", None) is not None
             ),
             # `str` normalises so that "cpu" and torch.device("cpu"), or
             # torch.float64 and "torch.float64", compare equal.

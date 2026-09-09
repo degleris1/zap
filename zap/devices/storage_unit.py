@@ -3,7 +3,7 @@ import numpy as np
 import cvxpy as cp
 import scipy.sparse as sp
 
-from typing import Optional
+from typing import Literal, Optional
 from collections import namedtuple
 from numpy.typing import NDArray
 
@@ -38,7 +38,27 @@ class StorageUnit(AbstractDevice):
         The ADMM prox caches ``ymin``/``ymax`` behind ``self.has_changed``; any
         later mutation of ``power_availability`` MUST set ``has_changed = True``
         or ADMM will silently return a feasible-but-wrong dispatch.
+    soc_mode : {"fixed", "cyclic_free"}
+        Boundary condition on the state of charge of a block.
+
+        * ``"fixed"`` (default, the historical behaviour) pins both endpoints:
+          ``energy[:, 0] == initial_soc * E`` and ``energy[:, T] == final_soc * E``.
+        * ``"cyclic_free"`` drops both pins and imposes ``energy[:, 0] ==
+          energy[:, T]`` instead, so each block chooses its own level.  In this
+          mode ``initial_soc`` and ``final_soc`` are **ignored** (they are still
+          stored, and still used to initialize the ADMM prox iterate, but they
+          constrain nothing).  The level stays inside ``[0, E]`` through the
+          existing inequality constraints.
+
+        A plain attribute, not a per-device array: the whole fleet shares one
+        mode.  It is set at construction and survives ``sample_time``,
+        ``torchify`` and ``scale_power``.  The ADMM prox rebuilds its cached
+        data when it changes, but the cvx path reads it on every call.
     """
+
+    #: Class-level default so that subclasses which build their state by hand
+    #: (``zap.devices.dual.store.DualBattery``) still answer ``soc_mode``.
+    soc_mode: str = "fixed"
 
     def __init__(
         self,
@@ -58,6 +78,7 @@ class StorageUnit(AbstractDevice):
         min_power_capacity=None,
         max_power_capacity=None,
         power_availability: Optional[NDArray] = None,
+        soc_mode: Literal["fixed", "cyclic_free"] = "fixed",
     ):
         if linear_cost is None:
             linear_cost = np.zeros(power_capacity.shape)
@@ -77,6 +98,9 @@ class StorageUnit(AbstractDevice):
         if power_availability is None:
             power_availability = np.ones(power_capacity.shape)
 
+        if soc_mode not in ("fixed", "cyclic_free"):
+            raise ValueError(f"soc_mode must be 'fixed' or 'cyclic_free', got {soc_mode!r}")
+
         self.num_nodes = num_nodes
         self.name = name
         self.terminal = terminal
@@ -92,6 +116,7 @@ class StorageUnit(AbstractDevice):
         self.min_power_capacity = make_dynamic(min_power_capacity)
         self.max_power_capacity = make_dynamic(max_power_capacity)
         self.power_availability = make_dynamic(power_availability)
+        self.soc_mode = str(soc_mode)
 
         self.has_changed = True
         self.rho = -1.0
@@ -167,12 +192,22 @@ class StorageUnit(AbstractDevice):
             + la.multiply(state.charge, self.charge_efficiency)
             - la.multiply(state.discharge, 1 / self.discharge_efficiency)
         )
-        return [
+        constraints = [
             power[0] - (state.discharge - state.charge),
             state.energy[:, 1:] - soc_evolution,
-            state.energy[:, 0:1] - la.multiply(initial_soc, energy_capacity),
-            state.energy[:, T : (T + 1)] - la.multiply(final_soc, energy_capacity),
         ]
+
+        if self.soc_mode == "cyclic_free":
+            # Free cyclic boundary: the block starts wherever it ends. Both pins
+            # are dropped, so `initial_soc` / `final_soc` are ignored here.
+            constraints.append(state.energy[:, 0:1] - state.energy[:, T : (T + 1)])
+        else:
+            constraints.append(state.energy[:, 0:1] - la.multiply(initial_soc, energy_capacity))
+            constraints.append(
+                state.energy[:, T : (T + 1)] - la.multiply(final_soc, energy_capacity)
+            )
+
+        return constraints
 
     def inequality_constraints(
         self,
@@ -284,12 +319,15 @@ class StorageUnit(AbstractDevice):
         equalities[1].local_variables[2] += sp.diags(1.0 / beta.ravel())  # Discharging
 
         # Initial / Final SOC
-        equalities[2].local_variables[0] += self._soc_boundary_matrix(
-            self.num_devices, time_horizon, index=0
-        )
-        equalities[3].local_variables[0] += self._soc_boundary_matrix(
-            self.num_devices, time_horizon, index=-1
-        )
+        first = self._soc_boundary_matrix(self.num_devices, time_horizon, index=0)
+        last = self._soc_boundary_matrix(self.num_devices, time_horizon, index=-1)
+
+        if self.soc_mode == "cyclic_free":
+            # One row: energy[:, 0] - energy[:, T] == 0.
+            equalities[2].local_variables[0] += first - last
+        else:
+            equalities[2].local_variables[0] += first
+            equalities[3].local_variables[0] += last
 
         return equalities
 
@@ -396,7 +434,13 @@ class StorageUnit(AbstractDevice):
         #     self.admm_data = battery_prox_data(self, T, rho_power, power[0], inner_weight)
 
         # Variable data that changes between solves
-        if self.has_changed:
+        # `soc_mode` changes the cached box bounds *and* the cached Schur
+        # complement (the prox constraint matrix gains a row), so a mode change
+        # must invalidate both, exactly like `has_changed`.
+        mode = getattr(self, "soc_mode", "fixed")
+        rebuild = self.has_changed or getattr(self, "_prox_soc_mode", None) != mode
+
+        if rebuild:
             # print("Changing battery data.")
 
             smax = torch.multiply(power_capacity, self.duration)
@@ -414,28 +458,30 @@ class StorageUnit(AbstractDevice):
                 )
 
             ymin, ymax = get_ymin_ymax(
-                T, num_scenarios, pmax_t, smax, gamma1, gammaT, machine, dtype
+                T, num_scenarios, pmax_t, smax, gamma1, gammaT, machine, dtype, soc_mode=mode
             )
             A = A_matrix(T, machine, dtype=dtype)
             b = b_vector(self, T, num_scenarios, machine, dtype=dtype)
 
             _zT = power[0].reshape(-1, num_scenarios, T, 1)
             _rhs = K_rhs_fixed(rho_power, A, b, _zT)
+            num_eq_rows = T + 1 if mode == "cyclic_free" else T
             zero_nu = torch.zeros(
-                (_rhs.shape[0], _rhs.shape[1], T, _rhs.shape[3]),
+                (_rhs.shape[0], _rhs.shape[1], num_eq_rows, _rhs.shape[3]),
                 device=machine,
                 dtype=dtype,
             )
 
             self.temp_data = (smax, gamma1, gammaT, ymin, ymax, A, b, zero_nu)
 
-        if self.has_changed or self.rho != rho_power:
+        if rebuild or self.rho != rho_power:
             # print("Updating battery Schur matrix.")
             self.rho = rho_power
             self.schur = schur_matrix(self, T, rho_power, inner_weight, machine)
             # _K = K_matrix(self, T, rho_power, inner_weight, machine)
             # self.K_inv = torch.linalg.inv(_K)
 
+        self._prox_soc_mode = mode
         self.has_changed = False
 
         # schur = self.schur
@@ -540,9 +586,15 @@ def C_matrix(device: StorageUnit, T, machine=None, dtype=None):
     ``C_i = [-beta_i * I, (1 / eta_i) * I, D]`` with ``D`` the (T, T+1) forward
     difference. Both efficiencies are per unit.
 
+    In ``soc_mode == "cyclic_free"`` one further row ``s_0 - s_T == 0`` is
+    appended, which is how the free cyclic boundary condition enters the prox:
+    the endpoints are no longer pinned in ``ymin`` / ``ymax``, only tied to each
+    other here.
+
     Returns
     -------
-    torch.Tensor of shape ``(N, T, 3T + 1)``.
+    torch.Tensor of shape ``(N, T, 3T + 1)``, or ``(N, T + 1, 3T + 1)`` in
+    ``soc_mode == "cyclic_free"``.
     """
     if dtype is None:
         dtype = device.power_capacity.dtype
@@ -563,6 +615,13 @@ def C_matrix(device: StorageUnit, T, machine=None, dtype=None):
     C[:, :, :T] = -beta * Id
     C[:, :, T : (2 * T)] = inv_eta * Id
     C[:, :, (2 * T) :] = D
+
+    if getattr(device, "soc_mode", "fixed") == "cyclic_free":
+        cyclic = torch.zeros((N, 1, 3 * T + 1), device=machine, dtype=dtype)
+        cyclic[:, 0, 2 * T] = 1.0  # s_0
+        cyclic[:, 0, 3 * T] = -1.0  # s_T
+        C = torch.cat([C, cyclic], dim=1)
+
     return C
 
 
@@ -594,7 +653,10 @@ def _hessian(device: StorageUnit, T, rho, w, machine=None, dtype=None):
 
 
 def K_matrix(device: StorageUnit, T, rho, w, machine=None):
-    """KKT matrix of the prox subproblem, batched over units: ``(N, 4T+1, 4T+1)``."""
+    """KKT matrix of the prox subproblem, batched over units.
+
+    ``(N, 4T+1, 4T+1)``, or ``(N, 4T+2, 4T+2)`` in ``soc_mode == "cyclic_free"``.
+    """
     dtype = device.power_capacity.dtype
 
     C = C_matrix(device, T, machine, dtype)
@@ -604,8 +666,9 @@ def K_matrix(device: StorageUnit, T, rho, w, machine=None):
     H = H.expand(N, 3 * T + 1, 3 * T + 1) if H.dim() == 2 else H
     CT = C.transpose(-1, -2)
 
+    m = C.shape[1]  # number of equality rows (T, or T + 1 when cyclic_free)
     row1 = torch.cat([H, CT], dim=-1)
-    row2 = torch.cat([C, torch.zeros((N, T, T), device=machine, dtype=dtype)], dim=-1)
+    row2 = torch.cat([C, torch.zeros((N, m, m), device=machine, dtype=dtype)], dim=-1)
 
     return torch.cat([row1, row2], dim=-2)
 
@@ -688,7 +751,9 @@ def battery_prox_data(device: StorageUnit, T: int, rho, z, weight=1.0):
     return K_inv, zero_nu
 
 
-def get_ymin_ymax(T, num_scenarios, pmax_t, smax, gamma1, gammaT, machine=None, dtype=None):
+def get_ymin_ymax(
+    T, num_scenarios, pmax_t, smax, gamma1, gammaT, machine=None, dtype=None, soc_mode="fixed"
+):
     """Build the box bounds of the battery prox variable y = (charge, discharge, energy).
 
     Parameters
@@ -700,6 +765,10 @@ def get_ymin_ymax(T, num_scenarios, pmax_t, smax, gamma1, gammaT, machine=None, 
     pmax_t : torch.Tensor
         Charge/discharge power bound of shape ``(N, num_scenarios * T)``. Callers
         broadcast a static ``(N, 1)`` bound before calling.
+    soc_mode : {"fixed", "cyclic_free"}
+        ``"fixed"`` pins the first and last energy slot to ``gamma1`` / ``gammaT``.
+        ``"cyclic_free"`` leaves both free in ``[0, smax]``; the cyclic condition
+        ``s_0 == s_T`` is imposed by the extra row of :func:`C_matrix` instead.
 
     Returns
     -------
@@ -714,10 +783,11 @@ def get_ymin_ymax(T, num_scenarios, pmax_t, smax, gamma1, gammaT, machine=None, 
     ymax = torch.cat([pc, pc.clone(), pe], dim=2)  # (N, num_scenarios, 3T + 1)
     ymin = torch.zeros_like(ymax)
 
-    ymin[:, :, 2 * T] = gamma1[:, 0:1]
-    ymax[:, :, 2 * T] = gamma1[:, 0:1]
-    ymin[:, :, -1] = gammaT[:, 0:1]
-    ymax[:, :, -1] = gammaT[:, 0:1]
+    if soc_mode != "cyclic_free":
+        ymin[:, :, 2 * T] = gamma1[:, 0:1]
+        ymax[:, :, 2 * T] = gamma1[:, 0:1]
+        ymin[:, :, -1] = gammaT[:, 0:1]
+        ymax[:, :, -1] = gammaT[:, 0:1]
 
     ymin = ymin.unsqueeze(-1)
     ymax = ymax.unsqueeze(-1)

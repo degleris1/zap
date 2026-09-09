@@ -28,6 +28,7 @@ SUMMARY_METRICS = (
     + (
         "storage_cycles",
         "storage_cycles_per_day",
+        "storage_start_soc_frac",
         "mean_price",
         "max_price",
         "admm_max_imbalance_mw",
@@ -487,6 +488,7 @@ def write_card(
             "implied_scale",
             "applied_scale",
             "voll",
+            "storage_soc_mode",
         ):
             lines.append(f"- **{key}:** {_fmt(system_meta.get(key))}")
         applied = system_meta.get("applied_scale")
@@ -502,6 +504,7 @@ def write_card(
             f"`clip_scale_to_one = {cfg['system']['clip_scale_to_one']}`."
         )
         lines.append("- _Realized scaling not recorded: no system was built in this process._")
+        lines.append(f"- **storage_soc_mode:** `{cfg['system'].get('storage_soc_mode', 'fixed')}`")
     lines.append("")
 
     lines.append("## Tasks\n")

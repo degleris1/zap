@@ -18,6 +18,11 @@ system:
   carbon_tax: 0.0
   storage_init_soc: 0.5
   storage_final_soc: 0.5
+  # Storage boundary condition of every block (and of the reference solve).
+  #   fixed       -- energy[0] = storage_init_soc * E, energy[T] = storage_final_soc * E
+  #   cyclic_free -- energy[0] = energy[T], level chosen by the optimizer
+  #                  (storage_init_soc / storage_final_soc are then ignored)
+  storage_soc_mode: fixed   # fixed | cyclic_free
   # Unit scaling handed to the importer (wy_store LoadOptions). 1.0 keeps the
   # system in MW / $, which is what every reported metric is denominated in;
   # a different scaling only changes the conditioning of the ADMM solve, and

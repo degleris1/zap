@@ -235,14 +235,18 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
     # --- Storage -------------------------------------------------------------
     discharge_total = 0.0
     energy_capacity = 0.0
+    start_energy = 0.0
+    saw_energy = False
     for i in groups.get("StorageUnit", []):
         device = devices[i]
         state = local_vars[i]
         if state is None:
             continue
         discharge = getattr(state, "discharge", None)
-        if discharge is None and isinstance(state, (list, tuple)) and len(state) >= 3:
-            discharge = state[2]
+        energy = getattr(state, "energy", None)
+        if isinstance(state, (list, tuple)) and len(state) >= 3:
+            energy = state[0] if energy is None else energy
+            discharge = state[2] if discharge is None else discharge
         if discharge is None:
             continue
         discharge_total += float(np.asarray(discharge, dtype=np.float64).sum())
@@ -252,11 +256,22 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
                 * np.asarray(device.duration, dtype=np.float64)
             )
         )
+        if energy is not None:
+            # Column 0 is the block's starting level of every unit; with an ADMM
+            # window it is the first window's start.
+            start_energy += float(np.asarray(energy, dtype=np.float64)[:, 0].sum())
+            saw_energy = True
     storage_cycles = discharge_total / energy_capacity if energy_capacity > 0 else float("nan")
     metrics["storage_cycles"] = storage_cycles
     # `storage_cycles` counts cycles *per block*, so it is not comparable across
     # block sizes (24 h vs 168 h vs a full year); normalise it per day.
     metrics["storage_cycles_per_day"] = storage_cycles * 24.0 / float(block.hours)
+    # Fleet energy-weighted starting state of charge, as a fraction of total
+    # energy capacity: with `storage_soc_mode: fixed` this is exactly
+    # `storage_init_soc`; with `cyclic_free` it is the level the block chose.
+    metrics["storage_start_soc_frac"] = (
+        start_energy / energy_capacity if (saw_energy and energy_capacity > 0) else float("nan")
+    )
 
     # --- Prices --------------------------------------------------------------
     # Restricted to load-carrying buses: `ca2040_z4` prices the import bus

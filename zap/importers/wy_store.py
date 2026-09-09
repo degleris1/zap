@@ -543,6 +543,10 @@ class LoadOptions:
     cost_unit: float = 1.0
     storage_init_soc: float = 0.5
     storage_final_soc: float = 0.5
+    #: Storage boundary condition of a block. ``"fixed"`` pins start and end at
+    #: ``storage_init_soc`` / ``storage_final_soc``; ``"cyclic_free"`` only ties
+    #: them together (``energy[0] == energy[T]``) and ignores both levels.
+    storage_soc_mode: Literal["fixed", "cyclic_free"] = "fixed"
     dtype: str = "float64"
 
 
@@ -1127,8 +1131,10 @@ def _build_storage(
         discharge_efficiency=units["efficiency_dispatch"].to_numpy(dtype=np.float64),
         # state_of_charge_initial is 0 for every row in these datasets; the plan
         # mandates cyclic 50 %, so we use the constant instead (spec 2.5).
+        # Both are ignored when `storage_soc_mode == "cyclic_free"`.
         initial_soc=np.full(len(units), float(options.storage_init_soc)),
         final_soc=np.full(len(units), float(options.storage_final_soc)),
+        soc_mode=str(options.storage_soc_mode),
         linear_cost=units["marginal_cost"].to_numpy(dtype=np.float64),
         capital_cost=units["capital_cost"].to_numpy(dtype=np.float64),
         min_power_capacity=p_nom.copy(),
@@ -1534,6 +1540,9 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "retired_capacity_mw_by_carrier": retirements["retired_capacity_mw_by_carrier"],
         "retired_names": retirements["retired_names"],
         "link_losses": bool(options.link_losses),
+        "storage_soc_mode": str(options.storage_soc_mode),
+        "storage_init_soc": float(options.storage_init_soc),
+        "storage_final_soc": float(options.storage_final_soc),
         "power_unit": float(options.power_unit),
         "cost_unit": float(options.cost_unit),
         "weather_store_attrs": store.attrs,

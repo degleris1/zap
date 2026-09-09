@@ -37,6 +37,7 @@ OPAQUE_PATHS = frozenset(
 
 VALID_DEMAND_SCALING = ("none", "fixed", "peak_fraction")
 VALID_EXPORT_MODE = ("sink", "drop")
+VALID_STORAGE_SOC_MODE = ("fixed", "cyclic_free")
 VALID_REFERENCE = ("window", "full_year", "none")
 
 METHOD_NAMES = ("lp", "admm")
@@ -226,6 +227,7 @@ def normalize(cfg: dict) -> dict:
         sysc[key] = float(sysc[key])
     for key in ("clip_scale_to_one", "link_losses"):
         sysc[key] = bool(sysc[key])
+    sysc["storage_soc_mode"] = str(sysc["storage_soc_mode"])
 
     cfg["heuristics"]["name"] = str(cfg["heuristics"]["name"])
     cfg["heuristics"]["ucap_derate"] = bool(cfg["heuristics"]["ucap_derate"])
@@ -447,6 +449,11 @@ def validate(cfg: dict) -> dict:
         )
     if sysc["export_mode"] not in VALID_EXPORT_MODE:
         raise ConfigError(f"system.export_mode must be one of {VALID_EXPORT_MODE}")
+    if sysc["storage_soc_mode"] not in VALID_STORAGE_SOC_MODE:
+        raise ConfigError(
+            f"system.storage_soc_mode must be one of {VALID_STORAGE_SOC_MODE}, "
+            f"got {sysc['storage_soc_mode']!r}"
+        )
 
     if plan_mode:
         _validate_planning(cfg)

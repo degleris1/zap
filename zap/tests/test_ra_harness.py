@@ -932,6 +932,8 @@ class TestBlockMetrics(TempRunMixin):
         self.assertAlmostEqual(m["export_revenue"], 50.0)  # -(-5 $/MWh * 5 MW * 2 h)
 
         self.assertAlmostEqual(m["storage_cycles"], 2.0 / (10.0 * 4.0))
+        # Fleet start level 20 MWh of 10 MW * 4 h = 40 MWh of energy capacity.
+        self.assertAlmostEqual(m["storage_start_soc_frac"], 0.5)
         self.assertAlmostEqual(m["mean_price"], 40.0)  # load-weighted: bus 1 only
         self.assertAlmostEqual(m["max_price"], 60.0)
         self.assertAlmostEqual(m["operational_cost"], 1200.0 + 20000.0 - 10.0)
