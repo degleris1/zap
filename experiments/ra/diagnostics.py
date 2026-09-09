@@ -52,16 +52,27 @@ FALLBACK_COLORS = ["#4c7a4c", "#7b3f8c", "#8b1f1f"]
 
 GRID_KWARGS = dict(color="0.85", linewidth=0.6)
 
-#: Fraction of one weather-year slot covered by a group of bars.
-GROUP_WIDTH = 0.8
-#: Background behind direct labels, so they stay readable over bars and lines.
+#: Marker shape per dataset, so the two series stay distinguishable in print.
+DATASET_MARKERS = {"ca2040_z4": "o", "ca2040_county": "s"}
+FALLBACK_MARKERS = ["^", "D", "v"]
+
+#: Marker diameter, in points (1 pt = 150/72 px at the 150-dpi save).
+MARKER_SIZE = 8.0
+#: Half-width of the x fan-out applied to the markers of one weather year, in
+#: year units: identical values (demand, peak load) stay separately visible.
+YEAR_SPREAD = 0.18
+
+#: Background behind direct labels, so they stay readable over markers and lines.
 LABEL_BBOX = {"facecolor": "white", "edgecolor": "none", "pad": 1.0, "alpha": 0.8}
-#: On-screen gap between the bars of one year, in device pixels.
-BAR_GAP_PX = 2.0
+
+#: Fractional padding added below / above the data when autoscaling y. The top
+#: is roomier because the legend and the max labels live there.
+Y_PAD_LOW = 0.22
+Y_PAD_HIGH = 0.36
 
 #: Annual demand and peak load are the same numbers in both resolutions
-#: (county is a spatial disaggregation of the same load); both bars are kept so
-#: the layout matches the other figures, and the note says so on the figure.
+#: (county is a spatial disaggregation of the same load); both markers are kept
+#: so the layout matches the other figures, and the note says so on the figure.
 IDENTICAL_NOTE = (
     "Series are identical by construction: ca2040_county is a spatial "
     "disaggregation of the same load."
@@ -174,45 +185,46 @@ def _color(dataset: str, order: int) -> str:
     return DATASET_COLORS.get(dataset, FALLBACK_COLORS[order % len(FALLBACK_COLORS)])
 
 
-def _resize_bars(fig, ax, series) -> None:
-    """Give every year's bars a fixed on-screen gap of ``BAR_GAP_PX`` pixels."""
-    n_series = len(series)
-    if n_series == 0:
-        return
-    fig.canvas.draw()
-    x_lo, x_hi = ax.get_xlim()
-    width_px = ax.get_window_extent().width
-    if width_px <= 0 or x_hi <= x_lo:
-        return
-    gap = BAR_GAP_PX * (x_hi - x_lo) / width_px
-    bar_width = (GROUP_WIDTH - (n_series - 1) * gap) / n_series
-    if bar_width <= 0:
-        return
-    for order, item in enumerate(series):
-        offset = -GROUP_WIDTH / 2 + order * (bar_width + gap)
-        for year, bar in zip(item["x"], item["bars"]):
-            bar.set_x(float(year) + offset)
-            bar.set_width(bar_width)
+def _marker(dataset: str, order: int) -> str:
+    return DATASET_MARKERS.get(dataset, FALLBACK_MARKERS[order % len(FALLBACK_MARKERS)])
+
+
+def _x_offsets(n_series: int) -> list[float]:
+    """Small horizontal fan-out so coincident values stay individually visible."""
+    if n_series < 2:
+        return [0.0] * n_series
+    step = 2 * YEAR_SPREAD / (n_series - 1)
+    return [-YEAR_SPREAD + order * step for order in range(n_series)]
 
 
 def _annotate_extremes(ax, item, order: int) -> None:
-    """Label only the tallest and shortest bar of one series.
+    """Label only the highest and lowest year of one series.
 
     ``order`` lifts each series' labels onto its own row so that two series
     whose extremes fall on neighbouring years do not overprint each other.
     """
-    x, y, bars = item["x"], item["y"], item["bars"]
+    x, y = item["x"], item["y"]
     if len(y) == 0:
         return
-    for index in {int(np.argmax(y)), int(np.argmin(y))}:
-        bar = bars[index]
+    seen = set()
+    #: the max label goes above its marker, the min label below it.
+    for index, direction in ((int(np.argmax(y)), 1), (int(np.argmin(y)), -1)):
+        if index in seen:
+            continue
+        seen.add(index)
+        # Keep a label on an end-of-record year inside the axes.
+        ha = "center"
+        if index == 0:
+            ha = "left"
+        elif index == len(y) - 1:
+            ha = "right"
         ax.annotate(
             f"{int(x[index])}: {y[index]:,.4g}",
-            xy=(bar.get_x() + bar.get_width() / 2, y[index]),
-            xytext=(0, 3 + 11 * order),
+            xy=(float(x[index]) + item["offset"], y[index]),
+            xytext=(0, direction * (8 + 12 * order)),
             textcoords="offset points",
-            ha="center",
-            va="bottom",
+            ha=ha,
+            va="bottom" if direction > 0 else "top",
             fontsize=8,
             color=item["color"],
             bbox=LABEL_BBOX,
@@ -227,28 +239,42 @@ def _figure(
     references: Sequence[tuple[float, str]] = (),
     note: str | None = None,
 ) -> Path:
-    """Grouped bar chart of ``column``: one bar per dataset per weather year."""
+    """Scatter of ``column``: one marker per dataset per weather year."""
     fig, ax = plt.subplots(figsize=(8.0, 4.2))
     ax.set_axisbelow(True)
     ax.grid(True, axis="y", **GRID_KWARGS)
 
+    groups = list(table.groupby("dataset", sort=True))
+    offsets = _x_offsets(len(groups))
+
     series = []
-    for order, (dataset, group) in enumerate(table.groupby("dataset", sort=True)):
+    for order, (dataset, group) in enumerate(groups):
         group = group.sort_values("weather_year")
         x = group["weather_year"].to_numpy()
         y = group[column].to_numpy(dtype=float)
         color = _color(dataset, order)
-        bars = ax.bar(x.astype(float), y, width=GROUP_WIDTH, color=color, label=dataset)
-        series.append({"x": x, "y": y, "color": color, "bars": list(bars)})
+        ax.plot(
+            x.astype(float) + offsets[order],
+            y,
+            linestyle="none",
+            marker=_marker(dataset, order),
+            markersize=MARKER_SIZE,
+            markeredgewidth=0.0,
+            color=color,
+            label=dataset,
+        )
+        series.append({"x": x, "y": y, "color": color, "offset": offsets[order]})
 
     years = table["weather_year"].to_numpy(dtype=float)
-    ax.set_xlim(years.min() - 0.6, years.max() + 0.6)
+    ax.set_xlim(years.min() - 0.8, years.max() + 0.8)
     ax.set_xticks(sorted(set(years.tolist())))
     ax.tick_params(axis="x", labelrotation=90, labelsize=8)
 
-    top = max(float(np.nanmax(item["y"])) for item in series)
-    top = max([top, *(value for value, _ in references)])
-    ax.set_ylim(0.0, top * 1.22)
+    values = [float(v) for item in series for v in item["y"] if np.isfinite(v)]
+    values.extend(value for value, _ in references)
+    low, high = min(values), max(values)
+    span = (high - low) or (abs(high) or 1.0)
+    ax.set_ylim(low - Y_PAD_LOW * span, high + Y_PAD_HIGH * span)
 
     for value, label in references:
         ax.axhline(value, linestyle="--", linewidth=1.0, color="0.35")
@@ -276,7 +302,6 @@ def _figure(
     if note:
         fig.text(0.5, 0.015, note, ha="center", fontsize=8, color="0.35")
 
-    _resize_bars(fig, ax, series)
     for order, item in enumerate(series):
         _annotate_extremes(ax, item, order)
 
