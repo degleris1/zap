@@ -742,26 +742,50 @@ def test_retirement_meta_and_peak_capacity(dataset):
 
 
 def test_retired_row_gets_the_minimum_outage_pool(dataset):
-    """The pool keeps the retired row's slot, sized as if it were a 0 MW candidate."""
+    """The pool keeps the retired row's slot, sized as if it were a 0 MW candidate.
+
+    Written against the *rule*, not against today's ``min_pool_capacity_mw``: the
+    shipped value is a floor every row is sized on (10 GW as of 2026-09-09), which
+    hides the retirement effect, so the "sized as a 0 MW candidate" half of the
+    contract is checked with the floor removed.
+    """
+    import dataclasses
+    import math
+
     ox = pytest.importorskip("zap.reliability.outages")
-    params = ox.load_outage_params()
-
-    pool = ox.build_unit_pool(dataset, params)
+    shipped = ox.load_outage_params()
     retired = TINY_RETIRED_GENERATORS[0]
-    assert retired in pool.row_offset
-    assert pool.row_units[retired] == params.min_units_per_row
 
-    # Without the lifetime rule the same row is sized on its 70 MW as-built.
-    kept = ox.build_unit_pool(dataset, params, model_year=1999)
-    assert kept.row_units[retired] > params.min_units_per_row
+    # (a) With no capacity floor, a retired row falls back to the minimum pool
+    # while the same row sized on its 70 MW as-built capacity gets more.
+    floorless = dataclasses.replace(shipped, min_pool_capacity_mw=0.0)
+    pool = ox.build_unit_pool(dataset, floorless)
+    assert retired in pool.row_offset
+    assert pool.row_units[retired] == floorless.min_units_per_row
+    kept = ox.build_unit_pool(dataset, floorless, model_year=1999)
+    assert kept.row_units[retired] > floorless.min_units_per_row
+
+    # (b) With the shipped floor, a retired row is pooled exactly like any other
+    # zero-capacity expansion candidate -- retirement is sizing-neutral.
+    shipped_pool = ox.build_unit_pool(dataset, shipped)
+    unit_size = shipped_pool.row_size[retired]
+    expected = max(
+        shipped.min_units_per_row,
+        math.ceil(shipped.pool_multiplier * shipped.min_pool_capacity_mw / unit_size),
+    )
+    assert shipped_pool.row_units[retired] == expected
+    assert ox.build_unit_pool(dataset, shipped, model_year=1999).row_units[retired] == expected, (
+        "the 70 MW as-built row is below the floor, so the lifetime rule cannot change its pool"
+    )
 
     # Offsets stay a running cumulative sum over the same rows in the same order.
-    assert list(pool.row_offset) == list(kept.row_offset)
-    offset = 0
-    for row, n in pool.row_units.items():
-        assert pool.row_offset[row] == offset
-        offset += n
-    assert offset == pool.n_units
+    for built in (pool, kept, shipped_pool):
+        assert list(built.row_offset) == list(pool.row_offset)
+        offset = 0
+        for row, n in built.row_units.items():
+            assert built.row_offset[row] == offset
+            offset += n
+        assert offset == built.n_units
 
 
 # ---------------------------------------------------------------------------

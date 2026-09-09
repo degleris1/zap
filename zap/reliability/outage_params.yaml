@@ -20,7 +20,17 @@ version: 1
 reviewed: false            # flip to true only after the user has checked the numbers
 pool_multiplier: 3.0       # pool capacity = multiplier x reference capacity
 min_units_per_row: 3
-min_pool_capacity_mw: 0.0
+# Floor on the capacity every pooled row is sized for:
+#   reference_mw = max(active_mw, min_pool_capacity_mw)
+#   row_units    = max(min_units_per_row, ceil(pool_multiplier * reference_mw / unit_size_mw))
+# 10 GW matches the upper bound the planning harness invents for an expansion
+# candidate with no finite `p_nom_max` -- `experiments/ra/planning/expansion.py`
+# uses `(p_nom + 1000) * max_capacity_multiple` with `max_capacity_multiple: 10`,
+# i.e. 10 GW for a zero-capacity row. With `pool_multiplier: 3.0` the pool
+# therefore covers 3x that bound, so `row_availability` cannot run out of units
+# for any design the harness can produce. Raising this floor renumbers the unit
+# axis, so a store generated with a different value is not draw-comparable.
+min_pool_capacity_mw: 10000.0
 
 # Carriers that are deliberately given no outage units. VRE availability is
 # already in the weather profiles; AC/DC/imports/exports are network carriers.
