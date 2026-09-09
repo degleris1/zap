@@ -1,4 +1,9 @@
 # ADMM dispatch on the CPU. Never gates a run (required: false); see spec R7.
+#
+# Settings follow the phase-1 benchmark review, section 3.6, and are only
+# meaningful with the corrected battery prox (3.1) and the unit-consistent
+# convergence test (3.2). `adaptive_rho` stays off: the rule is only safe now
+# that rho_min / rho_max clamp it, and a fixed rho keeps blocks comparable.
 methods:
   lp:
     enabled: true
@@ -8,6 +13,17 @@ methods:
     enabled: true
     required: false
     solver: ADMM
-    solver_kwargs: {num_iterations: 5000, rho_power: 1.0, atol: 1.0e-4, rtol: 1.0e-4}
     dtype: float64
     timeout_s: 3600
+    max_imbalance_mw: 1.0
+    max_soc_residual_mwh: 1.0   # storage SoC-recursion residual gate (projected prox iterate)
+    solver_kwargs:
+      num_iterations: 20000
+      minimum_iterations: 100
+      rho_power: 1.0
+      adaptive_rho: false
+      rtol_dual_use_objective: false
+      atol: 1.0e-6
+      rtol: 1.0e-5
+      battery_inner_iterations: 200
+      battery_inner_over_relaxation: 1.8

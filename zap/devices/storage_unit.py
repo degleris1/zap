@@ -417,7 +417,7 @@ class StorageUnit(AbstractDevice):
                 T, num_scenarios, pmax_t, smax, gamma1, gammaT, machine, dtype
             )
             A = A_matrix(T, machine, dtype=dtype)
-            b = b_vector(self, T, machine)
+            b = b_vector(self, T, num_scenarios, machine, dtype=dtype)
 
             _zT = power[0].reshape(-1, num_scenarios, T, 1)
             _rhs = K_rhs_fixed(rho_power, A, b, _zT)
@@ -455,6 +455,7 @@ class StorageUnit(AbstractDevice):
         y[:, :, :T, :] = torch.relu(-zT)
         y[:, :, T : (2 * T), :] = torch.relu(zT)
         y[:, :, (2 * T) :, :] = gamma1.reshape(-1, 1, 1, 1)
+        y = torch.clip(y, min=ymin, max=ymax)
 
         # Solve ADMM
         for iter in range(inner_iterations):
@@ -462,13 +463,21 @@ class StorageUnit(AbstractDevice):
                 x, y, u, rhs, schur, ymin, ymax, inner_weight, inner_over_relaxation
             )
 
-        # Extract results
-        c = x[:, :, :T, 0].reshape(N, -1)
-        d = x[:, :, T : (2 * T), 0].reshape(N, -1)
-        # s = x[:, :, (2 * T) :, 0].reshape(N, -1)
+        # Extract results from the *projected* iterate `y`, not from `x`: `y` is
+        # the copy that lives in the box, so the returned charge / discharge always
+        # satisfy the device's own power bounds (and the SoC its energy bounds and
+        # boundary conditions) at any inner iteration count. `x` satisfies the SoC
+        # recursion exactly instead; the two agree as the inner solver converges.
+        c = y[:, :, :T, 0].reshape(N, -1)
+        d = y[:, :, T : (2 * T), 0].reshape(N, -1)
+        s = y[:, :, (2 * T) :, 0].reshape(N, -1)
 
-        # (power, angle, local_variables) -- the ADMM solver unpacks three values
-        return [d - c], None, None
+        # (power, angle, local_variables) -- the ADMM solver unpacks three values.
+        # NOTE: with a battery window (num_scenarios > 1) the energy variable has
+        # num_scenarios * (T + 1) columns, one SoC trajectory per window, and is
+        # therefore not the (N, time_horizon + 1) shape the LP model uses.
+        local_variables = StorageUnitVariable(s, c, d)
+        return [d - c], None, local_variables
 
 
 # ====
@@ -489,70 +498,143 @@ def difference_matrix(T, machine=None, dtype=None):
     return D2 - D1
 
 
-def b_vector(device: StorageUnit, T, machine=None):
-    dtype = device.power_capacity.dtype
+def b_vector(device: StorageUnit, T, num_scenarios=1, machine=None, dtype=None):
+    """Linear cost of the prox variable ``x = [charge; discharge; energy]``.
 
-    # TODO - Support multiple costs
-    alpha = device.linear_cost[0]
-    return torch.vstack(
-        [
-            alpha * torch.ones((T, 1), device=machine, dtype=dtype),
-            torch.zeros((2 * T + 1, 1), device=machine, dtype=dtype),
-        ]
-    )
+    ``StorageUnit.operation_cost`` charges ``linear_cost * discharge``, so the cost
+    sits on the ``x[T:2T]`` block -- one coefficient *per unit* (and per hour when
+    ``linear_cost`` is time-varying), not row 0's coefficient for the whole fleet.
+
+    Returns
+    -------
+    torch.Tensor of shape ``(N, S, 3T + 1, 1)`` with ``S == 1`` for a static cost
+    and ``S == num_scenarios`` for a time-varying one.
+    """
+    if dtype is None:
+        dtype = device.power_capacity.dtype
+
+    cost = device.linear_cost
+    N = cost.shape[0]
+
+    if cost.shape[1] == 1:
+        alpha = cost.reshape(N, 1, 1).expand(N, 1, T)
+        S = 1
+    else:
+        assert cost.shape[1] == num_scenarios * T, (
+            "Time-varying linear_cost must span the full time horizon: "
+            f"got {cost.shape[1]}, expected {num_scenarios * T}"
+        )
+        alpha = cost.reshape(N, num_scenarios, T)
+        S = num_scenarios
+
+    b = torch.zeros((N, S, 3 * T + 1, 1), device=machine, dtype=dtype)
+    b[:, :, T : (2 * T), 0] = alpha.to(dtype=dtype)
+    return b
 
 
 def C_matrix(device: StorageUnit, T, machine=None, dtype=None):
-    # TODO - Support multiple charge efficiencies
-    beta = device.charge_efficiency[0]
+    """Per-unit state-of-charge dynamics ``C_i x_i = 0``, batched over units.
+
+    Mirrors ``StorageUnit.equality_constraints``:
+    ``s[t+1] - s[t] - beta_i * c[t] + d[t] / eta_i == 0``, i.e.
+    ``C_i = [-beta_i * I, (1 / eta_i) * I, D]`` with ``D`` the (T, T+1) forward
+    difference. Both efficiencies are per unit.
+
+    Returns
+    -------
+    torch.Tensor of shape ``(N, T, 3T + 1)``.
+    """
+    if dtype is None:
+        dtype = device.power_capacity.dtype
+
+    beta = device.charge_efficiency
+    eta = device.discharge_efficiency
+    assert beta.shape[1] == 1 and eta.shape[1] == 1, (
+        "Time-varying charge/discharge efficiencies are not supported by the ADMM prox"
+    )
+    beta = beta[:, 0].to(dtype=dtype).reshape(-1, 1, 1)
+    inv_eta = (1.0 / eta[:, 0]).to(dtype=dtype).reshape(-1, 1, 1)
+
     D = difference_matrix(T, machine, dtype)
     Id = torch.eye(T, device=machine, dtype=dtype)
 
-    return torch.hstack([-beta * Id, Id, D])
+    N = beta.shape[0]
+    C = torch.zeros((N, T, 3 * T + 1), device=machine, dtype=dtype)
+    C[:, :, :T] = -beta * Id
+    C[:, :, T : (2 * T)] = inv_eta * Id
+    C[:, :, (2 * T) :] = D
+    return C
 
 
 def A_matrix(T, machine=None, dtype=None):
-    Id = torch.eye(T, device=machine)
+    Id = torch.eye(T, device=machine, dtype=dtype)
     return torch.hstack([-Id, Id, torch.zeros(T, T + 1, device=machine, dtype=dtype)])
 
 
-def K_matrix(device: StorageUnit, T, rho, w, machine=None):
-    dtype = device.power_capacity.dtype
+def _hessian(device: StorageUnit, T, rho, w, machine=None, dtype=None):
+    """``H = rho A'A + w I`` plus the quadratic discharge cost, batched if needed."""
+    if dtype is None:
+        dtype = device.power_capacity.dtype
 
     A = A_matrix(T, machine, dtype)
-    C = C_matrix(device, T, machine, dtype)
     Id = torch.eye(3 * T + 1, device=machine, dtype=dtype)
+    H = rho * (A.T @ A) + w * Id
 
-    dKdx = rho * (A.T @ A) + w * Id
     if device.quadratic_cost is not None:
-        dKdx[2 * T + 1 :, 2 * T + 1 :] += torch.diag(device.quadratic_cost)
+        # operation_cost charges quadratic_cost * discharge^2, whose Hessian is
+        # 2 * quadratic_cost on the discharge block x[T:2T] (per unit).
+        q = device.quadratic_cost
+        q = q[:, 0] if q.dim() == 2 else q.reshape(-1)
+        N = q.shape[0]
+        H = H.expand(N, 3 * T + 1, 3 * T + 1).clone()
+        idx = torch.arange(T, device=machine) + T
+        H[:, idx, idx] += 2.0 * q.to(dtype=dtype).reshape(N, 1)
 
-    row1 = torch.hstack([dKdx, C.T])
-    row2 = torch.hstack([C, torch.zeros(T, T, device=machine)])
+    return H
 
-    return torch.vstack([row1, row2])
+
+def K_matrix(device: StorageUnit, T, rho, w, machine=None):
+    """KKT matrix of the prox subproblem, batched over units: ``(N, 4T+1, 4T+1)``."""
+    dtype = device.power_capacity.dtype
+
+    C = C_matrix(device, T, machine, dtype)
+    H = _hessian(device, T, rho, w, machine, dtype)
+    N = C.shape[0]
+
+    H = H.expand(N, 3 * T + 1, 3 * T + 1) if H.dim() == 2 else H
+    CT = C.transpose(-1, -2)
+
+    row1 = torch.cat([H, CT], dim=-1)
+    row2 = torch.cat([C, torch.zeros((N, T, T), device=machine, dtype=dtype)], dim=-1)
+
+    return torch.cat([row1, row2], dim=-2)
 
 
 def schur_matrix(device, T, rho, w, machine=None):
+    """Per-unit Schur complement mapping the prox right-hand side to ``x``.
+
+    ``x_i = S_i @ rhs_i`` solves ``[[H, C_i'], [C_i, 0]] [x; nu] = [rhs; 0]``, i.e.
+    ``S_i = H^-1 - (C_i H^-1)' (C_i H^-1 C_i')^-1 (C_i H^-1)``.
+
+    Returns
+    -------
+    torch.Tensor of shape ``(N, 1, 3T + 1, 3T + 1)``, broadcasting over the
+    scenario axis of the batched inner solve.
+    """
     dtype = device.power_capacity.dtype
 
-    A = A_matrix(T, machine, dtype)
     C = C_matrix(device, T, machine, dtype)
-    Id = torch.eye(3 * T + 1, device=machine, dtype=dtype)
+    H = _hessian(device, T, rho, w, machine, dtype)
 
-    # Hessian
-    H = rho * (A.T @ A) + w * Id
-    if device.quadratic_cost is not None:
-        H[2 * T + 1 :, 2 * T + 1 :] += torch.diag(device.quadratic_cost)
-
-    H_inv = torch.linalg.inv(H)
+    H_inv = torch.linalg.inv(H)  # (3T+1, 3T+1) or (N, 3T+1, 3T+1)
 
     # Reduced terms
-    Q = C @ H_inv
-    M = Q @ C.T
+    Q = C @ H_inv  # (N, T, 3T+1)
+    M = Q @ C.transpose(-1, -2)  # (N, T, T)
 
-    # Return Schur complement
-    return H_inv - Q.T @ torch.linalg.inv(M) @ Q
+    # Schur complement, batched over units
+    S = H_inv - Q.transpose(-1, -2) @ torch.linalg.inv(M) @ Q
+    return S.unsqueeze(1)
 
 
 def K_rhs_fixed(rho, A, b, z):
@@ -589,12 +671,18 @@ def battery_prox_data(device: StorageUnit, T: int, rho, z, weight=1.0):
     assert T * num_scenarios == T_full
 
     # Fixed data that does not change between solves
+    dtype = device.power_capacity.dtype
     K = K_matrix(device, T, rho, weight, machine)
     K_inv = torch.linalg.inv(K)
 
     # zT and rhs are just created to get the dimensions for zero_nu
     zT = z.reshape(-1, num_scenarios, T, 1)
-    rhs = K_rhs_fixed(rho, A_matrix(T, machine), b_vector(device, T, machine), zT)
+    rhs = K_rhs_fixed(
+        rho,
+        A_matrix(T, machine, dtype),
+        b_vector(device, T, num_scenarios, machine, dtype),
+        zT,
+    )
     zero_nu = torch.zeros((rhs.shape[0], rhs.shape[1], T, rhs.shape[3]), device=machine)
 
     return K_inv, zero_nu

@@ -163,12 +163,70 @@ def solve_block_lp(loaded, devices, task, cfg: dict) -> dict[str, Any]:
     }
 
 
+#: Default gate on the ADMM iterate's worst nodal power-balance violation. An
+#: iterate that misses balance by more than this is not a dispatch, and its cost
+#: must not be averaged into a headline (benchmark review, section 3.3).
+DEFAULT_MAX_IMBALANCE_MW = 1.0
+
+STATUS_INFEASIBLE = "infeasible"
+DEFAULT_MAX_SOC_RESIDUAL_MWH = 1.0
+
+
+def admm_max_imbalance_mw(state) -> float:
+    """Worst nodal power-balance violation of an ADMM iterate, in MW.
+
+    ``state.avg_power`` is the per-node average of the terminal powers; multiplying
+    by the terminal count recovers the nodal sum, which is zero exactly when power
+    balance holds. Residual *norms* are uninterpretable on a run card; this is not.
+    """
+    import torch
+
+    from zap.admm.util import unsqueeze_terminals_times_x
+
+    imbalance = unsqueeze_terminals_times_x(state.num_terminals, state.avg_power)
+    return float(torch.max(torch.abs(imbalance)).item())
+
+
+def admm_max_storage_residual_mwh(devices, outcome) -> float:
+    """Worst storage equality-constraint violation of an ADMM iterate, in device
+    energy units (MWh at power_unit 1).
+
+    The battery prox returns the box-projected iterate, so its state of charge
+    can violate the SoC recursion ``s[t+1] = s[t] + eta_c c - d / eta_d`` (and
+    the initial / final SoC pins) by an amount the nodal-balance gate cannot
+    see. Evaluates every StorageUnit's own ``equality_constraints`` on the
+    numpy outcome; 0.0 when the system has no storage.
+    """
+    from zap.devices.storage_unit import StorageUnit
+
+    worst = 0.0
+    for i, dev in enumerate(devices):
+        if not isinstance(dev, StorageUnit):
+            continue
+        residuals = dev.equality_constraints(
+            outcome.power[i], outcome.angle[i], outcome.local_variables[i], la=np
+        )
+        for r in residuals[1:]:  # [0] is the terminal-power identity, always exact
+            if np.size(r):
+                worst = max(worst, float(np.max(np.abs(np.asarray(r, dtype=float)))))
+    return worst
+
+
+def _gate_value(method_cfg: dict, key: str, default: float) -> float:
+    value = method_cfg.get(key)
+    return float(default if value is None else value)
+
+
 def solve_block_admm(loaded, devices, task, cfg: dict) -> dict[str, Any]:
     import torch
 
     from zap.admm import ADMMSolver
 
     method_cfg = cfg["methods"]["admm"]
+    max_imbalance = _gate_value(method_cfg, "max_imbalance_mw", DEFAULT_MAX_IMBALANCE_MW)
+    max_soc_residual = _gate_value(
+        method_cfg, "max_soc_residual_mwh", DEFAULT_MAX_SOC_RESIDUAL_MWH
+    )
     solver_kwargs = dict(method_cfg.get("solver_kwargs") or {})
     dtype = getattr(torch, str(method_cfg.get("dtype", "float64")))
     machine = solver_kwargs.pop("machine", "cpu")
@@ -191,15 +249,29 @@ def solve_block_admm(loaded, devices, task, cfg: dict) -> dict[str, Any]:
     primal = float(history.power[-1]) if getattr(history, "power", None) else float("nan")
     dual = float(history.dual_power[-1]) if getattr(history, "dual_power", None) else float("nan")
     iterations = len(getattr(history, "power", []) or [])
-    status = "converged" if getattr(solver, "converged", False) else "max_iterations"
+    converged = bool(getattr(solver, "converged", False))
+    status = "converged" if converged else "max_iterations"
+    # In physical MW: the importer may have scaled the system by `power_unit`.
+    power_unit = float((getattr(loaded, "meta", {}) or {}).get("power_unit", 1.0) or 1.0)
+    imbalance = admm_max_imbalance_mw(state) * power_unit
+    soc_residual = admm_max_storage_residual_mwh(devices, outcome) * power_unit
+
+    def _last(name):
+        values = getattr(history, name, None) or []
+        return float(values[-1]) if values else float("nan")
 
     metrics["solve_wall_clock_s"] = wall
     metrics["solver_status"] = status
     metrics["admm_iterations"] = iterations
     metrics["admm_primal_residual"] = primal
     metrics["admm_dual_residual"] = dual
+    metrics["admm_primal_tol"] = _last("primal_tol")
+    metrics["admm_dual_tol"] = _last("dual_tol")
+    metrics["admm_converged"] = converged
+    metrics["admm_max_imbalance_mw"] = imbalance
+    metrics["admm_max_soc_residual_mwh"] = soc_residual
 
-    return {
+    payload = {
         "metrics": metrics,
         "solver_status": status,
         "n_variables": None,
@@ -209,6 +281,25 @@ def solve_block_admm(loaded, devices, task, cfg: dict) -> dict[str, Any]:
         "admm_dual_residual": dual,
         "system_meta": dict(getattr(loaded, "meta", {}) or {}),
     }
+
+    # The ADMM iterate's cost is the cost of a *dispatch heuristic*: it neither
+    # upper- nor lower-bounds the LP. If the iterate is not even a dispatch --
+    # nodal power balance missed by more than the gate -- mark the task so
+    # `runcard.summarize` drops it instead of averaging it into the headline.
+    if not np.isfinite(imbalance) or imbalance > max_imbalance:
+        payload["status"] = STATUS_INFEASIBLE
+        payload["error"] = (
+            f"ADMM iterate violates nodal power balance by {imbalance:.4g} MW "
+            f"> methods.admm.max_imbalance_mw = {max_imbalance:g}"
+        )
+    elif not np.isfinite(soc_residual) or soc_residual > max_soc_residual:
+        payload["status"] = STATUS_INFEASIBLE
+        payload["error"] = (
+            f"ADMM iterate violates storage energy balance by {soc_residual:.4g} MWh "
+            f"> methods.admm.max_soc_residual_mwh = {max_soc_residual:g}"
+        )
+
+    return payload
 
 
 def solve_block_stub(task, cfg: dict) -> dict[str, Any]:

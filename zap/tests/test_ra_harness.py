@@ -322,11 +322,17 @@ class TestTasks(TempRunMixin):
         counts = {}
         for task in all_tasks:
             counts[str(task.block_size)] = counts.get(str(task.block_size), 0) + 1
-        self.assertEqual(counts, {"24": 365, "168": 52, "reference": 1})
-        self.assertEqual(len(all_tasks), 418)
+        # dataset.window.stop = 8736 = 52*168 = 364*24, so the full-year
+        # reference tiles both block sizes exactly (orchestrator, 2026-09-08).
+        self.assertEqual(counts, {"24": 364, "168": 52, "reference": 1})
+        self.assertEqual(len(all_tasks), 417)
+        self.assertEqual(cfg["dataset"]["window"], {"start": 0, "stop": 8736})
+        self.assertEqual(cfg["selection"]["reference"], "full_year")
 
-        # The reference window is covered exactly by both block sizes.
+        # The reference window -- here the whole window -- is covered exactly by
+        # both block sizes, with no straddling or dropped blocks.
         bounds = blocks_mod.reference_bounds(cfg)
+        self.assertEqual(bounds, (0, 8736))
         for size in cfg["selection"]["blocks"]:
             inside = [
                 b
@@ -754,6 +760,64 @@ class TestMetricsAggregation(TempRunMixin):
         self.assertIn("ca2040_z4", text)
 
 
+class TestADMMGapVsLP(unittest.TestCase):
+    """`runcard.admm_gap_vs_lp` pairs the two methods on the same blocks."""
+
+    def _frame(self):
+        rows = []
+        for index, (lp_cost, admm_cost) in enumerate([(100.0, 101.0), (200.0, 210.0)]):
+            rows.append(
+                {
+                    "method": "lp",
+                    "block_size": 24,
+                    "year": 2020,
+                    "block_index": index,
+                    "draw": None,
+                    "design_id": "asbuilt",
+                    "status": "ok",
+                    "operational_cost": lp_cost,
+                    "solve_wall_clock_s": 0.03,
+                }
+            )
+            rows.append(
+                {
+                    "method": "admm",
+                    "block_size": 24,
+                    "year": 2020,
+                    "block_index": index,
+                    "draw": None,
+                    "design_id": "asbuilt",
+                    "status": "ok",
+                    "operational_cost": admm_cost,
+                    "solve_wall_clock_s": 100.0,
+                    "admm_max_imbalance_mw": 0.2,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    def test_gap_is_computed_on_shared_blocks(self):
+        out = runcard.admm_gap_vs_lp(self._frame())
+        self.assertEqual(len(out), 1)
+        row = out.iloc[0]
+        self.assertEqual(row["n_blocks"], 2)
+        self.assertAlmostEqual(row["gap_rel"], 311.0 / 300.0 - 1.0)
+        self.assertAlmostEqual(row["worst_block_gap_rel"], 0.05)
+        self.assertAlmostEqual(row["max_imbalance_mw"], 0.2)
+
+    def test_infeasible_admm_rows_are_excluded(self):
+        frame = self._frame()
+        frame.loc[(frame["method"] == "admm") & (frame["block_index"] == 1), "status"] = (
+            "infeasible"
+        )
+        out = runcard.admm_gap_vs_lp(frame)
+        self.assertEqual(int(out.iloc[0]["n_blocks"]), 1)
+        self.assertAlmostEqual(out.iloc[0]["gap_rel"], 0.01)
+
+    def test_lp_only_run_has_no_gap_table(self):
+        frame = self._frame()
+        self.assertTrue(runcard.admm_gap_vs_lp(frame[frame["method"] == "lp"]).empty)
+
+
 class TestBlockMetrics(TempRunMixin):
     """`block_metrics` on a hand-built 2-bus system with a prescribed dispatch.
 
@@ -761,14 +825,20 @@ class TestBlockMetrics(TempRunMixin):
     value that can be checked by arithmetic.
     """
 
-    def _system(self, load_power=-90.0):
+    def _system(self, load_power=-90.0, reps=1, meta=None):
+        """The same hourly pattern repeated ``reps`` times, so a 2 h and a 4 h
+        block carry identical per-hour physics and any per-day metric must agree."""
+
+        def tile(a):
+            return np.tile(np.asarray(a, dtype=float), (1, reps))
+
         net = PowerNetwork(num_nodes=2)
         gen = Generator(
             num_nodes=2,
             name=np.array(["ccgt", "solar"]),
             terminal=np.array([0, 1]),
             nominal_capacity=np.array([100.0, 50.0]),
-            dynamic_capacity=np.array([[1.0, 1.0], [0.8, 0.8]]),
+            dynamic_capacity=tile([[1.0, 1.0], [0.8, 0.8]]),
             linear_cost=np.array([[10.0], [0.0]]),
             emission_rates=np.array([[0.4], [0.0]]),
         )
@@ -776,7 +846,7 @@ class TestBlockMetrics(TempRunMixin):
             num_nodes=2,
             name=np.array(["l1"]),
             terminal=np.array([1]),
-            load=np.array([[100.0, 100.0]]),
+            load=tile([[100.0, 100.0]]),
             linear_cost=np.array([[1000.0]]),
         )
         line = DirectedLine(
@@ -801,22 +871,22 @@ class TestBlockMetrics(TempRunMixin):
         devices = [gen, load, line, storage]
 
         power = [
-            [np.array([[60.0, 60.0], [30.0, 30.0]])],  # solar spills 10 MW/h of its 40 MW
-            [np.full((1, 2), load_power)],  # 90 of 100 MW served
+            [tile([[60.0, 60.0], [30.0, 30.0]])],  # solar spills 10 MW/h of its 40 MW
+            [np.full((1, 2 * reps), load_power)],  # 90 of 100 MW served
             [
-                np.array([[-20.0, -20.0], [-5.0, -5.0]]),
-                np.array([[20.0, 20.0], [5.0, 5.0]]),
+                tile([[-20.0, -20.0], [-5.0, -5.0]]),
+                tile([[20.0, 20.0], [5.0, 5.0]]),
             ],
-            [np.array([[-1.0, 2.0]])],
+            [tile([[-1.0, 2.0]])],
         ]
         local_variables = [
             None,
             None,
             None,
             StorageUnitVariable(
-                energy=np.array([[20.0, 21.0, 19.0]]),
-                charge=np.array([[1.0, 0.0]]),
-                discharge=np.array([[0.0, 2.0]]),
+                energy=np.concatenate([np.array([[20.0]]), tile([[21.0, 19.0]])], axis=1),
+                charge=tile([[1.0, 0.0]]),
+                discharge=tile([[0.0, 2.0]]),
             ),
         ]
         outcome = DispatchOutcome(
@@ -826,7 +896,7 @@ class TestBlockMetrics(TempRunMixin):
             local_variables=local_variables,
             power=power,
             angle=[[None], [None], [None, None], [None]],
-            prices=np.array([[10.0, 10.0], [20.0, 60.0]]),
+            prices=tile([[10.0, 10.0], [20.0, 60.0]]),
             global_angle=None,
         )
         index = SimpleNamespace(
@@ -836,7 +906,7 @@ class TestBlockMetrics(TempRunMixin):
             },
             vre_mask=np.array([False, True]),
         )
-        loaded = SimpleNamespace(network=net, index=index, meta={})
+        loaded = SimpleNamespace(network=net, index=index, meta=dict(meta or {}))
         return loaded, devices, outcome
 
     def test_block_metrics_values(self):
@@ -866,6 +936,108 @@ class TestBlockMetrics(TempRunMixin):
         self.assertAlmostEqual(m["max_price"], 60.0)
         self.assertAlmostEqual(m["operational_cost"], 1200.0 + 20000.0 - 10.0)
 
+    def test_max_price_ignores_non_load_buses(self):
+        """Only load-carrying buses set the reported price extremes.
+
+        On `ca2040_z4` the un-loaded `p6_imports` bus prices at exactly the
+        60 $/MWh of its marginal unit and the export buses carry a degenerate
+        -155 $/MWh dual; neither is a system price (benchmark review 1.3).
+        """
+        loaded, devices, outcome = self._system()
+        block = blocks_mod.Block(index=0, year=2020, start=0, stop=2)
+
+        # Bus 0 carries no load. Price it far above -- and then far below -- every
+        # load bus; the reported max_price must not move either way.
+        outcome.prices = np.array([[500.0, 500.0], [20.0, 60.0]])
+        m = metrics.block_metrics(loaded, devices, outcome, block)
+        self.assertAlmostEqual(m["max_price"], 60.0)
+        self.assertAlmostEqual(m["max_price_all_buses"], 500.0)
+
+        outcome.prices = np.array([[-155.0, -155.0], [20.0, 60.0]])
+        m = metrics.block_metrics(loaded, devices, outcome, block)
+        self.assertAlmostEqual(m["max_price"], 60.0)
+        self.assertAlmostEqual(m["mean_price"], 40.0)
+
+    def test_storage_cycles_per_day_is_block_invariant(self):
+        """`storage_cycles` counts per block; the per-day column must not."""
+        block2 = blocks_mod.Block(index=0, year=2020, start=0, stop=2)
+        block4 = blocks_mod.Block(index=0, year=2020, start=0, stop=4)
+
+        loaded2, devices2, outcome2 = self._system()
+        loaded4, devices4, outcome4 = self._system(reps=2)
+
+        m2 = metrics.block_metrics(loaded2, devices2, outcome2, block2)
+        m4 = metrics.block_metrics(loaded4, devices4, outcome4, block4)
+
+        # The raw column is *not* comparable: twice the block, twice the cycles.
+        self.assertAlmostEqual(m4["storage_cycles"], 2.0 * m2["storage_cycles"])
+        # The normalised one is.
+        self.assertAlmostEqual(m2["storage_cycles_per_day"], m2["storage_cycles"] * 12.0)
+        self.assertAlmostEqual(m4["storage_cycles_per_day"], m2["storage_cycles_per_day"])
+
+    def test_metric_failures_are_counted_not_swallowed(self):
+        """A device whose operation_cost raises must be named on the metrics row."""
+        loaded, devices, outcome = self._system()
+        block = blocks_mod.Block(index=0, year=2020, start=0, stop=2)
+
+        clean = metrics.block_metrics(loaded, devices, outcome, block)
+        self.assertEqual(clean["metric_failures"], 0)
+        self.assertNotIn("metric_failure_detail", clean)
+
+        class Boom:
+            def operation_cost(self, *args, **kwargs):
+                raise RuntimeError("no cost for you")
+
+            def get_emissions(self, *args, **kwargs):
+                return 0.0
+
+        devices = list(devices) + [Boom()]
+        outcome.power = list(outcome.power) + [[np.zeros((1, 2))]]
+        outcome.angle = list(outcome.angle) + [[None]]
+        outcome.local_variables = list(outcome.local_variables) + [None]
+        loaded.network = None  # the network cannot price a device it does not know
+
+        m = metrics.block_metrics(loaded, devices, outcome, block)
+        self.assertEqual(m["metric_failures"], 1)
+        self.assertIn("Boom", m["metric_failure_detail"])
+
+    def test_metrics_are_reported_in_physical_units(self):
+        """`power_unit` / `cost_unit` condition the solve; they must not leak to the card."""
+        block = blocks_mod.Block(index=0, year=2020, start=0, stop=2)
+
+        loaded, devices, outcome = self._system()
+        base = metrics.block_metrics(loaded, devices, outcome, block)
+
+        # The same system as the importer would build it at power_unit=1000,
+        # cost_unit=10: every power and cost divided by its unit.
+        scaled_loaded, scaled_devices, scaled_outcome = self._system(
+            load_power=-90.0, meta={"power_unit": 1000.0, "cost_unit": 10.0}
+        )
+        for device in scaled_devices:
+            device.scale_costs(10.0)
+            device.scale_power(1000.0)
+        scaled_outcome.power = [[p / 1000.0 for p in ps] for ps in scaled_outcome.power]
+        scaled_outcome.prices = scaled_outcome.prices / 10.0
+        scaled_outcome.local_variables[3] = StorageUnitVariable(
+            *[np.asarray(v) / 1000.0 for v in scaled_outcome.local_variables[3]]
+        )
+
+        scaled = metrics.block_metrics(scaled_loaded, scaled_devices, scaled_outcome, block)
+
+        for key in (
+            "operational_cost",
+            "generation_cost",
+            "voll_cost",
+            "co2_tonnes",
+            "unserved_energy_mwh",
+            "imports_mwh",
+            "max_price",
+            "storage_cycles",
+        ):
+            self.assertAlmostEqual(
+                scaled[key], base[key], delta=1e-9 * max(1.0, abs(base[key])), msg=key
+            )
+
     def test_ens_sign_and_zero(self):
         # Fully served demand: no unserved energy, no VOLL cost.
         loaded, devices, outcome = self._system(load_power=-100.0)
@@ -887,6 +1059,155 @@ class TestBlockMetrics(TempRunMixin):
         block = blocks_mod.Block(index=0, year=2020, start=0, stop=2)
         with self.assertRaises(ValueError):
             metrics.block_metrics(loaded, devices, outcome, block)
+
+
+class TestADMMDispatchRecord(TempRunMixin):
+    """`solve_block_admm` must report the iterate's imbalance and gate on it."""
+
+    def _system(self):
+        net = PowerNetwork(num_nodes=2)
+        gen = Generator(
+            num_nodes=2,
+            name=np.array(["cheap", "peaker"]),
+            terminal=np.array([0, 1]),
+            nominal_capacity=np.array([80.0, 60.0]),
+            dynamic_capacity=np.ones((2, 4)),
+            linear_cost=np.array([[10.0], [90.0]]),
+            emission_rates=np.array([[0.4], [0.6]]),
+        )
+        load = Load(
+            num_nodes=2,
+            name=np.array(["l1"]),
+            terminal=np.array([1]),
+            load=np.array([[60.0, 80.0, 100.0, 70.0]]),
+            linear_cost=np.array([[1000.0]]),
+        )
+        line = DirectedLine(
+            num_nodes=2,
+            name=np.array(["ln"]),
+            source_terminal=np.array([0]),
+            sink_terminal=np.array([1]),
+            nominal_capacity=np.array([100.0]),
+            min_power=np.array([[0.0]]),
+            max_power=np.array([[1.0]]),
+            linear_cost=np.array([[0.0]]),
+            efficiency=np.array([[1.0]]),
+        )
+        index = SimpleNamespace(
+            carrier={"Generator": np.array(["CCGT", "OCGT"])},
+            vre_mask=np.array([False, False]),
+        )
+        loaded = SimpleNamespace(network=net, index=index, meta={})
+        return loaded, [gen, load, line]
+
+    def _cfg(self, **admm):
+        method = {
+            "enabled": True,
+            "required": False,
+            "solver": "ADMM",
+            "dtype": "float64",
+            "timeout_s": 60,
+            "max_imbalance_mw": 1.0,
+            "solver_kwargs": {
+                "num_iterations": 5000,
+                "rho_power": 1.0,
+                "adaptive_rho": False,
+                "atol": 1.0e-8,
+                "rtol": 1.0e-8,
+            },
+        }
+        method.update(admm)
+        return {"methods": {"admm": method}}
+
+    def _task(self):
+        block = blocks_mod.Block(index=0, year=2020, start=0, stop=4)
+        return tasks_mod.Task(task_id="t", method="admm", block=block, block_size=4)
+
+    def test_ra_dispatch_admm_records_imbalance(self):
+        loaded, devices = self._system()
+        payload = dispatch.solve_block_admm(loaded, devices, self._task(), self._cfg())
+
+        self.assertIn("admm_max_imbalance_mw", payload["metrics"])
+        self.assertLess(payload["metrics"]["admm_max_imbalance_mw"], 1.0)
+        self.assertTrue(np.isfinite(payload["metrics"]["admm_primal_tol"]))
+        self.assertTrue(np.isfinite(payload["metrics"]["admm_dual_tol"]))
+        self.assertIn("admm_converged", payload["metrics"])
+        self.assertNotIn("status", payload)
+
+    def test_ra_dispatch_admm_gates_an_under_iterated_solve(self):
+        loaded, devices = self._system()
+        cfg = self._cfg(
+            solver_kwargs={
+                "num_iterations": 2,
+                "minimum_iterations": 1,
+                "rho_power": 1.0,
+                "adaptive_rho": False,
+            }
+        )
+        payload = dispatch.solve_block_admm(loaded, devices, self._task(), cfg)
+
+        self.assertGreater(payload["metrics"]["admm_max_imbalance_mw"], 1.0)
+        self.assertEqual(payload["status"], "infeasible")
+        self.assertIn("power balance", payload["error"])
+        self.assertIn("admm_max_soc_residual_mwh", payload["metrics"])
+
+    def test_ra_dispatch_admm_gates_a_storage_energy_violation(self):
+        # Few battery inner iterations: nodal balance can pass while the projected
+        # storage iterate breaks the SoC recursion; the second gate must catch it.
+        loaded, devices = self._system()
+        storage = StorageUnit(
+            num_nodes=2,
+            name=np.array(["bat"]),
+            terminal=np.array([1]),
+            power_capacity=np.array([40.0]),
+            duration=np.array([2.0]),
+            linear_cost=np.array([0.0]),
+            charge_efficiency=np.array([0.9]),
+            discharge_efficiency=np.array([0.9]),
+        )
+        devices = devices + [storage]
+        cfg = self._cfg(
+            solver_kwargs={
+                "num_iterations": 300,
+                "minimum_iterations": 10,
+                "rho_power": 1.0,
+                "adaptive_rho": False,
+                "battery_inner_iterations": 1,
+            }
+        )
+        cfg["methods"]["admm"]["max_imbalance_mw"] = 1e9
+        cfg["methods"]["admm"]["max_soc_residual_mwh"] = 1e-6
+        payload = dispatch.solve_block_admm(loaded, devices, self._task(), cfg)
+        self.assertGreater(payload["metrics"]["admm_max_soc_residual_mwh"], 1e-6)
+        self.assertEqual(payload["status"], "infeasible")
+        self.assertIn("energy balance", payload["error"])
+
+    def test_ra_dispatch_zero_gate_is_not_replaced_by_default(self):
+        self.assertEqual(dispatch._gate_value({"max_imbalance_mw": 0.0}, "max_imbalance_mw", 1.0), 0.0)
+        self.assertEqual(dispatch._gate_value({}, "max_imbalance_mw", 1.0), 1.0)
+
+    def test_run_task_marks_an_infeasible_payload(self):
+        cfg = config.load_config(tiny_config(self.tmp, window=(0, 48)))
+        task = tasks_mod.enumerate_tasks(cfg)[0]
+
+        real = dispatch.solve_block
+
+        def infeasible(task, cfg, design=None):
+            payload = real(task, cfg, design=design)
+            payload["status"] = "infeasible"
+            payload["error"] = "ADMM iterate violates nodal power balance by 113 MW"
+            return payload
+
+        dispatch.solve_block = infeasible
+        try:
+            record = tasks_mod.run_task(task, cfg, self.tmp / "run")
+        finally:
+            dispatch.solve_block = real
+
+        self.assertEqual(record["status"], "infeasible")
+        self.assertIn("113 MW", record["error"])
+        # The metrics survive so the row can still be inspected.
+        self.assertIn("operational_cost", record["metrics"])
 
 
 class TestStubSolver(TempRunMixin):
@@ -959,6 +1280,43 @@ class TestRealSystem(TempRunMixin):
         with open(run_dir / "system_meta.json") as f:
             meta = json.load(f)
         self.assertIn("peak_load_mw", meta)
+
+    def test_power_unit_scaling_is_cost_invariant(self):
+        """`system.power_unit` / `cost_unit` only condition the solve.
+
+        They rescale the LP the importer builds; the reported cost is converted
+        back, so the same block costs the same at any scaling (review 3.4).
+        """
+        dataset = self._dataset()
+
+        def solve(power_unit, cost_unit):
+            path = tiny_config(
+                self.tmp,
+                name=f"units_{power_unit:g}_{cost_unit:g}",
+                window=(0, 48),
+                block_sizes=(24,),
+                reference="none",
+                extra={
+                    "dataset": {"dir": str(dataset)},
+                    "system": {"power_unit": power_unit, "cost_unit": cost_unit},
+                    "methods": {"lp": {"solver": "HIGHS", "timeout_s": 300}},
+                },
+            )
+            cfg = config.load_config(path)
+            self._skip_if_devices_do_not_slice(cfg)
+            system_mod.clear_system_cache()
+            loaded = system_mod.build_system(cfg, cache=False)
+            block = blocks_mod.make_blocks(cfg, 24)[0]
+            devices = dispatch.slice_devices(loaded, cfg, block)
+            task = tasks_mod.Task(task_id="t", method="lp", block=block, block_size=24)
+            return dispatch.solve_block_lp(loaded, devices, task, cfg)["metrics"]
+
+        base = solve(1.0, 1.0)
+        scaled = solve(1000.0, 10.0)
+
+        for key in ("operational_cost", "generation_cost", "unserved_energy_mwh", "co2_tonnes"):
+            denom = max(1.0, abs(base[key]))
+            self.assertAlmostEqual(scaled[key] / denom, base[key] / denom, places=9, msg=key)
 
     def test_reference_only_run_records_demand_scaling(self):
         # The reference solve runs in a child process, so the provenance must

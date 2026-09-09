@@ -110,20 +110,28 @@ class ADMMSolver:
     rtol_primal: Optional[float] = None
     rtol_dual: Optional[float] = None
     dual_bias: float = 1.0
-    rtol_dual_use_objective: bool = True
+    #: Deprecated. When True the dual tolerance is `rtol * objective` (dollars)
+    #: while the dual residual is a power (MW) -- a unit mismatch whose severity
+    #: scales with the block (124x looser than the primal tolerance on a 24 h
+    #: ca2040_z4 block). The dual tolerance is now `rtol * rho * ||nu||`.
+    rtol_dual_use_objective: bool = False
     resid_norm: int = 2
     safe_mode: bool = False
     track_objective: bool = True
     battery_window: Optional[int] = None
     battery_inner_weight: float = 1.0
     battery_inner_over_relaxation: float = 1.8
-    battery_inner_iterations: int = 10
+    battery_inner_iterations: int = 200
     minimum_iterations: int = 10
     relative_rho_angle: bool = False
     adaptive_rho: bool = True
     tau: float = 1.1
     adaptation_tolerance: float = 2.0
     adaptation_frequency: int = 50
+    #: Clamps on the adaptive-rho rule. Without them the rule can walk rho down
+    #: (or up) without bound and the primal residual explodes.
+    rho_min: float = 1e-2
+    rho_max: float = 1e4
     verbose: int = 1
     scale_dual_residuals: bool = None  # Deprecated
 
@@ -141,6 +149,16 @@ class ADMMSolver:
             warnings.warn(
                 "scale_dual_residuals is deprecated and will be removed in a future release."
             )
+        if self.rtol_dual_use_objective:
+            warnings.warn(
+                "rtol_dual_use_objective compares a power-valued dual residual against "
+                "rtol * objective (a cost) and is deprecated; it will be removed in a "
+                "future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if not (self.rho_min <= self.rho_max):
+            raise ValueError(f"rho_min ({self.rho_min}) must not exceed rho_max ({self.rho_max})")
         if isinstance(self.verbose, bool):
             self.verbose = 3 if self.verbose else 0
             warnings.warn(
@@ -499,14 +517,15 @@ class ADMMSolver:
         self.primal_tol = primal_tol
         self.dual_tol = dual_tol
 
+        # Record the achieved tolerances so a caller can put them on a run card.
+        history.primal_tol += [primal_tol]
+        history.dual_tol += [dual_tol]
+
         primal_resid = np.sqrt(history.power[-1] ** 2 + history.phase[-1] ** 2)
         dual_resid = np.sqrt(history.dual_power[-1] ** 2 + history.dual_phase[-1] ** 2)
         converged = (primal_resid < self.primal_tol) and (dual_resid < self.dual_tol)
 
-        if converged:
-            return True
-        else:
-            return False
+        return bool(converged and self.iteration >= self.minimum_iterations)
 
     def adjust_rho(self, st: ADMMState, history: ADMMState):
         primal_resid = np.sqrt(history.power[-1] ** 2 + history.phase[-1] ** 2)
@@ -576,13 +595,15 @@ class ADMMSolver:
 
     def tweak_rho(self, old_rho, r_primal, r_dual, name="power"):
         if r_primal > self.adaptation_tolerance * r_dual:
-            if self.verbose >= 3:
-                print(f"Increasing rho to {old_rho * self.tau} for {name}.")
-            return old_rho * self.tau
+            new_rho = min(old_rho * self.tau, self.rho_max)
+            if self.verbose >= 3 and new_rho != old_rho:
+                print(f"Increasing rho to {new_rho} for {name}.")
+            return new_rho
         elif r_dual > self.adaptation_tolerance * r_primal:
-            if self.verbose >= 3:
-                print(f"Decreasing rho to {old_rho / self.tau} for {name}.")
-            return old_rho / self.tau
+            new_rho = max(old_rho / self.tau, self.rho_min)
+            if self.verbose >= 3 and new_rho != old_rho:
+                print(f"Decreasing rho to {new_rho} for {name}.")
+            return new_rho
         else:
             return old_rho
 
@@ -622,10 +643,9 @@ class ADMMSolver:
     ):
         p = self.resid_norm
 
-        if self.scale_dual_residuals:
-            rp, ra = self.get_rho()
-        else:
-            rp, ra = 1.0, 1.0
+        # The dual residual of scaled ADMM is rho * A'(z_k - z_{k-1}); scaling it by
+        # rho puts it in the same units as the dual tolerance rtol * rho * ||nu||.
+        rp, ra = self.get_rho()
 
         dual_resid_power = nested_subtract(st.resid_power, last_resid_power)
         history.dual_power += [rp * nested_norm(dual_resid_power, p).item()]
@@ -654,6 +674,8 @@ class ADMMSolver:
             objective=[],
         )
         history.price_error = []
+        history.primal_tol = []
+        history.dual_tol = []
         return history
 
     def initialize_solver(

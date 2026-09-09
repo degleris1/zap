@@ -99,6 +99,8 @@ def load_options(cfg: dict, *, draw: int | None = None):
         carbon_tax=float(sysc["carbon_tax"]),
         storage_init_soc=float(sysc["storage_init_soc"]),
         storage_final_soc=float(sysc["storage_final_soc"]),
+        power_unit=float(sysc.get("power_unit", 1.0)),
+        cost_unit=float(sysc.get("cost_unit", 1.0)),
     )
 
 

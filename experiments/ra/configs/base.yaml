@@ -119,6 +119,7 @@ methods:
     # Gate on the iterate's worst nodal power-balance violation, in MW. Above it
     # the task is recorded `infeasible` and left out of the run card's headline.
     max_imbalance_mw: 1.0
+    max_soc_residual_mwh: 1.0   # storage SoC-recursion residual gate (projected prox iterate)
 execution:
   shard: null               # "k/n"; null = all tasks
   max_tasks: null

@@ -34,6 +34,18 @@ ADDITIVE_METRICS = (
 
 SHORTFALL_TOL_MW = 1e-3
 
+#: Metrics of a ``mode: plan`` task.  Every monetary / emissions number here is
+#: **annual** (spec section 6, decision W-A): the raw objective is scaled by the
+#: coverage of the block sample, so raw values are incomparable across
+#: ``selection`` settings.  The raw ones are kept alongside, clearly named.
+PLANNING_METRICS = (
+    "objective_annual",
+    "capex_annual",
+    "opex_annual",
+    "emissions_tonnes_annual",
+    "total_capacity_mw",
+)
+
 
 def _to_numpy(x):
     """Convert a (possibly torch) array-like to a float64 numpy array."""
@@ -113,12 +125,19 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
     n = len(devices)
     power, angle, local_vars = power[:n], angle[:n], local_vars[:n]
 
+    # Swallowed exceptions here hid `StorageUnit.operation_cost(state=None) -> 0.0`
+    # on every ADMM row of the phase-1 benchmark; count and name them instead.
+    failures: dict[str, str] = {}
+
     per_device_cost = []
     for device, p, a, u in zip(devices, power, angle, local_vars):
         try:
             per_device_cost.append(float(device.operation_cost(p, a, u, la=np)))
-        except Exception:  # pragma: no cover - defensive
-            logger.exception("operation_cost failed for %s", device_class(device))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "operation_cost failed for %s: %s", device_class(device), exc, exc_info=True
+            )
+            failures[f"operation_cost:{device_class(device)}"] = f"{type(exc).__name__}: {exc}"
             per_device_cost.append(float("nan"))
 
     if network is not None:
@@ -155,8 +174,11 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
     for device, p in zip(devices, power):
         try:
             co2 += float(device.get_emissions(p, la=np))
-        except Exception:
-            logger.debug("get_emissions failed for %s", device_class(device), exc_info=True)
+        except Exception as exc:
+            logger.warning(
+                "get_emissions failed for %s: %s", device_class(device), exc, exc_info=True
+            )
+            failures[f"get_emissions:{device_class(device)}"] = f"{type(exc).__name__}: {exc}"
     metrics["co2_tonnes"] = co2
 
     # --- Generators: dispatch by carrier and VRE curtailment -----------------
@@ -230,17 +252,24 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
                 * np.asarray(device.duration, dtype=np.float64)
             )
         )
-    metrics["storage_cycles"] = (
-        discharge_total / energy_capacity if energy_capacity > 0 else float("nan")
-    )
+    storage_cycles = discharge_total / energy_capacity if energy_capacity > 0 else float("nan")
+    metrics["storage_cycles"] = storage_cycles
+    # `storage_cycles` counts cycles *per block*, so it is not comparable across
+    # block sizes (24 h vs 168 h vs a full year); normalise it per day.
+    metrics["storage_cycles_per_day"] = storage_cycles * 24.0 / float(block.hours)
 
     # --- Prices --------------------------------------------------------------
+    # Restricted to load-carrying buses: `ca2040_z4` prices the import bus
+    # `p6_imports` (no load) at exactly the 60 $/MWh of its marginal unit and the
+    # export buses at a degenerate -155 $/MWh, neither of which is a system price.
     prices = _to_numpy(outcome.prices)
     if prices is None or prices.size == 0:
         metrics["mean_price"] = float("nan")
         metrics["max_price"] = float("nan")
+        metrics["max_price_all_buses"] = float("nan")
     else:
         weights = np.zeros(prices.shape)
+        load_nodes: set[int] = set()
         for i in groups.get("Load", []):
             device = devices[i]
             demand = np.asarray(device.load, dtype=np.float64) * np.asarray(
@@ -250,12 +279,71 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
             terminals = np.asarray(device.terminal).ravel()
             for row, node in enumerate(terminals):
                 weights[node, :] += demand[row, :]
+                load_nodes.add(int(node))
         total = weights.sum()
         metrics["mean_price"] = (
             float((prices * weights).sum() / total) if total > 0 else float(prices.mean())
         )
-        metrics["max_price"] = float(prices.max())
+        metrics["max_price_all_buses"] = float(prices.max())
+        nodes = sorted(load_nodes)
+        metrics["max_price"] = float(prices[nodes, :].max()) if nodes else float(prices.max())
 
+    if failures:
+        metrics["metric_failures"] = len(failures)
+        metrics["metric_failure_detail"] = json.dumps(failures, sort_keys=True)
+    else:
+        metrics["metric_failures"] = 0
+
+    return _to_physical_units(metrics, getattr(loaded, "meta", None) or {})
+
+
+#: Metrics denominated in money (scaled by ``cost_unit * power_unit``), in power
+#: or energy (``power_unit``), and in price (``cost_unit``). Everything else --
+#: hours, counts, ratios such as ``storage_cycles`` -- is unit-invariant.
+_MONEY_METRICS = ("operational_cost", "generation_cost", "voll_cost", "export_revenue")
+_ENERGY_METRICS = (
+    "unserved_energy_mwh",
+    "curtailment_mwh",
+    "imports_mwh",
+    "exports_mwh",
+)
+#: Emission rates are divided by `cost_unit` too (`AbstractInjector.scale_costs`
+#: scales them with costs so prices stay in $/MWh), so emissions carry both units.
+_EMISSION_METRICS = ("co2_tonnes",)
+_PRICE_METRICS = ("mean_price", "max_price", "max_price_all_buses")
+
+
+def _to_physical_units(metrics: dict[str, Any], meta: dict) -> dict[str, Any]:
+    """Undo ``LoadOptions.power_unit`` / ``cost_unit`` so every card is in MW and $.
+
+    The importer divides powers by ``power_unit`` and costs by ``cost_unit`` purely
+    to condition the solve; a run card that reported those units would not be
+    comparable across configs (benchmark review, section 3.4).
+    """
+    power_unit = float(meta.get("power_unit", 1.0) or 1.0)
+    cost_unit = float(meta.get("cost_unit", 1.0) or 1.0)
+    if power_unit == 1.0 and cost_unit == 1.0:
+        return metrics
+
+    for key in _MONEY_METRICS:
+        if key in metrics:
+            metrics[key] *= cost_unit * power_unit
+    for key in _ENERGY_METRICS:
+        if key in metrics:
+            metrics[key] *= power_unit
+    for key in _EMISSION_METRICS:
+        if key in metrics:
+            metrics[key] *= cost_unit * power_unit
+    for key in _PRICE_METRICS:
+        if key in metrics:
+            metrics[key] *= cost_unit
+    if "generation_mwh_by_carrier" in metrics:
+        by_carrier = json.loads(metrics["generation_mwh_by_carrier"])
+        metrics["generation_mwh_by_carrier"] = json.dumps(
+            {k: v * power_unit for k, v in by_carrier.items()}, sort_keys=True
+        )
+    metrics["power_unit"] = power_unit
+    metrics["cost_unit"] = cost_unit
     return metrics
 
 
@@ -390,3 +478,77 @@ def deviation_vs_reference(
     if not out:
         return empty
     return pd.DataFrame(out)
+
+
+# ---------------------------------------------------------------------------
+# Planning metrics (``mode: plan``)
+# ---------------------------------------------------------------------------
+
+
+def capacity_by_carrier(result) -> dict[str, float]:
+    """Total designed capacity per carrier label, summed over parameters."""
+    labels = (result.meta or {}).get("carrier_labels") or {}
+    out: dict[str, float] = {}
+    for param, values in (result.parameters or {}).items():
+        values = np.asarray(values, dtype=np.float64).reshape(-1)
+        names = labels.get(param)
+        if names is None or len(names) != values.size:
+            names = [param] * values.size
+        for carrier, value in zip(names, values):
+            out[str(carrier)] = out.get(str(carrier), 0.0) + float(value)
+    return out
+
+
+def _total(mapping) -> float:
+    return float(sum(np.asarray(v, dtype=np.float64).sum() for v in (mapping or {}).values()))
+
+
+def planning_metrics(result) -> dict[str, Any]:
+    """The metrics row of a planning task, from a ``PlanningResult``.
+
+    Annual quantities lead (spec section 6); ``*_raw`` are kept because they are
+    what ``design.json`` records and what the equivalence test compares.
+    """
+    objective = result.objective or {}
+    annualization = result.annualization or {}
+    selection = result.selection or {}
+    initial = (result.meta or {}).get("initial_parameters")
+
+    total_capacity = _total(result.parameters)
+    metrics: dict[str, Any] = {
+        "objective_annual": objective.get("annual"),
+        "capex_annual": objective.get("capex_annual"),
+        "opex_annual": objective.get("opex_annual"),
+        "emissions_tonnes_annual": objective.get("emissions_tonnes_annual"),
+        "objective_raw": objective.get("raw"),
+        "capex_raw": objective.get("capex_raw"),
+        "opex_raw": objective.get("opex_raw"),
+        "emissions_tonnes_raw": objective.get("emissions_tonnes_raw"),
+        "lower_bound_raw": objective.get("lower_bound_raw"),
+        "optimality_gap": objective.get("optimality_gap"),
+        "total_capacity_mw": total_capacity,
+        "capacity_mw_by_carrier": json.dumps(capacity_by_carrier(result), sort_keys=True),
+        "total_hours": annualization.get("total_hours"),
+        "sampled_hours": annualization.get("sampled_hours"),
+        "coverage": annualization.get("coverage"),
+        "annualization_factor": annualization.get("annualization_factor"),
+        "year_factor": annualization.get("year_factor"),
+        "n_blocks": len(selection.get("blocks") or []),
+        "selection_strategy": selection.get("strategy"),
+        "selection_seed": selection.get("seed"),
+        "planning_method": result.method,
+        "planning_preset": result.preset,
+        "planning_kind": result.kind,
+        "emissions_mode": (result.emissions or {}).get("mode"),
+        "emissions_cap_applied": (result.emissions or {}).get("cap_applied"),
+    }
+
+    bounds = (result.meta or {}).get("bounds") or {}
+    metrics["min_capacity_mw"] = bounds.get("min_capacity_mw")
+    metrics["min_storage_mw"] = bounds.get("min_storage_mw")
+    metrics["rows_raised_by_floor"] = json.dumps(
+        bounds.get("rows_raised_by_floor") or {}, sort_keys=True
+    )
+    if initial:
+        metrics["capacity_added_mw"] = total_capacity - _total(initial)
+    return metrics
