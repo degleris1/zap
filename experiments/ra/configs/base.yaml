@@ -99,7 +99,10 @@ planning:                   # `mode: plan` only (WP5 spec 8.1)
     warm_start_reset_every: null   # null | positive int; cold-start every Nth pass
     # minimum_iterations >= 100 guards against spurious convergence right after a
     # warm restart (warm-start spec §3.4).
-    solver_kwargs: {num_iterations: 1000, rho_power: 1.0, minimum_iterations: 100}
+    # rho is $/(MWh*MW), i.e. the MW->$ conversion: 1.0 was right for runner.py's
+    # power_unit=1000 / cost_unit=10 and is ~80x too large at power_unit=cost_unit=1
+    # (natural value ||price||/||power|| ~ 0.012; 0.1 converges fastest on z4).
+    solver_kwargs: {num_iterations: 1000, rho_power: 0.1, minimum_iterations: 100}
   emissions:
     mode: none              # none | price | cap | dual_ascent  (D-W5)
     price: 0.0
@@ -124,7 +127,10 @@ methods:
     enabled: false
     required: false         # a failure here never fails the run
     solver: ADMM            # ADMM, or STUB for a dry pipeline
-    solver_kwargs: {num_iterations: 5000, rho_power: 1.0, atol: 1.0e-4, rtol: 1.0e-4}
+    # rho is $/(MWh*MW), i.e. the MW->$ conversion: 1.0 was right for runner.py's
+    # power_unit=1000 / cost_unit=10 and is ~80x too large at power_unit=cost_unit=1
+    # (natural value ||price||/||power|| ~ 0.012; 0.1 converges fastest on z4).
+    solver_kwargs: {num_iterations: 5000, rho_power: 0.1, atol: 1.0e-4, rtol: 1.0e-4}
     dtype: float64
     timeout_s: 3600
     # Gate on the iterate's worst nodal power-balance violation, in MW. Above it

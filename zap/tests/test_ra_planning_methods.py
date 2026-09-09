@@ -332,7 +332,12 @@ class TestEmissions(PlanningFixtureMixin, unittest.TestCase):
 
         from zap.planning import MonolithicPlanningProblem
 
-        price = 500.0
+        # 200, not the 500 the other emissions tests use: since `cyclic_free` became
+        # the default SoC boundary condition the battery can shift energy freely
+        # across this 48 h fixture, and at 500 $/t the priced LP builds its way to
+        # *zero* emissions -- which makes `payment == 0` and leaves the netting-out
+        # arithmetic below untested. 200 $/t still leaves ~274 t on the system.
+        price = 200.0
         emissions_cfg = {"emissions": {"mode": "price", "price": price}}
         priced = self.plan(planning=dict(emissions_cfg))
         obj = priced.objective

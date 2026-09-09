@@ -308,6 +308,9 @@ def solve_block_admm(loaded, devices, task, cfg: dict, run_dir=None) -> dict[str
     metrics["admm_converged"] = converged
     metrics["admm_max_imbalance_mw"] = imbalance
     metrics["admm_max_soc_residual_mwh"] = soc_residual
+    # Worst inner-prox residual (storage) over devices and iterations, physical MW.
+    inner = float(getattr(solver, "max_inner_prox_residual", float("nan")))
+    metrics["admm_max_inner_prox_residual_mw"] = inner * power_unit
 
     payload = {
         "metrics": metrics,

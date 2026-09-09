@@ -359,6 +359,83 @@ class TestADMMvsLPCyclicFree(unittest.TestCase):
         np.testing.assert_allclose(energy[:, 0], energy[:, -1], atol=1e-4 * float(emax.max()))
 
 
+class TestWindowedProxFeasibilityGate(unittest.TestCase):
+    """The ADMM feasibility gate must be able to score a windowed prox iterate.
+
+    `battery_window` is a *model restriction* -- it makes every window its own
+    boundary-condition problem -- so it must never be folded into an unwindowed
+    ADMM row. It still has to be scoreable: with `battery_window = W` the prox
+    returns `S = T / W` SoC trajectories, `(N, S * (W + 1))` columns instead of
+    `(N, T + 1)`, and `equality_constraints` raised a broadcasting `ValueError` on
+    that layout, crashing `dispatch.admm_max_storage_residual_mwh` (review 7, R6-R8).
+    """
+
+    WINDOW = 4
+
+    def _solve_windowed(self, soc_mode):
+        net, devices, T = heterogeneous_fleet(soc_mode)
+        torch_devices = [d.torchify(machine="cpu", dtype=torch.float64) for d in devices]
+        solver = ADMMSolver(
+            machine="cpu",
+            dtype=torch.float64,
+            num_iterations=300,
+            minimum_iterations=10,
+            rho_power=1.0,
+            adaptive_rho=False,
+            battery_window=self.WINDOW,
+            battery_inner_iterations=200,
+            battery_inner_over_relaxation=1.8,
+            atol=1e-8,
+            rtol=1e-8,
+            verbose=0,
+        )
+        state, _ = solver.solve(net, torch_devices, T)
+        return net, devices, T, state
+
+    def _gate(self, devices, T, state):
+        """What `experiments/ra/dispatch.admm_max_storage_residual_mwh` does."""
+        outcome = state.as_outcome()
+        battery = devices[3]
+        power = [np.asarray(x) for x in outcome.power[3]]
+        local = outcome.local_variables[3]
+        numpy_state = type(local)(*[np.asarray(v) for v in local])
+
+        residuals = battery.equality_constraints(power, None, numpy_state, la=np)
+        worst = 0.0
+        for r in residuals[1:]:
+            worst = max(worst, float(np.max(np.abs(np.asarray(r, dtype=float)))))
+        return numpy_state, residuals, worst
+
+    def test_windowed_energy_is_wider_than_the_lp_layout(self):
+        _net, devices, T, state = self._solve_windowed("fixed")
+        numpy_state, _residuals, _worst = self._gate(devices, T, state)
+
+        num_windows = T // self.WINDOW
+        self.assertEqual(numpy_state.energy.shape[1], T + num_windows)
+        self.assertEqual(numpy_state.charge.shape[1], T)
+        self.assertEqual(StorageUnit.num_soc_windows(numpy_state.energy.shape[1], T), num_windows)
+
+    def test_gate_scores_a_windowed_iterate_in_both_modes(self):
+        for soc_mode in ("fixed", "cyclic_free"):
+            with self.subTest(soc_mode=soc_mode):
+                _net, devices, T, state = self._solve_windowed(soc_mode)
+                _numpy_state, residuals, worst = self._gate(devices, T, state)
+
+                num_windows = T // self.WINDOW
+                # One boundary row per window, not one for the block.
+                self.assertEqual(len(residuals), 3 if soc_mode == "cyclic_free" else 4)
+                for r in residuals[2:]:
+                    self.assertEqual(np.asarray(r).shape[1], num_windows)
+
+                emax = float(
+                    np.max(
+                        np.asarray(devices[3].power_capacity).reshape(-1)
+                        * np.asarray(devices[3].duration).reshape(-1)
+                    )
+                )
+                self.assertLess(worst, 1e-6 * emax)
+
+
 class TestWarmStartAcrossModes(unittest.TestCase):
     """(f): a state from the other mode is refused, with a reason naming soc_mode."""
 

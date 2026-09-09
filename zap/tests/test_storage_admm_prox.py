@@ -16,6 +16,7 @@ import torch
 import zap
 from zap.admm import ADMMSolver
 from zap.devices import StorageUnit
+from zap.devices.storage_unit import StorageUnitVariable
 
 torch.set_default_dtype(torch.float64)
 
@@ -220,6 +221,109 @@ def small_system():
         linear_cost=np.array([0.5, 2.0]),
     )
     return net, [generators, load, line1, battery], T
+
+
+class TestWindowedSocLayout(unittest.TestCase):
+    """`battery_window` returns one SoC trajectory per window, and the model must read it.
+
+    The prox with `battery_window = W` returns `energy` of shape
+    `(N, S * (W + 1))` for `S = T / W` windows, while the LP layout is `(N, T + 1)`.
+    `equality_constraints` used to broadcast the two against each other and raise
+    `ValueError: operands could not be broadcast together`, which crashed the ADMM
+    feasibility gate rather than reporting a residual (benchmark review 7, R6-R8).
+    """
+
+    def test_num_soc_windows_inverts_the_layout(self):
+        self.assertEqual(StorageUnit.num_soc_windows(13, 12), 1)  # LP layout, T + 1
+        self.assertEqual(StorageUnit.num_soc_windows(15, 12), 3)  # 3 windows of 4
+        self.assertEqual(StorageUnit.num_soc_windows(175, 168), 7)  # 7 daily windows
+        with self.assertRaises(ValueError):
+            StorageUnit.num_soc_windows(17, 12)  # 5 windows do not divide 12
+
+    def test_hand_built_windowed_state_is_evaluated_per_window(self):
+        T, W = 12, 4
+        S = T // W
+        device = StorageUnit(
+            num_nodes=1,
+            name=np.array(["b0", "b1"]),
+            terminal=np.zeros(2, dtype=int),
+            power_capacity=np.array([10.0, 20.0]),
+            duration=np.array([4.0, 2.0]),
+            charge_efficiency=np.array([0.9, 0.8]),
+            discharge_efficiency=np.array([0.7, 1.0]),
+            initial_soc=np.array([0.5, 0.5]),
+            final_soc=np.array([0.5, 0.5]),
+        )
+        beta = np.asarray(device.charge_efficiency).reshape(-1, 1)
+        eta = np.asarray(device.discharge_efficiency).reshape(-1, 1)
+        emax = (
+            np.asarray(device.power_capacity).reshape(-1) * np.asarray(device.duration).reshape(-1)
+        ).reshape(-1, 1)
+
+        # A consistent windowed trajectory: charge in the first two hours of every
+        # window and discharge in the last two, sized so each window returns to the
+        # 0.5 * emax it started from (sum(beta * c) == sum(d / eta) per window).
+        charge = np.zeros((2, T))
+        charge[:, 0::W] = 2.0
+        charge[:, 1::W] = 1.0
+
+        discharge = np.zeros((2, T))
+        per_window = beta * eta * (charge[:, 0::W] + charge[:, 1::W]) / 2.0
+        discharge[:, 2::W] = per_window
+        discharge[:, 3::W] = per_window
+
+        energy = np.zeros((2, S * (W + 1)))
+        c3 = charge.reshape(2, S, W)
+        d3 = discharge.reshape(2, S, W)
+        e3 = energy.reshape(2, S, W + 1)
+        e3[:, :, 0] = 0.5 * emax
+        for t in range(W):
+            e3[:, :, t + 1] = e3[:, :, t] + beta * c3[:, :, t] - d3[:, :, t] / eta
+
+        state = StorageUnitVariable(e3.reshape(2, -1), charge, discharge)
+        power = [discharge - charge]
+
+        residuals = device.equality_constraints(power, None, state, la=np)
+        self.assertEqual(len(residuals), 4)  # terminal power, recursion, 2 pins
+        self.assertEqual(np.asarray(residuals[1]).shape, (2, T))
+        self.assertEqual(np.asarray(residuals[2]).shape, (2, S))
+        for r in residuals:
+            self.assertLess(float(np.max(np.abs(np.asarray(r)))), 1e-9)
+
+        # A single bad window shows up, and only that window.
+        broken = e3.copy()
+        broken[0, 1, 2] += 5.0
+        bad = StorageUnitVariable(broken.reshape(2, -1), charge, discharge)
+        recursion = np.asarray(device.equality_constraints(power, None, bad, la=np)[1])
+        self.assertAlmostEqual(float(np.max(np.abs(recursion))), 5.0, places=9)
+
+    def test_cyclic_free_windowed_state_uses_one_row_per_window(self):
+        T, W = 12, 4
+        S = T // W
+        device = StorageUnit(
+            num_nodes=1,
+            name=np.array(["b0"]),
+            terminal=np.zeros(1, dtype=int),
+            power_capacity=np.array([10.0]),
+            duration=np.array([4.0]),
+            soc_mode="cyclic_free",
+        )
+        charge = np.zeros((1, T))
+        discharge = np.zeros((1, T))
+        energy = np.tile(np.array([7.0, 7.0, 7.0, 7.0, 7.0]), (1, S))
+        state = StorageUnitVariable(energy, charge, discharge)
+
+        residuals = device.equality_constraints([np.zeros((1, T))], None, state, la=np)
+        self.assertEqual(len(residuals), 3)  # terminal power, recursion, cyclic row
+        self.assertEqual(np.asarray(residuals[2]).shape, (1, S))
+        self.assertLess(float(np.max(np.abs(np.asarray(residuals[2])))), 1e-12)
+
+        # Break the cyclicity of window 1 only.
+        e3 = energy.reshape(1, S, W + 1).copy()
+        e3[0, 1, W] += 2.0
+        broken = StorageUnitVariable(e3.reshape(1, -1), charge, discharge)
+        rows = np.asarray(device.equality_constraints([np.zeros((1, T))], None, broken, la=np)[2])
+        np.testing.assert_allclose(rows.ravel(), np.array([0.0, -2.0, 0.0]), atol=1e-12)
 
 
 class TestADMMvsLP(unittest.TestCase):

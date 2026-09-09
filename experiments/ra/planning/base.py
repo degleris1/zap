@@ -86,7 +86,7 @@ PLANNING_DEFAULTS: dict = {
         # ``planning.warm_start``, which is the single-level LP warm start.
         "warm_start": True,
         "warm_start_reset_every": None,
-        "solver_kwargs": {"num_iterations": 1000, "rho_power": 1.0, "minimum_iterations": 100},
+        "solver_kwargs": {"num_iterations": 1000, "rho_power": 0.1, "minimum_iterations": 100},
     },
     "emissions": {
         "mode": "none",

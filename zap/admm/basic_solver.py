@@ -1,5 +1,6 @@
 import dataclasses
 import functools
+import logging
 import math
 import warnings
 from typing import Optional
@@ -24,6 +25,47 @@ from zap.admm.util import (
     apply_incidence_transpose,
     unsqueeze_terminals_times_x,
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+def _norm(value, p: int = 2) -> float:
+    """L-p norm of a tensor, array, scalar, or arbitrarily nested list of those.
+
+    ``None`` entries contribute nothing.  Nested containers are combined as
+    ``(sum_i ||x_i||^p)^(1/p)``, which is exactly the norm of the concatenation.
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, (list, tuple)):
+        total = sum(_norm(v, p) ** p for v in value)
+        return float(total ** (1.0 / p))
+    if torch.is_tensor(value):
+        return float(torch.linalg.vector_norm(value.detach().reshape(-1).double(), p).item())
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    return float(np.linalg.norm(arr, p))
+
+
+def natural_rho(prices, powers, p: int = 2) -> float:
+    """The dimensionally natural ADMM penalty for a system: ``||prices|| / ||powers||``.
+
+    ``rho`` converts MW of nodal imbalance into $/MWh of price (see
+    :class:`ADMMSolver` for the units argument), so the scale-free choice is the
+    ratio of the two norms it relates.  Both arguments may be tensors, arrays, or
+    nested lists of them (e.g. ``state.power``), and must be *in the units the
+    solver sees*: if the system was imported with ``power_unit`` / ``cost_unit``
+    scaling, pass the scaled prices and powers, and the result is directly usable
+    as ``rho_power``.
+
+    On ``ca2040_z4`` 24 h blocks this is ~1.2e-2 at ``power_unit = cost_unit = 1``.
+
+    Returns ``inf`` when ``powers`` has zero norm.
+    """
+    denom = _norm(powers, p)
+    if denom == 0.0:
+        return float("inf")
+    return _norm(prices, p) / denom
 
 
 def _clone_detach(value):
@@ -208,15 +250,62 @@ class ADMMState:
 
 @dataclasses.dataclass()
 class ADMMSolver:
-    """Stores ADMM solver parameters and exposes a solve function."""
+    """Stores ADMM solver parameters and exposes a solve function.
+
+    **The units of rho.** In the augmented Lagrangian the penalty term is
+    ``(rho / 2) * ||A p||^2``, where ``A p`` is a nodal power imbalance in MW and
+    the term itself must come out in dollars; the multiplier ``nu`` it is
+    conjugate to is a price in $/MWh.  So
+
+        ``rho`` has units of **$/(MWh * MW)** -- it is precisely a MW-to-dollar
+        conversion factor, and ``rho_power = 1.0`` asserts that 1 MW of nodal
+        imbalance is worth 1 $/MWh of price.
+
+    This is not a free knob.  For a linear-cost device the prox is
+    ``p = clip(z - c / rho)``, so one device update moves dispatch by at most
+    ``c / rho`` MW: with ``c ~ 34 $/MWh`` and ``rho = 1`` that is a 34 MW step for
+    units whose capacity is thousands of MW, and the solve needs
+    ``O(range * rho / c)`` iterations merely to traverse one device's range.  The
+    dimensionally natural choice is the norm ratio
+    ``||price|| / ||power|| ~ 1.2e-2`` on ``ca2040_z4`` -- see :func:`natural_rho`,
+    which the solver also uses to emit a one-off ``suggest_rho`` log line when the
+    final iterate's ratio is more than 10x away from the rho in force.
+
+    **Coupling to the importer's unit scaling.** ``scale_costs`` divides
+    ``linear_cost`` by ``cost_unit`` and ``scale_power`` divides capacities by
+    ``power_unit``, so the physical prox step ``c / rho`` is preserved only if
+
+        ``rho_scaled = rho_physical * power_unit / cost_unit``
+
+    ``rho_power = 1.0`` is therefore a sane default only for a system imported with
+    ``power_unit ~ 1e3`` and ``cost_unit ~ 10`` (what
+    ``experiments/multi_year/runner.py`` used: ``0.0124 * 1000 / 10 = 1.24``), and
+    is ~80x too large for the ``experiments/ra`` harness, which imports at
+    ``power_unit = cost_unit = 1``.  Any config that changes ``power_unit`` or
+    ``cost_unit`` must rescale ``rho_power`` by the same factor.
+
+    **Absolute tolerances.** ``atol_primal`` is a power (MW) and ``atol_dual`` is a
+    price ($/MWh); they are different physical quantities and are configured
+    separately.  ``atol`` is the backwards-compatible alias that sets both.
+    """
 
     machine: str = None
     dtype: object = torch.float32
     num_iterations: int = 10000
+    #: ADMM penalty, in $/(MWh * MW). See the class docstring; the natural value is
+    #: ``||price|| / ||power||`` in the *scaled* units the solver sees.
     rho_power: float = 1.0
     rho_angle: Optional[float] = 1.0
     alpha: float = 1.0
+    #: Backwards-compatible alias: sets both `atol_primal` and `atol_dual` unless
+    #: they are given explicitly.
     atol: float = 1e-5
+    #: Absolute primal tolerance, in MW (a nodal power imbalance). Defaults to `atol`.
+    atol_primal: Optional[float] = None
+    #: Absolute dual tolerance, in $/MWh (a price movement). Defaults to `atol`.
+    #: Kept separate from `atol_primal` because equating a MW tolerance to a $/MWh
+    #: one is the same unit error as `rtol_dual_use_objective`.
+    atol_dual: Optional[float] = None
     rtol: float = 1e-5
     rtol_primal: Optional[float] = None
     rtol_dual: Optional[float] = None
@@ -259,6 +348,13 @@ class ADMMSolver:
             self.battery_window = None
 
         self.cumulative_iteration = 0
+        # `suggest_rho` logs at most once per solver instance.
+        self._rho_suggested = False
+        # Worst ||x - y||_inf reported by any device's inner prox during the last
+        # solve, in MW / MWh (0.0 when no device reports one; inf if a device
+        # reported a non-finite value). `experiments/ra/dispatch.py` records it
+        # on ADMM task records as `admm_max_inner_prox_residual_mw`.
+        self.max_inner_prox_residual = 0.0
 
         if self.scale_dual_residuals is not None:
             warnings.warn(
@@ -291,6 +387,48 @@ class ADMMSolver:
             warnings.warn(
                 "The verbose parameter should be an integer. Setting to 3 (max verbosity) if True, 0 if False."
             )
+
+    def absolute_tolerances(self):
+        """``(atol_primal, atol_dual)``, resolving the ``atol`` alias.
+
+        Resolved at use time rather than in ``__post_init__`` so that the
+        ``solve(atol=...)`` override path, which just ``setattr``s the field, still
+        takes effect.
+        """
+        atol_primal = self.atol if self.atol_primal is None else self.atol_primal
+        atol_dual = self.atol if self.atol_dual is None else self.atol_dual
+        return float(atol_primal), float(atol_dual)
+
+    def suggest_rho(self, st: ADMMState) -> float:
+        """:func:`natural_rho` of the final iterate; logs once if rho is >10x off.
+
+        The prices an ADMM state carries are ``rho_power * dual_power`` ($/MWh) and
+        its powers are ``st.power`` (MW), so the norm ratio of the pair is the
+        scale-free penalty this problem wanted.  Being a factor of 10 away costs
+        one to two orders of magnitude in iterations (see the class docstring), so
+        say so -- at INFO, and only once per solver, since one solver instance is
+        reused across every block of a run.
+        """
+        rho_power, _ = self.get_rho()
+        suggestion = natural_rho(rho_power * st.dual_power, st.power)
+
+        if np.isfinite(suggestion) and suggestion > 0.0 and rho_power > 0.0:
+            ratio = suggestion / rho_power
+            if not self._rho_suggested and (ratio > 10.0 or ratio < 0.1):
+                self._rho_suggested = True
+                logger.info(
+                    "suggest_rho: rho_power=%.3g, but the final iterate's "
+                    "||price||/||power|| = %.3g -- a factor of %.0f away. rho has "
+                    "units of $/(MWh*MW), so try rho_power=%.3g; if the system's "
+                    "unit scaling changes, rescale it as "
+                    "rho_scaled = rho_physical * power_unit / cost_unit.",
+                    rho_power,
+                    suggestion,
+                    max(ratio, 1.0 / ratio),
+                    suggestion,
+                )
+
+        return suggestion
 
     def get_rho(self):
         rho_power = self.rho_power
@@ -361,6 +499,7 @@ class ADMMSolver:
         self.warm_started = False
         self.warm_start_reason = None
         self.warm_start_rho_rescaled = False
+        self.max_inner_prox_residual = 0.0
 
         if initial_state is None:
             st = self.initialize_solver(
@@ -437,6 +576,10 @@ class ADMMSolver:
         if self.verbose >= 2:
             print("Final value of rho_power:", self.rho_power)
             print("Final value of rho_angle:", self.rho_angle)
+
+        # Cheap post-mortem on the penalty: skipped entirely once it has fired.
+        if not self._rho_suggested:
+            self.suggest_rho(st)
 
         # Stamp the state with the rho its scaled duals are relative to. `adjust_rho`
         # only writes these fields on the iterations where rho actually moves, so
@@ -547,6 +690,16 @@ class ADMMSolver:
             st.power[i] = p
             st.phase[i] = v
             st.local_variables[i] = lv
+
+            # Devices with an inner solver (StorageUnit) report their own primal
+            # residual; keep the worst over devices and iterations of this solve.
+            resid = getattr(dev, "last_admm_inner_residual", None)
+            if resid is not None:
+                resid = float(resid)
+                if not math.isfinite(resid):
+                    # A NaN/inf inner iterate must never read as "converged".
+                    resid = float("inf")
+                self.max_inner_prox_residual = max(self.max_inner_prox_residual, resid)
 
         return st
 
@@ -682,9 +835,13 @@ class ADMMSolver:
         p = 2 if self.resid_norm is None else self.resid_norm
         rho_power, rho_angle = self.get_rho()
 
-        # Absolute component
-        primal_tol = self.atol * np.power(self.total_terminals * (num_cont + 1), 1 / p)
-        dual_tol = primal_tol
+        # Absolute component. The primal residual is a power (MW) and the dual
+        # residual a price ($/MWh), so they take their absolute tolerances from
+        # separate knobs; `dual_tol = primal_tol` equated two different units.
+        atol_primal, atol_dual = self.absolute_tolerances()
+        tol_scale = np.power(self.total_terminals * (num_cont + 1), 1 / p)
+        primal_tol = atol_primal * tol_scale
+        dual_tol = atol_dual * tol_scale
 
         # Relative component
         # We add this check so we don't waste time computing norms if we don't need to

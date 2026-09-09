@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import numpy as np
 import cvxpy as cp
@@ -8,6 +10,8 @@ from collections import namedtuple
 from numpy.typing import NDArray
 
 from zap.devices.abstract import AbstractDevice, make_dynamic
+
+logger = logging.getLogger(__name__)
 
 StorageUnitVariable = namedtuple(
     "StorageUnitVariable",
@@ -187,6 +191,15 @@ class StorageUnit(AbstractDevice):
         T = power[0].shape[1]
         energy_capacity = la.multiply(power_capacity, self.duration)
 
+        # The windowed ADMM prox returns one SoC trajectory per window, so its
+        # `energy` is wider than the LP layout and the recursion has to be
+        # evaluated per window. The cvxpy path always hits `num_windows == 1`.
+        num_windows = self.num_soc_windows(state.energy.shape[1], T)
+        if num_windows > 1:
+            return self._windowed_equality_constraints(
+                power, state, energy_capacity, initial_soc, final_soc, T, num_windows, la
+            )
+
         soc_evolution = (
             state.energy[:, :-1]
             + la.multiply(state.charge, self.charge_efficiency)
@@ -206,6 +219,82 @@ class StorageUnit(AbstractDevice):
             constraints.append(
                 state.energy[:, T : (T + 1)] - la.multiply(final_soc, energy_capacity)
             )
+
+        return constraints
+
+    @staticmethod
+    def num_soc_windows(energy_width: int, time_horizon: int) -> int:
+        """How many SoC windows an ``energy`` array of this width represents.
+
+        The LP model carries one trajectory of ``T + 1`` slots.  The ADMM prox run
+        with ``battery_window = W`` returns ``S = T / W`` trajectories of ``W + 1``
+        slots concatenated -- ``T + S`` columns in all, because every window carries
+        its own extra boundary slot -- so ``S = energy_width - T`` inverts the layout.
+
+        Raises
+        ------
+        ValueError
+            If the width is neither layout, which would otherwise surface as an
+            opaque broadcasting error inside the SoC recursion.
+        """
+        if energy_width == time_horizon + 1:
+            return 1
+        num_windows = energy_width - time_horizon
+        if num_windows < 1 or time_horizon % num_windows != 0:
+            raise ValueError(
+                f"storage `energy` has {energy_width} columns, which is neither the LP "
+                f"layout (T + 1 = {time_horizon + 1}) nor a windowed ADMM layout "
+                f"(T + S columns for S equal windows dividing T = {time_horizon})"
+            )
+        return num_windows
+
+    def _windowed_equality_constraints(
+        self, power, state, energy_capacity, initial_soc, final_soc, T, num_windows, la
+    ):
+        """`equality_constraints` for the windowed ADMM prox layout.
+
+        Each window is an independent SoC problem in the prox -- ``get_ymin_ymax``
+        applies the same boundary rows to every window -- so the recursion, the
+        `fixed` pins and the `cyclic_free` equality are all evaluated *per window*.
+        Residuals come back flattened over windows, so a caller that only takes
+        ``abs(...).max()`` (the ADMM feasibility gate) does not have to know the
+        layout.
+        """
+        N = power[0].shape[0]
+        S = num_windows
+        W = T // S
+
+        def per_window(x, width):
+            return la.reshape(x, (N, S, width))
+
+        def broadcast_param(param):
+            # `make_dynamic` gives (N, 1) for a static parameter and (N, T) for a
+            # time-varying one; the first broadcasts over windows, the second is
+            # itself windowed.
+            if param.shape[1] == 1:
+                return la.reshape(param, (N, 1, 1))
+            return per_window(param, W)
+
+        charge = per_window(state.charge, W)
+        discharge = per_window(state.discharge, W)
+        energy = per_window(state.energy, W + 1)
+
+        soc_evolution = (
+            energy[:, :, :-1]
+            + la.multiply(charge, broadcast_param(self.charge_efficiency))
+            - la.multiply(discharge, 1 / broadcast_param(self.discharge_efficiency))
+        )
+
+        constraints = [
+            power[0] - (state.discharge - state.charge),
+            la.reshape(energy[:, :, 1:] - soc_evolution, (N, T)),
+        ]
+
+        if self.soc_mode == "cyclic_free":
+            constraints.append(energy[:, :, 0] - energy[:, :, W])
+        else:
+            constraints.append(energy[:, :, 0] - la.multiply(initial_soc, energy_capacity))
+            constraints.append(energy[:, :, W] - la.multiply(final_soc, energy_capacity))
 
         return constraints
 
@@ -411,6 +500,7 @@ class StorageUnit(AbstractDevice):
         inner_weight=1.0,
         inner_over_relaxation=1.0,
         inner_iterations=25,
+        inner_atol=1e-6,
     ):
         inner_weight = rho_power * inner_weight
 
@@ -481,6 +571,11 @@ class StorageUnit(AbstractDevice):
             # _K = K_matrix(self, T, rho_power, inner_weight, machine)
             # self.K_inv = torch.linalg.inv(_K)
 
+        if rebuild:
+            # `has_changed` is set by the ADMM solver at the start of every solve, so
+            # this is the once-per-solve reset for the inner-residual warning.
+            self._inner_residual_warned = False
+
         self._prox_soc_mode = mode
         self.has_changed = False
 
@@ -507,6 +602,29 @@ class StorageUnit(AbstractDevice):
         for iter in range(inner_iterations):
             x, y, u = battery_prox_inner(
                 x, y, u, rhs, schur, ymin, ymax, inner_weight, inner_over_relaxation
+            )
+
+        # Inner stopping test. `x` satisfies the SoC recursion and `y` the box, so
+        # ||x - y||_inf is the inner solve's own primal residual, in MW / MWh: the
+        # two iterates agree only at convergence. An unconverged prox is silent
+        # otherwise -- the outer loop can declare convergence on a dispatch whose SoC
+        # recursion is violated by tens of MWh (measured at inner_iterations <= 25) --
+        # so record it for the caller and warn, at most once per solve. Never raise:
+        # a slow prox is a quality problem, not a crash.
+        inner_residual = float(torch.max(torch.abs(x - y)).item())
+        self.last_admm_inner_residual = inner_residual
+        inner_tol = inner_atol * max(float(torch.max(ymax).item()), 1.0)
+        if inner_residual > inner_tol and not getattr(self, "_inner_residual_warned", False):
+            self._inner_residual_warned = True
+            logger.warning(
+                "StorageUnit prox did not reach tolerance: ||x - y||_inf = %.3g > %.3g "
+                "after %d inner iterations (rho=%.3g). The returned charge/discharge is "
+                "box-feasible but its SoC recursion is off by up to this much; raise "
+                "inner_iterations.",
+                inner_residual,
+                inner_tol,
+                inner_iterations,
+                float(rho_power),
             )
 
         # Extract results from the *projected* iterate `y`, not from `x`: `y` is
