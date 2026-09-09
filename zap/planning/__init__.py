@@ -3,6 +3,7 @@
 from zap.planning.problem_abstract import StochasticPlanningProblem
 from zap.planning.problem_api import PlanningProblem
 from zap.planning.relaxation import RelaxedPlanningProblem
+from zap.planning.monolithic import MonolithicPlanningProblem
 from zap.planning.solvers import GradientDescent
 
 from zap.planning.investment_objectives import InvestmentObjective

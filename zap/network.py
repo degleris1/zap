@@ -251,7 +251,11 @@ class PowerNetwork:
         return sum(costs)
 
     def model_variables(self, devices, time_horizon):
-        global_angle = cp.Variable((self.num_nodes, time_horizon))
+        has_ac_devices = any(d.is_ac for d in devices if not isinstance(d, Ground))
+        if has_ac_devices:
+            global_angle = cp.Variable((self.num_nodes, time_horizon))
+        else:
+            global_angle = None
         power = [d.initialize_power(time_horizon) for d in devices]
         angle = [d.initialize_angle(time_horizon) for d in devices]
         local_variables = [d.model_local_variables(time_horizon) for d in devices]
@@ -388,14 +392,9 @@ class PowerNetwork:
 
         power_balance = net_power == 0
 
-        # If there are no AC devices (except potentially Ground), we need to constrain
-        # all global angles to prevent unbounded problem
-        has_ac_devices = any(d.is_ac for d in devices if not isinstance(d, Ground))
-        if not has_ac_devices:
-            # No AC devices: fix all global angles to zero
-            global_angle_constraint = [global_angle == 0]
-        else:
-            global_angle_constraint = []
+        # global_angle is allocated only when AC devices (other than Ground) exist;
+        # in transport-only networks it's None and no slack is needed.
+        global_angle_constraint = []
 
         local_equalities = [
             [hi == 0 for hi in d.equality_constraints(p, v, u, **param, la=cp, envelope=env)]
@@ -618,6 +617,11 @@ class PowerNetwork:
         return sum(angle_duals)  # , axis=0)
 
     def _kkt_phase_consistency(self, devices, dispatch_outcome, la=np):
+        # Transport networks have no global_angle and no AC devices; phase
+        # consistency is vacuous so every device's phase_diff is None.
+        if dispatch_outcome.global_angle is None:
+            return [None for _ in devices]
+
         # Compute observed global angles
         theta_terminals = [
             apply_incidence_transpose(
@@ -985,10 +989,9 @@ def get_net_power(device: AbstractDevice, p: list[cp.Variable], la=np):
 
 
 def match_phases(device: AbstractDevice, v, global_v):
-    if v is not None:
-        return [Ai.T @ global_v == vi for Ai, vi in zip(device.incidence_matrix, v)]
-    else:
+    if v is None or global_v is None:
         return []
+    return [Ai.T @ global_v == vi for Ai, vi in zip(device.incidence_matrix, v)]
 
 
 def _blockify(eqm, power, prop_name):
