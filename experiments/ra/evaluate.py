@@ -96,7 +96,8 @@ EVAL_COLUMNS = (
     "total_cost_usd",
     "eue_mwh",
     "lolh_hours",
-    "lolp",
+    "lolh_frac",
+    "lol_any",
     "min_available_mw",
     "p5_available_mw",
     "mean_price_usd_per_mwh",
@@ -272,7 +273,11 @@ def _eval_rows(ok: pd.DataFrame, attrs: dict, holdout: set[int]) -> pd.DataFrame
             "total_cost_usd": (capex if np.isfinite(capex) else 0.0) + operational,
             "eue_mwh": sums.get("unserved_energy_mwh", float("nan")),
             "lolh_hours": lolh,
-            "lolp": (lolh / hours) if hours else float("nan"),
+            # Fraction of scored hours with any shortfall (system LOLH / hours);
+            # the proposal's LOLP -- P(case has any shortfall) -- is `lol_any`
+            # averaged over cases.
+            "lolh_frac": (lolh / hours) if hours else float("nan"),
+            "lol_any": bool(lolh > 0) if np.isfinite(lolh) else None,
             "min_available_mw": float(
                 pd.to_numeric(group.get("available_mw_min"), errors="coerce").min()
             )

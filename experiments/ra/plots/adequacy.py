@@ -28,7 +28,8 @@ phase_b(
         "total_cost_bn_usd",
         "eue_mwh",
         "lolh_hours",
-        "lolp",
+        "lolh_frac",
+        "lol_any",
         "is_holdout",
     ),
 )

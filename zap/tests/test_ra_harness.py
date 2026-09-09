@@ -17,6 +17,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -32,7 +33,7 @@ if str(ZAP_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(ZAP_REPO_ROOT))
 
 from experiments.ra import blocks as blocks_mod
-from experiments.ra import cli, config, dispatch, identity, metrics, paths, runcard
+from experiments.ra import cli, config, dispatch, identity, metrics, paths, persist, runcard
 from experiments.ra import system as system_mod
 from experiments.ra import tasks as tasks_mod
 
@@ -919,6 +920,24 @@ class TestBlockMetrics(TempRunMixin):
         self.assertGreater(m["unserved_energy_mwh"], 0.0)
         self.assertEqual(m["lost_load_hours"], 2)
         self.assertAlmostEqual(m["voll_cost"], 1000.0 * 20.0)
+
+    def test_lost_load_hours_counts_hours_not_bus_hours(self):
+        # Two load buses short in the same hour must count as ONE lost-load
+        # hour (LOLH is a system metric), not two.
+        loaded, devices, outcome = self._system()
+        block = blocks_mod.Block(index=0, year=2020, start=0, stop=2)
+        groups = metrics.device_groups(devices)
+        entries = persist.load_shortfall(devices, outcome.power, groups)
+        rows = sum(np.asarray(e.shortfall).shape[0] for e in entries)
+        hours = np.asarray(entries[0].shortfall).shape[1]
+        stacked = np.zeros((rows + 1, hours))
+        stacked[0, :] = 5.0
+        stacked[1, :] = 5.0
+        fake = [SimpleNamespace(shortfall=stacked, **{k: v for k, v in vars(entries[0]).items() if k != "shortfall"})]
+        with patch.object(persist, "load_shortfall", return_value=fake):
+            m = metrics.block_metrics(loaded, devices, outcome, block)
+        self.assertEqual(m["lost_load_hours"], hours)
+        self.assertAlmostEqual(m["unserved_energy_mwh"], 10.0 * hours)
 
         self.assertAlmostEqual(m["generation_cost"], 10.0 * 120.0)
         self.assertAlmostEqual(m["co2_tonnes"], 0.4 * 120.0)

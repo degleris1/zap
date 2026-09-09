@@ -163,9 +163,15 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
     # Factored into `persist.load_shortfall` so the ENS profile written for the
     # R5 heat map and this scalar can never disagree about what "unserved" means.
     shortfalls = persist.load_shortfall(devices, power, groups)
+    # LOLH counts *hours* in which the system sheds anywhere, not (bus, hour)
+    # pairs: sum the shortfall over load rows first, then count hours.
+    system_shortfall = None
     for entry in shortfalls:
         ens += float(entry.shortfall.sum())
-        lost_load_hours += int(np.count_nonzero(entry.shortfall > SHORTFALL_TOL_MW))
+        hourly = np.asarray(entry.shortfall, dtype=np.float64).sum(axis=0)
+        system_shortfall = hourly if system_shortfall is None else system_shortfall + hourly
+    if system_shortfall is not None:
+        lost_load_hours = int(np.count_nonzero(system_shortfall > SHORTFALL_TOL_MW))
     metrics["unserved_energy_mwh"] = ens
     metrics["lost_load_hours"] = lost_load_hours
 
