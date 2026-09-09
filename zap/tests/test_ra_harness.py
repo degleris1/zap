@@ -1353,8 +1353,11 @@ class TestRealSystem(TempRunMixin):
             self.assertNotIn(f"**{key}:** -", card)
 
     def test_cyclic_soc_per_block(self):
+        # This test pins the *fixed* boundary condition; the harness default is
+        # cyclic_free (decision 2026-09-09), so select fixed explicitly.
         path = self._config()
         cfg = config.load_config(path)
+        cfg["system"]["storage_soc_mode"] = "fixed"
         self._skip_if_devices_do_not_slice(cfg)
         loaded = system_mod.build_system(cfg)
         block = blocks_mod.make_blocks(cfg, 24)[1]

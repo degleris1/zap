@@ -429,19 +429,19 @@ class TestHarnessWiring(unittest.TestCase):
 
         cfg = ra_config.validate(ra_config.base_config())
         self.assertEqual(cfg["system"]["storage_soc_mode"], "cyclic_free")
-        self.assertEqual(ra_system.load_options(cfg).storage_soc_mode, "fixed")
-
-        cfg["system"]["storage_soc_mode"] = "cyclic_free"
         self.assertEqual(ra_system.load_options(cfg).storage_soc_mode, "cyclic_free")
+
+        cfg["system"]["storage_soc_mode"] = "fixed"
+        self.assertEqual(ra_system.load_options(cfg).storage_soc_mode, "fixed")
 
     def test_the_mode_is_part_of_the_system_cache_key(self):
         from experiments.ra import config as ra_config
         from experiments.ra import system as ra_system
 
         cfg = ra_config.validate(ra_config.base_config())
-        fixed_key = ra_system.system_key(cfg, None)
-        cfg["system"]["storage_soc_mode"] = "cyclic_free"
-        self.assertNotEqual(fixed_key, ra_system.system_key(cfg, None))
+        default_key = ra_system.system_key(cfg, None)
+        cfg["system"]["storage_soc_mode"] = "fixed"
+        self.assertNotEqual(default_key, ra_system.system_key(cfg, None))
 
 
 if __name__ == "__main__":
