@@ -1,0 +1,60 @@
+# PLACEHOLDER VALUES - user to review before any reported run.
+# NERC GADS-class order-of-magnitude figures entered by an agent on 2026-09-08.
+# Each entry must carry a source before any number below is cited in the thesis.
+#
+# USER TO REVIEW before any reported run.
+#
+# Semantics of each field:
+#   unit_size_mw       nameplate size of one virtual unit of this carrier; a
+#                      source row of capacity C is represented by ceil(C / size)
+#                      units, the last one weighted by the remainder.
+#   forced_outage_rate long-run probability that a unit is unavailable (EFOR-like).
+#   mttr_h             mean time to repair, hours. Together with the FOR this
+#                      pins the two-state Markov chain:
+#                        mttf_h  = mttr_h * (1 - FOR) / FOR
+#                        p_fail  = 1 - exp(-1 / mttf_h)
+#                        p_repair= 1 - exp(-1 / mttr_h)
+#   source             provenance of the two numbers above. Required on every line.
+
+version: 1
+reviewed: false            # flip to true only after the user has checked the numbers
+pool_multiplier: 3.0       # pool capacity = multiplier x reference capacity
+min_units_per_row: 3
+min_pool_capacity_mw: 0.0
+
+# Carriers that are deliberately given no outage units. VRE availability is
+# already in the weather profiles; AC/DC/imports/exports are network carriers.
+excluded_carriers: [solar, onwind, offwind_floating, unspecified_imports, AC, DC,
+                    imports, exports, demand_response, AC_exp]
+
+carriers:
+  CCGT:        {unit_size_mw: 250, forced_outage_rate: 0.045, mttr_h: 50,
+                source: "NERC GADS combined-cycle class average EFOR ~4-5%; placeholder"}
+  CCGT-95CCS:  {unit_size_mw: 250, forced_outage_rate: 0.055, mttr_h: 60,
+                source: "CCGT class + CCS island penalty; placeholder"}
+  OCGT:        {unit_size_mw: 100, forced_outage_rate: 0.040, mttr_h: 40,
+                source: "NERC GADS gas turbine class; placeholder"}
+  hydrogen_ct: {unit_size_mw: 100, forced_outage_rate: 0.050, mttr_h: 40,
+                source: "assumed equal to OCGT with a penalty; placeholder"}
+  coal:        {unit_size_mw: 400, forced_outage_rate: 0.070, mttr_h: 70,
+                source: "NERC GADS fossil steam class; placeholder"}
+  oil:         {unit_size_mw:  50, forced_outage_rate: 0.080, mttr_h: 60,
+                source: "NERC GADS oil/diesel class; placeholder"}
+  nuclear:     {unit_size_mw: 1000, forced_outage_rate: 0.020, mttr_h: 200,
+                source: "NERC GADS nuclear class; placeholder"}
+  biomass:     {unit_size_mw:  40, forced_outage_rate: 0.080, mttr_h: 60,
+                source: "small steam class proxy; placeholder"}
+  waste:       {unit_size_mw:  30, forced_outage_rate: 0.080, mttr_h: 60,
+                source: "small steam class proxy; placeholder"}
+  geothermal:  {unit_size_mw:  30, forced_outage_rate: 0.050, mttr_h: 50,
+                source: "geothermal binary class proxy; placeholder"}
+  hydro:       {unit_size_mw:  50, forced_outage_rate: 0.035, mttr_h: 40,
+                source: "NERC GADS conventional hydro class; placeholder"}
+  PHS:         {unit_size_mw: 200, forced_outage_rate: 0.050, mttr_h: 60,
+                source: "pumped storage class; placeholder"}
+  battery:               {unit_size_mw: 50, forced_outage_rate: 0.020, mttr_h: 24,
+                source: "BESS availability ~98%; placeholder"}
+  4hr_battery_storage:   {unit_size_mw: 50, forced_outage_rate: 0.020, mttr_h: 24,
+                source: "as battery; placeholder"}
+  8hr_battery_storage:   {unit_size_mw: 50, forced_outage_rate: 0.020, mttr_h: 24,
+                source: "as battery; placeholder"}
