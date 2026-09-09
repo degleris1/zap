@@ -32,9 +32,14 @@ import zap.planning.trackers as tr
 from zap.importers.multi_year import MultiYearBlockSampler
 from zap.planning import (
     InvestmentObjective,
+    MonolithicPlanningProblem,
     RelaxedPlanningProblem,
     GradientDescent,
 )
+
+# Methods that produce the optimum from a single LP solve (Step 6 only; no gradient descent).
+_LP_ONLY_METHODS = {"monolithic", "relaxed", "stochastic"}
+_KNOWN_METHODS = _LP_ONLY_METHODS | {"gradient", "admm_gpu"}
 from zap.planning.operation_objectives import DispatchCostObjective, EmissionsObjective
 
 logging.basicConfig(level=logging.INFO)
@@ -78,7 +83,26 @@ DEFAULT_RELAXATION_SOLVER_KWARGS = {"verbose": False}
 def load_config(config_path: Union[str, Path]) -> dict:
     """Load configuration from YAML file."""
     with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
+
+
+def deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge `override` into `base`. Override wins on conflict."""
+    result = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(result.get(k), dict):
+            result[k] = deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def load_and_merge_configs(paths: List[Union[str, Path]]) -> dict:
+    """Load and deep-merge multiple YAML configs in order. Later files override earlier."""
+    merged: dict = {}
+    for p in paths:
+        merged = deep_merge(merged, load_config(p))
+    return merged
 
 
 def datadir(*args) -> Path:
@@ -399,6 +423,87 @@ def export_solved_network(
     return network
 
 
+def _finalize_lp_only_result(
+    *,
+    config,
+    method,
+    sampler,
+    parameter_names,
+    initial_parameters,
+    carrier_labels,
+    relaxation_result,
+    network_files,
+    pypsa_args,
+    timings,
+    use_wandb,
+    wandb_logger,
+):
+    """Build the result dict (and export network) for LP-only methods.
+
+    Used by monolithic / relaxed / stochastic, which finish after Step 6 with
+    no gradient-descent run.
+    """
+    optimal_params = relaxation_result["relaxed_parameters"]
+    final_cost = float(relaxation_result["lower_bound"])
+
+    logger.info("=" * 60)
+    logger.info(f"RESULTS ({method})")
+    logger.info("=" * 60)
+    logger.info(f"Single-level optimum: {final_cost:.2f}")
+    logger.info("Optimal capacities:")
+    for name, value in optimal_params.items():
+        logger.info(f"  {name}: {value}")
+
+    name = config.get("name", "experiment")
+    run_dir = datadir(name)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Optional network export
+    export_config = config.get("export", {})
+    export_path = None
+    export_time = None
+    if export_config.get("should_export", False):
+        base_network_file = network_files[0] if network_files else None
+        if base_network_file is None:
+            logger.warning("No network files available for export. Skipping export.")
+        else:
+            logger.info("Exporting optimized capacities to PyPSA network...")
+            t0 = time.time()
+            exported_network = export_solved_network(
+                pypsa_network_path=EXPERIMENT_DATA_PATH / base_network_file,
+                devices=sampler.base_devices,
+                parameter_names=parameter_names,
+                optimal_params=optimal_params,
+                pypsa_args=pypsa_args,
+            )
+            export_path = run_dir / "optimized_network.nc"
+            exported_network.export_to_netcdf(str(export_path))
+            export_time = time.time() - t0
+            logger.info(f"Optimized network saved to {export_path} ({export_time:.2f}s)")
+
+    if use_wandb and wandb_logger is not None:
+        wandb.finish()
+
+    result = {
+        "config": config,
+        "method": method,
+        "final_cost": final_cost,
+        "lower_bound": final_cost,  # LP-only: optimum is its own lower bound
+        "initial_parameters": initial_parameters,
+        "carrier_labels": carrier_labels,
+        "optimal_parameters": {
+            k: v.tolist() if hasattr(v, "tolist") else v for k, v in optimal_params.items()
+        },
+        "timing": timings,
+        "sampler_summary": sampler.summary(),
+    }
+    if export_path is not None:
+        result["export_path"] = str(export_path)
+        result["timing"]["export"] = export_time
+
+    return result
+
+
 def _serialize_history(history: dict) -> dict:
     """Serialize optimization history for JSON output.
 
@@ -606,8 +711,25 @@ def run_experiment(config: dict) -> dict:
     dict
         Experiment results including optimal capacities and costs
     """
+    # Method dispatch -- fail fast on unknown / stubbed methods.
+    method = config.get("method", "gradient")
+    if method not in _KNOWN_METHODS:
+        raise ValueError(
+            f"Unknown method '{method}'. Expected one of {sorted(_KNOWN_METHODS)}."
+        )
+    if method == "admm_gpu":
+        raise NotImplementedError(
+            "ADMM/GPU path not yet ported into multi_year/runner.py. "
+            "See experiments/plan/runner.py:288-316 for the reference implementation."
+        )
+
+    # Default the run name to {network}_{method} when not user-overridden.
+    if not config.get("name"):
+        net_tag = config.get("network", "experiment")
+        config["name"] = f"{net_tag}_{method}"
+
     logger.info("=" * 60)
-    logger.info("Starting multi-year stochastic planning experiment")
+    logger.info(f"Starting experiment: {config['name']} (method={method})")
     logger.info("=" * 60)
 
     # Extract config
@@ -681,6 +803,12 @@ def run_experiment(config: dict) -> dict:
     # -------------------------------------------------------------------------
     # Step 3: Sample blocks
     # -------------------------------------------------------------------------
+    # block_size: null is the "monolithic" sentinel: one block covering the full
+    # horizon. Resolve it now that the sampler knows total_hours.
+    if block_size is None:
+        block_size = sampler.total_hours
+        logger.info(f"block_size=null -> using full horizon ({block_size}h, 1 block)")
+
     logger.info(f"Sampling blocks with strategy='{sampling_strategy}'...")
 
     blocks = sampler.sample_blocks(
@@ -802,32 +930,46 @@ def run_experiment(config: dict) -> dict:
     logger.info(f"Created problem with {problem.num_subproblems} subproblems")
 
     # -------------------------------------------------------------------------
-    # Step 6: Solve relaxed problem (for lower bound and initialization)
+    # Step 6: Solve monolithic single-level LP (for lower bound and initialization)
+    # The monolithic value is the exact LP optimum when planning and dispatch
+    # objectives match (true here -- both use DispatchCostObjective +
+    # emissions_weight * EmissionsObjective). It also serves as a lower bound
+    # for the decomposed gradient run.
     # Note: must happen BEFORE initializing parallel workers, because
-    # RelaxedPlanningProblem deepcopies the problem and worker pools
+    # MonolithicPlanningProblem deepcopies the problem and worker pools
     # (which contain SimpleQueue objects) cannot be pickled.
     # -------------------------------------------------------------------------
     relaxation_config = config.get("relaxation", {})
-    should_solve_relaxation = relaxation_config.get("should_solve", True)
+    # The `relaxed` method requires Step 6 regardless of the should_solve flag;
+    # otherwise honor the config setting.
+    should_solve_relaxation = (
+        method in _LP_ONLY_METHODS or relaxation_config.get("should_solve", True)
+    )
+    # `relaxation.kind` chooses between MonolithicPlanningProblem (default) and
+    # the strong-duality RelaxedPlanningProblem. The `relaxed` method pins kind.
+    relaxation_kind = (
+        "strong_duality" if method == "relaxed"
+        else relaxation_config.get("kind", "monolithic")
+    )
 
     relaxation_result = None
     if should_solve_relaxation:
-        logger.info("Solving relaxed problem...")
+        kind_label = "strong-duality" if relaxation_kind == "strong_duality" else "monolithic"
+        logger.info(f"Solving {kind_label} single-level problem...")
         start_time = time.time()
 
-        # Get relaxation solver from config
         relaxation_solver_name = relaxation_config.get("solver", DEFAULT_RELAXATION_SOLVER)
         relaxation_solver = getattr(cp, relaxation_solver_name)
         relaxation_solver_kwargs = relaxation_config.get(
             "solver_kwargs", DEFAULT_RELAXATION_SOLVER_KWARGS
         )
-        logger.info(f"Using relaxation solver: {relaxation_solver_name}")
+        logger.info(f"Using single-level solver: {relaxation_solver_name}")
 
-        # Optionally subsample blocks for a smaller relaxation problem
+        # Optionally subsample blocks for a smaller single-level problem
         num_relaxation_subproblems = relaxation_config.get("num_subproblems", None)
         if num_relaxation_subproblems is not None and num_relaxation_subproblems < len(blocks):
             logger.info(
-                f"Subsampling relaxation: {num_relaxation_subproblems} blocks "
+                f"Subsampling single-level problem: {num_relaxation_subproblems} blocks "
                 f"(out of {len(blocks)} total)"
             )
             relaxation_blocks = sampler.sample_blocks(
@@ -846,40 +988,79 @@ def run_experiment(config: dict) -> dict:
                 solver_kwargs=dispatch_solver_kwargs,
             )
             logger.info(
-                f"Solving stochastic relaxation with "
+                f"Solving stochastic single-level problem with "
                 f"{relaxation_problem.num_subproblems} scenarios"
             )
         else:
             relaxation_problem = problem
 
-        relaxation = RelaxedPlanningProblem(
-            relaxation_problem,
-            max_price=relaxation_config.get("price_bound", 100.0),
-            solver=relaxation_solver,
-            solver_kwargs=relaxation_solver_kwargs,
-        )
-        relaxed_params, relax_solve_data = relaxation.solve()
+        if relaxation_kind == "strong_duality":
+            single_level = RelaxedPlanningProblem(
+                relaxation_problem,
+                max_price=relaxation_config.get("price_bound", 100.0),
+                solver=relaxation_solver,
+                solver_kwargs=relaxation_solver_kwargs,
+            )
+        else:
+            single_level = MonolithicPlanningProblem(
+                relaxation_problem,
+                solver=relaxation_solver,
+                solver_kwargs=relaxation_solver_kwargs,
+            )
+        relaxed_params, relax_solve_data = single_level.solve()
 
         relax_time = time.time() - start_time
-        logger.info(f"Relaxation solve took {relax_time:.2f}s")
+        logger.info(f"Single-level solve took {relax_time:.2f}s")
 
         lower_bound = relax_solve_data["problem"].value
         if lower_bound is None:
             logger.warning(
-                f"Relaxation failed (status: {relax_solve_data['problem'].status}). "
+                f"Single-level solve failed (status: {relax_solve_data['problem'].status}). "
                 "Proceeding without lower bound or warm-start."
             )
             relaxation_result = None
         else:
-            logger.info(f"Lower bound from relaxation: {lower_bound:.2f}")
+            logger.info(
+                f"Single-level optimum (lower bound for decomposed run): {lower_bound:.2f}"
+            )
             relaxation_result = {
                 "relaxed_parameters": relaxed_params,
                 "lower_bound": lower_bound,
                 "solve_time": relax_time,
             }
     else:
-        logger.info("Skipping relaxation...")
+        logger.info("Skipping single-level solve...")
         relax_time = 0.0
+
+    # -------------------------------------------------------------------------
+    # LP-only short-circuit: monolithic / relaxed / stochastic methods are done
+    # after Step 6. Build a minimal result, export the network, return.
+    # -------------------------------------------------------------------------
+    if method in _LP_ONLY_METHODS:
+        if relaxation_result is None:
+            raise RuntimeError(
+                f"Method '{method}' requires the single-level solve to succeed, "
+                f"but it failed. Check solver logs."
+            )
+        return _finalize_lp_only_result(
+            config=config,
+            method=method,
+            sampler=sampler,
+            parameter_names=parameter_names,
+            initial_parameters=initial_parameters,
+            carrier_labels=carrier_labels,
+            relaxation_result=relaxation_result,
+            network_files=network_files,
+            pypsa_args=pypsa_args,
+            timings={
+                "network_loading": load_time,
+                "sampler_creation": sampler_time,
+                "problem_creation": problem_time,
+                "single_level_solve": relax_time,
+            },
+            use_wandb=use_wandb,
+            wandb_logger=wandb_logger,
+        )
 
     # -------------------------------------------------------------------------
     # Step 7: Initialize parallel workers (after relaxation to avoid deepcopy issues)
@@ -1149,9 +1330,11 @@ def run_experiment(config: dict) -> dict:
             export_time = time.time() - start_time
             logger.info(f"Export took {export_time:.2f}s")
 
-            # Save the exported network
+            # Save the exported network under outputs/{name}/.
             experiment_name = config.get("name", "experiment")
-            export_path = datadir(f"{experiment_name}_optimized_network.nc")
+            run_dir = datadir(experiment_name)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            export_path = run_dir / "optimized_network.nc"
             exported_network.export_to_netcdf(str(export_path))
             logger.info(f"Optimized network saved to {export_path}")
 
@@ -1202,45 +1385,33 @@ def run_experiment(config: dict) -> dict:
 
 
 def main():
-    """Main entry point for the experiment."""
+    """Main entry point for the experiment.
+
+    Usage:
+        python runner.py NETWORK.yaml METHOD.yaml [OVERRIDE.yaml ...]
+
+    Each YAML is deep-merged in order (later files override earlier). The typical
+    invocation passes one network config + one method config:
+
+        python runner.py configs/networks/normal.yaml configs/methods/gradient.yaml
+    """
     import sys
 
-    if len(sys.argv) > 1:
-        # Load config from file
-        config_path = sys.argv[1]
-        config = load_config(config_path)
-    else:
-        # Default config using available data
-        available = list_available_networks()
-        logger.info(f"Available networks: {available}")
+    if len(sys.argv) <= 1:
+        raise SystemExit(
+            "Usage: python runner.py NETWORK.yaml METHOD.yaml [OVERRIDE.yaml ...]"
+        )
 
-        config = {
-            "name": "multi_year_experiment",
-            "network_files": available,  # Use all available networks
-            "hours_per_year": 168 * 4,  # 4 weeks per year for testing
-            "block_size": 168,  # Weekly blocks
-            "sampling_strategy": "all",
-            "num_workers": 1,
-            "seed": 42,
-            "relaxation": {
-                "should_solve": True,
-                "price_bound": 100.0,
-            },
-            "optimizer": {
-                "num_iterations": 100,
-                "step_size": 1e-3,
-                "clip": 1e3,  # Gradient clipping threshold
-                "initial_state": "relaxation",
-                "batch_size": 0,  # 0 = use all subproblems
-                "batch_strategy": "sequential",
-            },
-        }
+    config = load_and_merge_configs(sys.argv[1:])
 
     # Run experiment
     results = run_experiment(config)
 
-    # Save results
-    output_path = datadir(f"{config.get('name', 'experiment')}_results.json")
+    # Save results under outputs/{name}/results.json
+    name = config.get("name", "experiment")
+    run_dir = datadir(name)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    output_path = run_dir / "results.json"
     with open(output_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
 
