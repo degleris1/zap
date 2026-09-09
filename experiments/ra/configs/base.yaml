@@ -22,7 +22,7 @@ system:
   #   fixed       -- energy[0] = storage_init_soc * E, energy[T] = storage_final_soc * E
   #   cyclic_free -- energy[0] = energy[T], level chosen by the optimizer
   #                  (storage_init_soc / storage_final_soc are then ignored)
-  storage_soc_mode: fixed   # fixed | cyclic_free
+  storage_soc_mode: cyclic_free   # fixed | cyclic_free (default cyclic_free, decision 2026-09-09)
   # Unit scaling handed to the importer (wy_store LoadOptions). 1.0 keeps the
   # system in MW / $, which is what every reported metric is denominated in;
   # a different scaling only changes the conditioning of the ADMM solve, and
@@ -136,4 +136,15 @@ execution:
   max_tasks: null
   force: false
 output:
+  # Persistence flags. `output` is excluded from the run-id hash (identity.
+  # EXCLUDED_FROM_HASH): what a run writes never changes what it computes.  The
+  # *effective* block is recorded in env.json instead.  See
+  # memory/plans/2026-09-09-plots-spec.md section 2.
   runs_root: null           # null -> paths.runs_root()
+  save_hourly: none         # none | carrier_bus  (D2; 'device' is rejected)
+  hourly_quantities: all    # "all", or a list drawn from persist.HOURLY_QUANTITIES
+  combine_hourly: true      # aggregate concatenates hourly/*.parquet -> hourly.parquet
+  save_ens_profile: true    # per-hour ENS, only for the hours with a shortfall
+  admm_trace_every: 0       # 0 = off; k > 0 keeps every k-th ADMM iteration
+  save_iterations: true     # planning: the three iteration tables
+  figures: false            # write the debug figures at aggregate time

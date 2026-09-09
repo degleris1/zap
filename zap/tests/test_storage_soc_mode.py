@@ -425,10 +425,10 @@ class TestHarnessWiring(unittest.TestCase):
         from experiments.ra import system as ra_system
         from zap.importers.wy_store import LoadOptions
 
-        self.assertEqual(LoadOptions().storage_soc_mode, "fixed")
+        self.assertEqual(LoadOptions().storage_soc_mode, "cyclic_free")
 
         cfg = ra_config.validate(ra_config.base_config())
-        self.assertEqual(cfg["system"]["storage_soc_mode"], "fixed")
+        self.assertEqual(cfg["system"]["storage_soc_mode"], "cyclic_free")
         self.assertEqual(ra_system.load_options(cfg).storage_soc_mode, "fixed")
 
         cfg["system"]["storage_soc_mode"] = "cyclic_free"

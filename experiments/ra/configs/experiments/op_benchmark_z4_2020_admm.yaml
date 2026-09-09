@@ -1,7 +1,7 @@
 # ADMM sweep: 24 h and 168 h blocks only, no reference solve (spec 5.9).
 includes: [../base.yaml, ../datasets/ca2040_z4.yaml, ../methods/admm_cpu.yaml]
 name: op_benchmark_z4_2020_admm
-dataset: {years: [2020], window: {start: 0, stop: 8760}}
+dataset: {years: [2020], window: {start: 7, stop: 8743}}   # local-midnight blocks
 # export_mode: drop — the export stores have e_nom=0 as built, so an as-built
 # operations run must not export; unlimited sinks with the -178 $/MWh export
 # price would otherwise dominate the objective (orchestrator, 2026-09-08).
@@ -10,7 +10,7 @@ selection:
   blocks: [24, 168]
   reference: none
   # Kept aligned to both block sizes even though it is unused here.
-  reference_window: {start: 5040, hours: 672}
+  reference_window: {start: 5047, hours: 672}
 methods:
   lp:   {enabled: true, solver: HIGHS, timeout_s: 3600}
   admm: {enabled: true, required: false, timeout_s: 3600}

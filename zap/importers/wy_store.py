@@ -546,7 +546,7 @@ class LoadOptions:
     #: Storage boundary condition of a block. ``"fixed"`` pins start and end at
     #: ``storage_init_soc`` / ``storage_final_soc``; ``"cyclic_free"`` only ties
     #: them together (``energy[0] == energy[T]``) and ignores both levels.
-    storage_soc_mode: Literal["fixed", "cyclic_free"] = "fixed"
+    storage_soc_mode: Literal["fixed", "cyclic_free"] = "cyclic_free"  # default by decision 2026-09-09
     dtype: str = "float64"
 
 

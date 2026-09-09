@@ -326,13 +326,13 @@ class TestTasks(TempRunMixin):
         # reference tiles both block sizes exactly (orchestrator, 2026-09-08).
         self.assertEqual(counts, {"24": 364, "168": 52, "reference": 1})
         self.assertEqual(len(all_tasks), 417)
-        self.assertEqual(cfg["dataset"]["window"], {"start": 0, "stop": 8736})
+        self.assertEqual(cfg["dataset"]["window"], {"start": 7, "stop": 8743})
         self.assertEqual(cfg["selection"]["reference"], "full_year")
 
         # The reference window -- here the whole window -- is covered exactly by
         # both block sizes, with no straddling or dropped blocks.
         bounds = blocks_mod.reference_bounds(cfg)
-        self.assertEqual(bounds, (0, 8736))
+        self.assertEqual(bounds, (7, 8743))
         for size in cfg["selection"]["blocks"]:
             inside = [
                 b
