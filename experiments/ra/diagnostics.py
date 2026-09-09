@@ -50,21 +50,33 @@ from zap.importers.wy_store import (  # noqa: E402
 DATASET_COLORS = {"ca2040_z4": "#1f5f8b", "ca2040_county": "#d2691e"}
 FALLBACK_COLORS = ["#4c7a4c", "#7b3f8c", "#8b1f1f"]
 
-#: Line style per dataset. Annual demand is identical in the two resolutions
-#: (county is a spatial disaggregation of the same load), so the series overlap
-#: exactly in some figures; distinct dashes keep both visible.
-DATASET_STYLES = {"ca2040_z4": ("-", "o"), "ca2040_county": ("--", "s")}
-FALLBACK_STYLE = ("-.", "^")
-
 GRID_KWARGS = dict(color="0.85", linewidth=0.6)
 
+#: Fraction of one weather-year slot covered by a group of bars.
+GROUP_WIDTH = 0.8
+#: Background behind direct labels, so they stay readable over bars and lines.
+LABEL_BBOX = {"facecolor": "white", "edgecolor": "none", "pad": 1.0, "alpha": 0.8}
+#: On-screen gap between the bars of one year, in device pixels.
+BAR_GAP_PX = 2.0
+
+#: Annual demand and peak load are the same numbers in both resolutions
+#: (county is a spatial disaggregation of the same load); both bars are kept so
+#: the layout matches the other figures, and the note says so on the figure.
+IDENTICAL_NOTE = (
+    "Series are identical by construction: ca2040_county is a spatial "
+    "disaggregation of the same load."
+)
+
 FIGURES = [
-    ("demand_twh", "demand_twh", "Annual demand (TWh)"),
-    ("peak_load_gw", "peak_load_gw", "Peak demand (GW)"),
-    ("peak_available_gw", "peak_avail_gw", "Peak available capacity (GW)"),
+    ("demand_twh", "demand_twh", "Annual demand (TWh)", IDENTICAL_NOTE),
+    ("peak_load_gw", "peak_load_gw", "Peak demand (GW)", IDENTICAL_NOTE),
+    ("peak_available_gw", "peak_avail_gw", "Peak available capacity (GW)", None),
 ]
 
 RATIO_FIGURE = ("peak_load_over_avail", "peak_load_over_avail", "Peak load / peak available")
+
+#: Dashed horizontal references drawn on the ratio figure, as (value, label).
+RATIO_REFERENCES = ((0.85, "0.85"), (1.0, "1.0"))
 
 CSV_COLUMNS = [
     "dataset",
@@ -162,65 +174,112 @@ def _color(dataset: str, order: int) -> str:
     return DATASET_COLORS.get(dataset, FALLBACK_COLORS[order % len(FALLBACK_COLORS)])
 
 
-def _annotate_extremes(ax, x, y, color):
-    if len(x) == 0:
+def _resize_bars(fig, ax, series) -> None:
+    """Give every year's bars a fixed on-screen gap of ``BAR_GAP_PX`` pixels."""
+    n_series = len(series)
+    if n_series == 0:
         return
-    for index, va, dy in ((int(np.argmax(y)), "bottom", 6), (int(np.argmin(y)), "top", -6)):
+    fig.canvas.draw()
+    x_lo, x_hi = ax.get_xlim()
+    width_px = ax.get_window_extent().width
+    if width_px <= 0 or x_hi <= x_lo:
+        return
+    gap = BAR_GAP_PX * (x_hi - x_lo) / width_px
+    bar_width = (GROUP_WIDTH - (n_series - 1) * gap) / n_series
+    if bar_width <= 0:
+        return
+    for order, item in enumerate(series):
+        offset = -GROUP_WIDTH / 2 + order * (bar_width + gap)
+        for year, bar in zip(item["x"], item["bars"]):
+            bar.set_x(float(year) + offset)
+            bar.set_width(bar_width)
+
+
+def _annotate_extremes(ax, item, order: int) -> None:
+    """Label only the tallest and shortest bar of one series.
+
+    ``order`` lifts each series' labels onto its own row so that two series
+    whose extremes fall on neighbouring years do not overprint each other.
+    """
+    x, y, bars = item["x"], item["y"], item["bars"]
+    if len(y) == 0:
+        return
+    for index in {int(np.argmax(y)), int(np.argmin(y))}:
+        bar = bars[index]
         ax.annotate(
             f"{int(x[index])}: {y[index]:,.4g}",
-            xy=(x[index], y[index]),
-            xytext=(0, dy),
+            xy=(bar.get_x() + bar.get_width() / 2, y[index]),
+            xytext=(0, 3 + 11 * order),
             textcoords="offset points",
             ha="center",
-            va=va,
+            va="bottom",
             fontsize=8,
-            color=color,
+            color=item["color"],
+            bbox=LABEL_BBOX,
         )
 
 
-def _figure(table: pd.DataFrame, column: str, ylabel: str, path: Path, reference=None) -> Path:
+def _figure(
+    table: pd.DataFrame,
+    column: str,
+    ylabel: str,
+    path: Path,
+    references: Sequence[tuple[float, str]] = (),
+    note: str | None = None,
+) -> Path:
+    """Grouped bar chart of ``column``: one bar per dataset per weather year."""
     fig, ax = plt.subplots(figsize=(8.0, 4.2))
     ax.set_axisbelow(True)
-    ax.grid(True, **GRID_KWARGS)
+    ax.grid(True, axis="y", **GRID_KWARGS)
 
+    series = []
     for order, (dataset, group) in enumerate(table.groupby("dataset", sort=True)):
         group = group.sort_values("weather_year")
         x = group["weather_year"].to_numpy()
         y = group[column].to_numpy(dtype=float)
         color = _color(dataset, order)
-        linestyle, marker = DATASET_STYLES.get(dataset, FALLBACK_STYLE)
-        ax.plot(
-            x,
-            y,
-            marker=marker,
-            markersize=4.5,
-            markerfacecolor="none" if linestyle != "-" else color,
-            linestyle=linestyle,
-            linewidth=1.6,
-            color=color,
-            label=dataset,
-        )
-        _annotate_extremes(ax, x, y, color)
+        bars = ax.bar(x.astype(float), y, width=GROUP_WIDTH, color=color, label=dataset)
+        series.append({"x": x, "y": y, "color": color, "bars": list(bars)})
 
-    if reference is not None:
-        ax.axhline(reference, linestyle="--", linewidth=1.0, color="0.35")
+    years = table["weather_year"].to_numpy(dtype=float)
+    ax.set_xlim(years.min() - 0.6, years.max() + 0.6)
+    ax.set_xticks(sorted(set(years.tolist())))
+    ax.tick_params(axis="x", labelrotation=90, labelsize=8)
+
+    top = max(float(np.nanmax(item["y"])) for item in series)
+    top = max([top, *(value for value, _ in references)])
+    ax.set_ylim(0.0, top * 1.22)
+
+    for value, label in references:
+        ax.axhline(value, linestyle="--", linewidth=1.0, color="0.35")
         ax.annotate(
-            f"{reference:g}",
-            xy=(table["weather_year"].max(), reference),
-            xytext=(4, 2),
+            label,
+            xy=(1.0, value),
+            xycoords=("axes fraction", "data"),
+            xytext=(-2, 1),
             textcoords="offset points",
+            ha="right",
+            va="bottom",
             fontsize=8,
             color="0.35",
+            bbox=LABEL_BBOX,
         )
 
-    ax.margins(x=0.04, y=0.14)  # headroom for the min/max labels
     ax.set_xlabel("weather year")
     ax.set_ylabel(ylabel)
-    ax.legend(frameon=False, loc="best")
+    ax.legend(frameon=False, loc="upper left", ncols=len(series))
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
 
-    fig.tight_layout()
+    bottom = 0.06 if note else 0.0
+    fig.tight_layout(rect=(0.0, bottom, 1.0, 1.0))
+    if note:
+        fig.text(0.5, 0.015, note, ha="center", fontsize=8, color="0.35")
+
+    _resize_bars(fig, ax, series)
+    for order, item in enumerate(series):
+        _annotate_extremes(ax, item, order)
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -229,10 +288,12 @@ def _figure(table: pd.DataFrame, column: str, ylabel: str, path: Path, reference
 
 def write_figures(table: pd.DataFrame, out_dir: Path) -> list[Path]:
     paths = []
-    for stem, column, ylabel in FIGURES:
-        paths.append(_figure(table, column, ylabel, out_dir / f"{stem}.png"))
+    for stem, column, ylabel, note in FIGURES:
+        paths.append(_figure(table, column, ylabel, out_dir / f"{stem}.png", note=note))
     stem, column, ylabel = RATIO_FIGURE
-    paths.append(_figure(table, column, ylabel, out_dir / f"{stem}.png", reference=0.85))
+    paths.append(
+        _figure(table, column, ylabel, out_dir / f"{stem}.png", references=RATIO_REFERENCES)
+    )
     return paths
 
 
