@@ -6,7 +6,7 @@ from zap.devices.abstract import AbstractDevice
 from zap.devices.injector import Injector, Generator, Load
 from zap.devices.storage_unit import StorageUnit
 from zap.devices.store import Store
-from zap.devices.transporter import DCLine, ACLine
+from zap.devices.transporter import DCLine, ACLine, DirectedLine
 from zap.devices.ground import Ground
 
 

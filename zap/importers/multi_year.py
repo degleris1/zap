@@ -10,6 +10,8 @@ from typing import Optional, Callable, Union
 import logging
 
 from zap.devices.injector import Generator, Load
+from zap.devices.storage_unit import StorageUnit
+from zap.devices.transporter import DirectedLine
 from zap.layer import DispatchLayer
 from zap.planning import PlanningProblem, StochasticPlanningProblem
 from zap.planning.constraints import BudgetConstraintSet
@@ -23,7 +25,9 @@ logger = logging.getLogger(__name__)
 TIME_VARYING_ATTRS = {
     Generator: ["dynamic_capacity", "linear_cost"],
     Load: ["load"],
-    # StorageUnit: ["linear_cost"],
+    StorageUnit: ["power_availability", "linear_cost"],
+    DirectedLine: ["max_power", "min_power", "linear_cost"],
+    # Store is deliberately excluded (see phase-1 spec, decision D4).
     # Store: [
     #     "max_energy_capacity_availability",
     #     "min_energy_capacity_availability",
@@ -32,6 +36,48 @@ TIME_VARYING_ATTRS = {
     # ACLine: ["susceptance", "nominal_capacity"],
     # DCLine: ["nominal_capacity"],
 }
+
+
+def concatenate_time_varying_attrs(
+    base_dev,
+    year_dev,
+    *,
+    expected_base_hours: int,
+    expected_year_hours: int,
+    reorder_idx=None,
+) -> list[str]:
+    """Concatenate one year's time-varying attributes onto the base device, in place.
+
+    Only the attributes registered in :data:`TIME_VARYING_ATTRS` for the base
+    device's type are considered, and only when both arrays are 2D and their
+    time dimensions match the expected horizons (this filters out constant
+    attributes that ``make_dynamic`` broadcast to shape ``(n, 1)``).
+
+    Returns the list of attribute names that were actually concatenated.
+    """
+    concatenated = []
+
+    for attr in TIME_VARYING_ATTRS.get(type(base_dev), []):
+        base_arr = getattr(base_dev, attr, None)
+        year_arr = getattr(year_dev, attr, None)
+
+        if base_arr is None or year_arr is None:
+            continue
+
+        # Only concatenate if 2D (num_devices, time) AND actually time-varying
+        # An attribute is time-varying if shape[1] matches the year's time horizon
+        if base_arr.ndim != 2 or year_arr.ndim != 2:
+            continue
+
+        # Apply reordering to align device axis if needed
+        if reorder_idx is not None:
+            year_arr = year_arr[reorder_idx]
+
+        if base_arr.shape[1] == expected_base_hours and year_arr.shape[1] == expected_year_hours:
+            setattr(base_dev, attr, np.concatenate([base_arr, year_arr], axis=1))
+            concatenated.append(attr)
+
+    return concatenated
 
 
 class MultiYearBlockSampler:
@@ -152,33 +198,13 @@ class MultiYearBlockSampler:
                 reorder_idx = self._get_reorder_index(base_dev, year_dev, net_idx, dev_type)
 
                 # Concatenate each time-varying attribute
-                for attr in TIME_VARYING_ATTRS.get(type(base_dev), []):
-                    base_arr = getattr(base_dev, attr, None)
-                    year_arr = getattr(year_dev, attr, None)
-
-                    if base_arr is None or year_arr is None:
-                        continue
-
-                    # Only concatenate if 2D (num_devices, time) AND actually time-varying
-                    # An attribute is time-varying if shape[1] matches the year's time horizon
-                    if base_arr.ndim == 2 and year_arr.ndim == 2:
-                        # Apply reordering to align device axis if needed
-                        if reorder_idx is not None:
-                            year_arr = year_arr[reorder_idx]
-
-                        base_time_dim = base_arr.shape[1]
-                        year_time_dim = year_arr.shape[1]
-                        expected_base_hours = self.year_boundaries[net_idx]
-                        expected_year_hours = self.hours_per_year[net_idx]
-
-                        # Only concatenate if dimensions match expected time horizons
-                        # This filters out constant attributes that were broadcast to (n, 1)
-                        if (
-                            base_time_dim == expected_base_hours
-                            and year_time_dim == expected_year_hours
-                        ):
-                            combined = np.concatenate([base_arr, year_arr], axis=1)
-                            setattr(base_dev, attr, combined)
+                concatenate_time_varying_attrs(
+                    base_dev,
+                    year_dev,
+                    expected_base_hours=self.year_boundaries[net_idx],
+                    expected_year_hours=self.hours_per_year[net_idx],
+                    reorder_idx=reorder_idx,
+                )
 
             logger.debug(f"Concatenated timeseries from year {net_idx}")
 
@@ -341,8 +367,7 @@ class MultiYearBlockSampler:
 
         if len(blocks) < num_blocks:
             logger.warning(
-                f"Could only sample {len(blocks)} non-overlapping blocks "
-                f"(requested {num_blocks})"
+                f"Could only sample {len(blocks)} non-overlapping blocks (requested {num_blocks})"
             )
 
         return sorted(blocks)

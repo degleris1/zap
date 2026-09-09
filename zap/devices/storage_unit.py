@@ -23,6 +23,21 @@ class StorageUnit(AbstractDevice):
     """An Injector that stores power between time steps.
 
     May have a discharge cost.
+
+    Parameters
+    ----------
+    power_availability : Optional[NDArray]
+        Dimensionless derate in [0, 1] on the charge and discharge power limits,
+        of shape ``(N,)``, ``(N, 1)``, or ``(N, T)``. Defaults to all ones.
+        Per decision D8 of the phase-1 spec this derates *power only*; the energy
+        (state-of-charge) cap remains ``power_capacity * duration``, because
+        deriving a time-varying energy cap can render a block infeasible when the
+        state of charge at the moment of an outage exceeds the derated cap.
+
+        Note: ``power_availability`` is expected to be set at construction only.
+        The ADMM prox caches ``ymin``/``ymax`` behind ``self.has_changed``; any
+        later mutation of ``power_availability`` MUST set ``has_changed = True``
+        or ADMM will silently return a feasible-but-wrong dispatch.
     """
 
     def __init__(
@@ -42,6 +57,7 @@ class StorageUnit(AbstractDevice):
         capital_cost: Optional[NDArray] = None,
         min_power_capacity=None,
         max_power_capacity=None,
+        power_availability: Optional[NDArray] = None,
     ):
         if linear_cost is None:
             linear_cost = np.zeros(power_capacity.shape)
@@ -58,6 +74,9 @@ class StorageUnit(AbstractDevice):
         if final_soc is None:
             final_soc = 0.5 * np.ones(power_capacity.shape)
 
+        if power_availability is None:
+            power_availability = np.ones(power_capacity.shape)
+
         self.num_nodes = num_nodes
         self.name = name
         self.terminal = terminal
@@ -72,6 +91,7 @@ class StorageUnit(AbstractDevice):
         self.capital_cost = make_dynamic(capital_cost)
         self.min_power_capacity = make_dynamic(min_power_capacity)
         self.max_power_capacity = make_dynamic(max_power_capacity)
+        self.power_availability = make_dynamic(power_availability)
 
         self.has_changed = True
         self.rho = -1.0
@@ -82,7 +102,14 @@ class StorageUnit(AbstractDevice):
 
     @property
     def time_horizon(self):
-        return 0  # Static device
+        # Static device unless the power availability derate is time-varying
+        if self.power_availability.shape[1] == 1:
+            return 0
+        return self.power_availability.shape[1]
+
+    def _effective_power(self, power_capacity, la=np):
+        """Charge/discharge power limit after the availability derate."""
+        return la.multiply(power_capacity, self.power_availability)
 
     def scale_costs(self, scale):
         self.linear_cost /= scale
@@ -92,6 +119,7 @@ class StorageUnit(AbstractDevice):
             self.capital_cost /= scale
 
     def scale_power(self, scale):
+        # NOTE: power_availability is dimensionless and is deliberately not scaled.
         self.power_capacity /= scale
         if self.min_power_capacity is not None:
             self.min_power_capacity /= scale
@@ -162,15 +190,17 @@ class StorageUnit(AbstractDevice):
         if not isinstance(state, StorageUnitVariable):
             state = StorageUnitVariable(*state)
 
+        # Energy capacity is NOT derated by power_availability (see D8).
         energy_capacity = la.multiply(power_capacity, self.duration)
+        p_eff = self._effective_power(power_capacity, la=la)
 
         return [
             -state.energy,
             state.energy - energy_capacity,
             -state.charge,
-            state.charge - power_capacity,
+            state.charge - p_eff,
             -state.discharge,
-            state.discharge - power_capacity,
+            state.discharge - p_eff,
         ]
 
     def operation_cost(
@@ -299,9 +329,20 @@ class StorageUnit(AbstractDevice):
     # PLANNING FUNCTIONS
     # ====
 
-    def get_investment_cost(
-        self, power_capacity=None, initial_soc=None, final_soc=None, la=np
-    ):
+    def sample_time(self, time_periods, original_time_horizon):
+        dev = super().sample_time(time_periods, original_time_horizon)
+
+        if dev.power_availability.shape[1] > 1:
+            dev.power_availability = dev.power_availability[:, time_periods]
+        if dev.linear_cost.shape[1] > 1:
+            dev.linear_cost = dev.linear_cost[:, time_periods]
+
+        # Sampled device has fresh prox data
+        dev.has_changed = True
+
+        return dev
+
+    def get_investment_cost(self, power_capacity=None, initial_soc=None, final_soc=None, la=np):
         power_capacity = self.parameterize(power_capacity=power_capacity, la=la)
 
         if self.capital_cost is None or power_capacity is None:
@@ -361,8 +402,19 @@ class StorageUnit(AbstractDevice):
             smax = torch.multiply(power_capacity, self.duration)
             gamma1 = torch.multiply(initial_soc, smax)
             gammaT = torch.multiply(final_soc, smax)
+
+            # Charge/discharge bound, possibly time-varying (N, num_scenarios * T)
+            pmax_t = torch.multiply(power_capacity, self.power_availability)
+            if pmax_t.shape[1] == 1:
+                pmax_t = pmax_t.expand(-1, full_time_horizon)
+            else:
+                assert pmax_t.shape[1] == full_time_horizon, (
+                    "Time-varying power_availability must span the full time horizon: "
+                    f"got {pmax_t.shape[1]}, expected {full_time_horizon}"
+                )
+
             ymin, ymax = get_ymin_ymax(
-                T, power_capacity, smax, gamma1, gammaT, machine, dtype
+                T, num_scenarios, pmax_t, smax, gamma1, gammaT, machine, dtype
             )
             A = A_matrix(T, machine, dtype=dtype)
             b = b_vector(self, T, machine)
@@ -415,7 +467,8 @@ class StorageUnit(AbstractDevice):
         d = x[:, :, T : (2 * T), 0].reshape(N, -1)
         # s = x[:, :, (2 * T) :, 0].reshape(N, -1)
 
-        return [d - c], None
+        # (power, angle, local_variables) -- the ADMM solver unpacks three values
+        return [d - c], None, None
 
 
 # ====
@@ -547,16 +600,38 @@ def battery_prox_data(device: StorageUnit, T: int, rho, z, weight=1.0):
     return K_inv, zero_nu
 
 
-def get_ymin_ymax(T, pmax, smax, gamma1, gammaT, machine=None, dtype=None):
-    ymax = torch.hstack([pmax.expand(-1, 2 * T), smax.expand(-1, T + 1)])
-    ymin = torch.zeros(ymax.shape, device=machine, dtype=dtype)
+def get_ymin_ymax(T, num_scenarios, pmax_t, smax, gamma1, gammaT, machine=None, dtype=None):
+    """Build the box bounds of the battery prox variable y = (charge, discharge, energy).
 
-    ymin[:, 2 * T] = gamma1[:, 0]
-    ymax[:, 2 * T] = gamma1[:, 0]
-    ymin[:, -1] = gammaT[:, 0]
-    ymax[:, -1] = gammaT[:, 0]
+    Parameters
+    ----------
+    T : int
+        Window (scenario) length.
+    num_scenarios : int
+        Number of windows the full horizon is split into.
+    pmax_t : torch.Tensor
+        Charge/discharge power bound of shape ``(N, num_scenarios * T)``. Callers
+        broadcast a static ``(N, 1)`` bound before calling.
 
-    ymin = ymin.reshape(ymin.shape[0], 1, ymin.shape[1], 1)
-    ymax = ymax.reshape(ymax.shape[0], 1, ymax.shape[1], 1)
+    Returns
+    -------
+    (ymin, ymax) each of shape ``(N, num_scenarios, 3 * T + 1, 1)``.
+    """
+    N = pmax_t.shape[0]
+    assert pmax_t.shape[1] == num_scenarios * T
+
+    pc = pmax_t.reshape(N, num_scenarios, T)  # Charge / discharge bounds
+    pe = smax.reshape(N, 1, 1).expand(N, num_scenarios, T + 1)  # Energy bounds
+
+    ymax = torch.cat([pc, pc.clone(), pe], dim=2)  # (N, num_scenarios, 3T + 1)
+    ymin = torch.zeros_like(ymax)
+
+    ymin[:, :, 2 * T] = gamma1[:, 0:1]
+    ymax[:, :, 2 * T] = gamma1[:, 0:1]
+    ymin[:, :, -1] = gammaT[:, 0:1]
+    ymax[:, :, -1] = gammaT[:, 0:1]
+
+    ymin = ymin.unsqueeze(-1)
+    ymax = ymax.unsqueeze(-1)
 
     return ymin, ymax
