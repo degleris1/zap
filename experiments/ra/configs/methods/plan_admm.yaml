@@ -1,0 +1,10 @@
+# Gradient descent whose dispatch layer is ADMM instead of a conic solver.
+# `machine: cuda` is a ConfigError where torch.cuda is unavailable, and
+# `machine: mps` with `dtype: float64` always is (R-W3).
+mode: plan
+selection: {strategy: all, block_size: 168}
+planning:
+  method: admm
+  admm: {machine: cpu, dtype: float32, solver_kwargs: {num_iterations: 1000, rho_power: 1.0}}
+  warm_start: {enabled: false}
+  optimizer: {num_iterations: 100, batch_size: 4, batch_strategy: random}

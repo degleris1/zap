@@ -1,0 +1,18 @@
+# The only phase-1 planning config expected to complete on a laptop: 48 hours
+# of one weather year, one monolithic LP, HiGHS (spec 8.5).
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_monolithic.yaml
+  - ../selection/full_horizon.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_smoke_48h
+dataset: {years: [2020], window: {start: 0, stop: 48}}
+# export_mode: drop — the export stores have e_nom = 0 as built, so unlimited
+# export sinks at the -178 $/MWh export price would dominate the objective.
+system: {export_mode: drop}
+planning:
+  single_level: {solver: HIGHS}
+  timeout_s: 1800

@@ -1,0 +1,4 @@
+# PHASE 2. The strategy is registered so this axis validates today, but
+# KMedoidsSelector.select() raises NotImplementedError (D-W3); see
+# memory/PROJECT.md 2.2.
+selection: {strategy: kmedoids, block_size: 168, num_blocks: 12, seed: 42}

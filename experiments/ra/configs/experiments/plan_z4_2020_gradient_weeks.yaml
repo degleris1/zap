@@ -1,0 +1,24 @@
+# Gradient-descent decomposition over 52 weekly blocks, warm-started from a
+# single-level LP on 12 of them. Sherlock only. step_size / clip come from
+# methods/plan_gradient.yaml, tuned in MW / $ so one iteration moves
+# step_size * clip = 1,000 MW ~ 0.5 % of the ~209 GW z4-2020 fleet.
+#
+# The warm start runs on 12 of the 52 blocks, so its optimum is pro-rated to a
+# different coverage than the gradient loss and is NOT a lower bound on it: the
+# card reports it as `warm_start_objective_raw` and leaves `lower_bound_raw` /
+# `optimality_gap` empty. Set warm_start.num_blocks: null to get a real bound.
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_gradient.yaml
+  - ../selection/all_weeks.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_gradient_weeks
+dataset: {years: [2020], window: {start: 0, stop: 8736}}
+system: {export_mode: drop}
+planning:
+  dispatch_solver: CLARABEL
+  num_workers: 8
+  warm_start: {enabled: true, num_blocks: 12, solver: GUROBI}

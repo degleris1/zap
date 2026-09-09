@@ -1,0 +1,29 @@
+# The gradient counterpart of plan_z4_smoke_48h: the same 48 hours of one
+# weather year, planned by implicit-differentiation gradient descent instead of
+# a single LP, warm-started from the LP over the same two blocks so that
+# `lower_bound_raw` / `optimality_gap` are reported (a warm start on a *subset*
+# of the blocks is pro-rated to a different coverage and is not a bound).
+#
+# A few iterations only: this exists to run the whole gradient path end to end
+# on a laptop, not to converge. step_size / clip come from
+# methods/plan_gradient.yaml (step_size * clip = 1,000 MW of movement per
+# iteration; see the comment there).
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_gradient.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_smoke_48h_gradient
+dataset: {years: [2020], window: {start: 0, stop: 48}}
+# export_mode: drop — the export stores have e_nom = 0 as built, so unlimited
+# export sinks at the -178 $/MWh export price would dominate the objective.
+system: {export_mode: drop}
+selection: {strategy: all, block_size: 24}
+planning:
+  dispatch_solver: CLARABEL
+  num_workers: 1
+  warm_start: {enabled: true, num_blocks: null, solver: HIGHS}
+  optimizer: {num_iterations: 5, batch_size: 0}
+  timeout_s: 1800

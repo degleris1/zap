@@ -467,3 +467,84 @@ total_gen_cap,rhs,,,300,le"""
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBudgetConstraintsInSingleLevelLP(unittest.TestCase):
+    """A budget CSV must bind in the single-level LPs, not only in the projection.
+
+    ``MonolithicPlanningProblem`` and ``RelaxedPlanningProblem`` used to add only
+    box and dispatch constraints, so a ``BudgetConstraintSet`` attached to the
+    planning problem was silently a no-op (WP5-B report item c).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pypsa_network, cls.snapshots = create_investment_network()
+        cls.net, cls.devices = load_pypsa_network(cls.pypsa_network, cls.snapshots)
+        cls.time_horizon = len(cls.snapshots)
+        cls.parameter_names = {
+            "generator": (
+                next(i for i, d in enumerate(cls.devices) if isinstance(d, Generator)),
+                "nominal_capacity",
+            )
+        }
+
+    def make_problem(self, budget_csv=None):
+        layer = zap.DispatchLayer(
+            self.net,
+            self.devices,
+            parameter_names=self.parameter_names,
+            time_horizon=self.time_horizon,
+            solver=cp.HIGHS,
+            solver_kwargs={},
+        )
+        idx, attr = self.parameter_names["generator"]
+        capacity = np.asarray(getattr(self.devices[idx], attr), dtype=float)
+        return zap.planning.PlanningProblem(
+            operation_objective=zap.planning.DispatchCostObjective(self.net, self.devices),
+            investment_objective=zap.planning.InvestmentObjective(self.devices, layer),
+            layer=layer,
+            lower_bounds={"generator": capacity.copy()},
+            upper_bounds={"generator": capacity * 10.0},
+            budget_constraints=budget_csv,
+        )
+
+    def solve_monolithic(self, problem):
+        from zap.planning.monolithic import MonolithicPlanningProblem
+
+        return MonolithicPlanningProblem(problem, solver=cp.HIGHS).solve()
+
+    def test_budget_constraint_binds_in_the_monolithic_lp(self):
+        free_params, free_data = self.solve_monolithic(self.make_problem())
+        self.assertEqual(free_data["problem"].status, "optimal")
+        self.assertEqual(free_data["budget_constraints"], [])
+        free_total = float(np.asarray(free_params["generator"]).sum())
+
+        # The free design sits on its lower bounds, so the binding budget is a
+        # floor on total capacity, not a ceiling.
+        floor = free_total + 100.0
+        csv_content = (
+            "constraint_name,attribute,device_name,multiplier,rhs_value,sense\n"
+            "total_gen_cap,nominal_capacity,gen_solar,1,,\n"
+            "total_gen_cap,nominal_capacity,gen_gas,1,,\n"
+            f"total_gen_cap,rhs,,,{floor},ge"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(csv_content)
+            csv_path = f.name
+
+        try:
+            problem = self.make_problem(budget_csv=csv_path)
+            self.assertIsNotNone(problem.budget_constraints)
+            params, data = self.solve_monolithic(problem)
+        finally:
+            os.unlink(csv_path)
+
+        self.assertEqual(data["problem"].status, "optimal")
+        self.assertEqual(len(data["budget_constraints"]), 1)
+
+        total = float(np.asarray(params["generator"]).sum())
+        self.assertGreaterEqual(total, floor - 1e-6)
+        self.assertAlmostEqual(total / floor, 1.0, delta=1e-6)
+        # and it costs something to obey it
+        self.assertGreater(data["problem"].value, free_data["problem"].value)

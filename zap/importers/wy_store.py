@@ -587,6 +587,10 @@ def _read_static(dataset_dir: Path) -> dict[str, pd.DataFrame]:
     return out
 
 
+#: Public alias: planning reads the static tables to recover PyPSA extendability.
+read_static = _read_static
+
+
 def _thermal_carriers() -> frozenset[str]:
     """Carriers covered by the outage pool (WP2), with a static fallback."""
     try:  # pragma: no cover - depends on WP2 landing
@@ -1337,6 +1341,8 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "ucap_derate": bool(options.ucap_derate),
         "outage_draw": options.outage_draw,
         "link_losses": bool(options.link_losses),
+        "power_unit": float(options.power_unit),
+        "cost_unit": float(options.cost_unit),
         "weather_store_attrs": store.attrs,
         "ucap_csv_sha256": ucap_sha,
         "outage_store_attrs": outage_attrs,

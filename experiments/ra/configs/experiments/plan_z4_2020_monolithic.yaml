@@ -1,0 +1,15 @@
+# Full-year single LP over the whole horizon. Sherlock only: this is the
+# formulation phase-1 spec R2 expects not to finish on a laptop (R-W6).
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_monolithic.yaml
+  - ../selection/full_horizon.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_monolithic
+dataset: {years: [2020], window: {start: 0, stop: 8736}}   # 8736 = 52*168 = 364*24
+system: {export_mode: drop}
+planning:
+  single_level: {solver: GUROBI, solver_kwargs: {Method: 2, Crossover: 0}}

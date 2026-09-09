@@ -22,15 +22,28 @@ from typing import Any
 
 from . import dispatch
 from .blocks import REFERENCE, Block, make_blocks
-from .config import parse_shard
+from .config import is_plan_mode, parse_shard
 
 logger = logging.getLogger(__name__)
 
 METHOD_ORDER = ("lp", "admm")
 
+#: ``task.method`` of a ``mode: plan`` task.  A planning run enumerates one task
+#: per outage draw -- the whole capacity-expansion solve -- through this same
+#: ledger (D-W1), so `method` is not a `cfg["methods"]` key and the timeout and
+#: `required` flag come from ``cfg["planning"]`` instead.
+PLAN_METHOD = "plan"
+
+#: ``selection.block_size: null`` (the monolithic sentinel) in a task id.
+FULL_HORIZON = "full"
+
 STATUS_OK = "ok"
 STATUS_FAILED = "failed"
 STATUS_TIMEOUT = "timeout"
+#: The solve finished but its answer is not usable (an ADMM iterate that misses
+#: nodal power balance by more than `methods.admm.max_imbalance_mw`). Metrics are
+#: kept on the record; `runcard.summarize` excludes the row from the headline.
+STATUS_INFEASIBLE = "infeasible"
 
 
 @dataclass(frozen=True)
@@ -52,8 +65,55 @@ def make_task_id(
     return task_id
 
 
+def make_plan_task_id(
+    *, preset: str, strategy: str, block_size, seed: int, draw: int | None
+) -> str:
+    size = FULL_HORIZON if block_size is None else int(block_size)
+    task_id = f"plan-{preset}-{strategy}-b{size}-s{int(seed)}"
+    if draw is not None:
+        task_id += f"-d{draw}"
+    return task_id
+
+
+def enumerate_plan_tasks(cfg: dict) -> list[Task]:
+    """The tasks of a ``mode: plan`` run: one whole planning solve per draw."""
+    draws = [int(d) for d in cfg["heuristics"]["outage_draws"]] or [None]
+    sel = cfg["selection"]
+    plan = cfg["planning"]
+    start, stop = int(cfg["dataset"]["window"]["start"]), int(cfg["dataset"]["window"]["stop"])
+    year = int(cfg["dataset"]["years"][0])
+    block_size = sel["block_size"]
+    size: int | str = FULL_HORIZON if block_size is None else int(block_size)
+
+    tasks = []
+    for draw in draws:
+        task_id = make_plan_task_id(
+            preset=plan["method"],
+            strategy=sel["strategy"],
+            block_size=block_size,
+            seed=sel["seed"],
+            draw=draw,
+        )
+        tasks.append(
+            Task(
+                task_id=task_id,
+                method=PLAN_METHOD,
+                # The "block" of a planning task is the whole loaded window; it
+                # is what the ledger records as `start` / `stop` / `hours`.
+                block=Block(index=0, year=year, start=start, stop=stop),
+                block_size=size,
+                draw=draw,
+                # The design this task produces is named after the task (3.4).
+                design_id=task_id,
+            )
+        )
+    return tasks
+
+
 def enumerate_tasks(cfg: dict, design_ids: Sequence[str] = ("asbuilt",)) -> list[Task]:
     """All tasks of a run, in a deterministic order."""
+    if is_plan_mode(cfg):
+        return enumerate_plan_tasks(cfg)
     draws = [int(d) for d in cfg["heuristics"]["outage_draws"]] or [None]
     block_sizes: list[int | str] = [int(b) for b in cfg["selection"]["blocks"]]
     if cfg["selection"]["reference"] != "none":
@@ -162,13 +222,75 @@ def write_json_atomic(path: Path, payload: dict) -> Path:
     return path
 
 
+def task_timeout_s(task: Task, cfg: dict) -> float:
+    """The timeout that applies to a task, from whichever config block owns it."""
+    if task.method == PLAN_METHOD:
+        return float(cfg["planning"]["timeout_s"])
+    return float(cfg["methods"][task.method]["timeout_s"])
+
+
+def task_is_required(method: str, cfg: dict) -> bool:
+    if method == PLAN_METHOD:
+        return bool(cfg["planning"].get("required", True))
+    return bool(cfg["methods"][method].get("required", True))
+
+
+def solve_plan(task: Task, cfg: dict, run_dir: Path) -> dict:
+    """Run one capacity-expansion solve and write its ``design.json`` (3.4).
+
+    Imported lazily: the planning core pulls in cvxpy, torch and WP1's reader,
+    none of which a dispatch run needs.
+    """
+    from . import metrics as metrics_mod
+    from . import planning as planning_mod
+    from . import system as system_mod
+    from .identity import run_id
+
+    loaded = system_mod.build_system(cfg, draw=task.draw)
+
+    started = time.perf_counter()
+    result = planning_mod.plan(loaded, cfg)
+    solve_wall = time.perf_counter() - started
+
+    result.design_id = task.design_id
+    result.run_id = run_id(cfg)
+    design_path = result.write(run_dir)
+
+    payload_metrics = metrics_mod.planning_metrics(result)
+    payload_metrics["solve_wall_clock_s"] = solve_wall
+    return {
+        "metrics": payload_metrics,
+        "solver_status": result.solver.get("status"),
+        "n_variables": result.solver.get("n_variables"),
+        "n_constraints": result.solver.get("n_constraints"),
+        "design_path": str(Path(design_path).relative_to(run_dir)),
+        "system_meta": dict(getattr(loaded, "meta", {}) or {}),
+    }
+
+
 def _solve_entry(task: Task, cfg: dict, design=None) -> dict:
     """Module-level entry point so the reference solve can run in a subprocess."""
     return dispatch.solve_block(task, cfg, design=design)
 
 
+def _run_in_subprocess(fn, args: tuple, timeout_s: float, label: str) -> dict:
+    """Run ``fn(*args)`` in a worker process, killed at ``timeout_s``."""
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(fn, *args)
+        return future.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError as exc:
+        for process in list(getattr(executor, "_processes", {}).values()):
+            process.kill()
+        raise TimeoutError(f"{label} exceeded timeout_s={timeout_s}") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def _use_subprocess(task: Task, cfg: dict) -> bool:
     """Isolate the (large, possibly runaway) reference solve behind a timeout."""
+    if task.method == PLAN_METHOD:  # handled directly by `run_task`
+        return False
     if str(task.block_size) != REFERENCE:
         return False
     if dispatch.is_stub(cfg, task.method):
@@ -179,22 +301,13 @@ def _use_subprocess(task: Task, cfg: dict) -> bool:
 
 
 def _solve_with_timeout(task: Task, cfg: dict, timeout_s: float, design=None) -> dict:
-    executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
-    try:
-        future = executor.submit(_solve_entry, task, cfg, design)
-        return future.result(timeout=timeout_s)
-    except concurrent.futures.TimeoutError as exc:
-        for process in list(getattr(executor, "_processes", {}).values()):
-            process.kill()
-        raise TimeoutError(f"{task.task_id} exceeded timeout_s={timeout_s}") from exc
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+    return _run_in_subprocess(_solve_entry, (task, cfg, design), timeout_s, label=task.task_id)
 
 
 def run_task(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any]:
     """Run one task and write its result file. Never raises on a solver failure."""
     run_dir = Path(run_dir)
-    timeout_s = float(cfg["methods"][task.method]["timeout_s"])
+    timeout_s = task_timeout_s(task, cfg)
 
     started = _utcnow()
     t0 = time.perf_counter()
@@ -204,7 +317,16 @@ def run_task(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any
     payload: dict[str, Any] = {}
 
     try:
-        if _use_subprocess(task, cfg):
+        if task.method == PLAN_METHOD:
+            # A planning solve runs in a worker process so that
+            # `planning.timeout_s` is *enforced* -- a gradient loop or an LP that
+            # runs past the budget is killed at the cap, not merely reported late
+            # afterwards. The child writes `designs/<id>.json` itself and returns
+            # the same payload the in-process path did.
+            payload = _run_in_subprocess(
+                solve_plan, (task, cfg, run_dir), timeout_s, label=task.task_id
+            )
+        elif _use_subprocess(task, cfg):
             payload = _solve_with_timeout(task, cfg, timeout_s, design)
         else:
             payload = dispatch.solve_block(task, cfg, design=design)
@@ -217,6 +339,11 @@ def run_task(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any
         error = f"{type(exc).__name__}: {exc}"
         tb = traceback.format_exc()
         logger.warning("task %s failed: %s", task.task_id, error)
+
+    # A solver may report that its answer is unusable without raising.
+    if status == STATUS_OK and payload.get("status"):
+        status = str(payload["status"])
+        error = payload.get("error") or error
 
     wall = time.perf_counter() - t0
     if status == STATUS_OK and wall > timeout_s:
@@ -237,6 +364,7 @@ def run_task(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any
         "hours": task.block.hours,
         "draw": task.draw,
         "design_id": task.design_id,
+        "design_path": payload.get("design_path"),
         "metrics": metrics,
         "wall_clock_s": wall,
         "solver_status": payload.get("solver_status"),
@@ -299,5 +427,5 @@ def failed_required(records: Iterable[dict], cfg: dict) -> list[dict]:
     return [
         r
         for r in records
-        if r.get("status") == STATUS_FAILED and cfg["methods"][r["method"]].get("required", True)
+        if r.get("status") == STATUS_FAILED and task_is_required(r["method"], cfg)
     ]

@@ -179,6 +179,7 @@ class AbstractPlanningProblem:
         assert batch_strategy in ["sequential", "fixed", "random", "peak_net_load"]
 
         self.start_time = time.time()
+        self.verbosity = verbosity
         self.lower_bound = lower_bound
         self.extra_wandb_trackers = extra_wandb_trackers
 
@@ -426,6 +427,9 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
 
         self.subproblems = new_subproblems
         self.weights = new_weights
+        #: Per-subproblem forward/backward timing prints are gated on this;
+        #: ``AbstractPlanningProblem.solve`` sets it from its ``verbosity`` kwarg.
+        self.verbosity = 0
         self.layer = subproblems[0].layer
         self.num_workers = 1
 
@@ -495,13 +499,15 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
 
         self.batch = batch
 
+        verbose = getattr(self, "verbosity", 0) >= 2
+
         if self.num_workers == 1:
             sub_costs = []
             for _idx, b in enumerate(batch):
                 _t0 = time.time()
                 sub_costs.append(self.subproblems[b].forward(requires_grad, **kwargs))
                 _dt = time.time() - _t0
-                if _dt > 1.0 or _idx == 0 or _idx == len(batch) - 1:
+                if verbose and (_dt > 1.0 or _idx == 0 or _idx == len(batch) - 1):
                     print(f"  [fwd] sub {b} ({_idx+1}/{len(batch)}): {_dt:.2f}s")
         else:
             # Developer Note
@@ -519,13 +525,15 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
     def backward(self):
         batch = self.batch
 
+        verbose = getattr(self, "verbosity", 0) >= 2
+
         if self.num_workers == 1:
             grads = []
             for _idx, b in enumerate(batch):
                 _t0 = time.time()
                 grads.append(self.subproblems[b].backward())
                 _dt = time.time() - _t0
-                if _dt > 1.0 or _idx == 0 or _idx == len(batch) - 1:
+                if verbose and (_dt > 1.0 or _idx == 0 or _idx == len(batch) - 1):
                     print(f"  [bwd] sub {b} ({_idx+1}/{len(batch)}): {_dt:.2f}s")
         else:
             grads = self.pool.map(lambda b: self.subproblems[b].backward(), batch)
@@ -540,6 +548,25 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
         total_batch_weight = sum([self.weights[b] for b in batch])
         total_weight = sum(self.weights)
         return (total_weight / total_batch_weight) * np.array(self.weights)[batch]
+
+
+def weighted_subproblems(problem):
+    """``(subproblems, weights)`` of a planning problem, stochastic or not.
+
+    A :class:`StochasticPlanningProblem` evaluates
+    ``sum_i w_i * (snapshot_weight_i * op_i + inv_i)`` in :meth:`forward`, where
+    ``inv_i`` is subproblem ``i``'s own investment objective -- built from the
+    ``sample_time``-sliced devices, so its capital cost is already pro-rated by
+    ``block_hours / total_hours``.  Any single-level reformulation of the same
+    problem (``MonolithicPlanningProblem``, ``RelaxedPlanningProblem``) has to
+    use the same weights and the same per-subproblem investment objectives, or
+    its capital cost is off by a factor of the number of blocks.
+
+    A non-stochastic problem is the one-subproblem, unit-weight case.
+    """
+    if isinstance(problem, StochasticPlanningProblem):
+        return list(problem.subproblems), [float(w) for w in problem.weights]
+    return [problem], [1.0]
 
 
 def get_next_batch(batch, batch_size, num_subproblems):

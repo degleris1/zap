@@ -22,3 +22,4 @@ zap/tests/**/*.png
 
 # Experiment outputs
 experiments/multi_year/outputs/
+experiments/runs/

@@ -1,0 +1,16 @@
+# The same single-level LP as plan_z4_2020_monolithic, blocked into 52 weeks
+# (D-W2, spec 9.2: one formulation at two temporal resolutions, not two
+# formulations). Sherlock only.
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_stochastic.yaml
+  - ../selection/all_weeks.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_stochastic_weeks
+dataset: {years: [2020], window: {start: 0, stop: 8736}}
+system: {export_mode: drop}
+planning:
+  single_level: {solver: GUROBI, solver_kwargs: {Method: 2, Crossover: 0}}

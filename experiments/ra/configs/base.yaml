@@ -2,6 +2,7 @@
 # file; validation rejects any key that does not appear here (except inside the
 # free-form `solver_kwargs` blocks).
 name: unnamed
+mode: dispatch              # dispatch | plan  (D-W1)
 dataset:
   dir: ca2040_z4            # relative to data_root()
   years: [2020]
@@ -17,13 +18,90 @@ system:
   carbon_tax: 0.0
   storage_init_soc: 0.5
   storage_final_soc: 0.5
+  # Unit scaling handed to the importer (wy_store LoadOptions). 1.0 keeps the
+  # system in MW / $, which is what every reported metric is denominated in;
+  # a different scaling only changes the conditioning of the ADMM solve, and
+  # block_metrics converts the reported numbers back to MW / $.
+  power_unit: 1.0
+  cost_unit: 1.0
 heuristics:
+  name: none                # none | ucap_derate | elcc_prm  (a label; see D-W4)
   ucap_derate: false
   outage_draws: []          # list of draw indices; [] means weather only
 selection:
+  # --- `mode: dispatch` reads these ---
   blocks: [24, 168]         # block sizes to solve, hours
   reference: window         # window | full_year | none
   reference_window: {start: 5040, hours: 672}   # 28 days from hour 5040 = 30*168 = 210*24
+  # --- `mode: plan` reads these (R-W9: each mode ignores the other's half) ---
+  strategy: all             # all | uniform | random | stratified | kmedoids | gradient_stress
+  block_size: 168           # null = the whole loaded horizon (the monolithic sentinel)
+  num_blocks: null
+  avoid_year_boundaries: false
+  seed: 42
+planning:                   # `mode: plan` only (WP5 spec 8.1)
+  method: monolithic        # monolithic | stochastic | relaxed | gradient | admm
+  dispatch_solver: CLARABEL
+  dispatch_solver_kwargs: {verbose: false}
+  regularize: 1.0e-6
+  num_workers: 1
+  timeout_s: 21600
+  required: true            # a planning failure fails the run
+  bounds:                   # capacity floors; a modelling choice, see spec 9.5
+    min_capacity_mw: 0.1
+    min_storage_mw: 10.0
+  expansion:
+    mode: pypsa             # none | pypsa
+    max_capacity_multiple: 10.0
+    max_capacity_mw: null
+  single_level:
+    kind: primal            # primal | strong_duality
+    solver: HIGHS
+    solver_kwargs: {}
+    inf_value: 100.0
+    price_bound: 100.0
+  warm_start:
+    enabled: false
+    num_blocks: null
+    solver: HIGHS
+    solver_kwargs: {}
+  optimizer:
+    num_iterations: 100
+    # GradientDescent clips the TOTAL gradient norm to `clip` and then moves
+    # `step_size * clip`, so `step_size * clip` caps the L2 capacity movement of
+    # one iteration, in MW. The measured gradient norm is ~1.3e4 on the 48 h test
+    # fixture and ~1.8e7 on z4-2020, always above `clip`, so the cap binds and one
+    # iteration moves exactly step_size * clip: 0.2 * 5e3 = 1,000 MW per
+    # step, ~0.5 % of z4-2020's ~209 GW fleet. The old (1e-3, 1e+3) pair allowed
+    # 1 MW per iteration and made the gradient method a no-op.
+    step_size: 0.2
+    clip: 5.0e+3
+    batch_size: 0           # 0 -> all subproblems
+    batch_strategy: sequential   # sequential | fixed | random
+    init_full_loss: true
+    save_param_history: true
+    eval_final_full_loss: false  # DEPRECATED and ignored; setting it true is a ConfigError
+    peak_net_load_k: null
+    peak_net_load_rerank_every: 1
+  admm:
+    machine: cpu            # cpu | cuda | mps
+    dtype: float32
+    adapt_rho: false
+    adapt_rho_rate: 0.1
+    solver_kwargs: {num_iterations: 1000, rho_power: 1.0}
+  emissions:
+    mode: none              # none | price | cap | dual_ascent  (D-W5)
+    price: 0.0
+    cap: null
+    cap_basis: annual       # annual | horizon
+    dual_ascent:
+      target: null
+      initial_weight: 0.0
+      dual_step_size: 1.0
+      max_weight: 1000.0
+      num_outer_iterations: 10
+      tolerance: 0.05
+  budget_constraints: null  # path to a CSV (absolute, or relative to the config root)
 methods:
   lp:
     enabled: true
@@ -38,6 +116,9 @@ methods:
     solver_kwargs: {num_iterations: 5000, rho_power: 1.0, atol: 1.0e-4, rtol: 1.0e-4}
     dtype: float64
     timeout_s: 3600
+    # Gate on the iterate's worst nodal power-balance violation, in MW. Above it
+    # the task is recorded `infeasible` and left out of the run card's headline.
+    max_imbalance_mw: 1.0
 execution:
   shard: null               # "k/n"; null = all tasks
   max_tasks: null

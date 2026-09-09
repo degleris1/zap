@@ -1,0 +1,2 @@
+# 20 weekly blocks, stratified across the horizon.
+selection: {strategy: stratified, block_size: 168, num_blocks: 20, seed: 42}

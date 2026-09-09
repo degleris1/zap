@@ -213,6 +213,42 @@ class BudgetConstraintSet:
         )
         return A, np.array(b, dtype=np.float64)
 
+    def cvxpy_constraints(self, variables: dict) -> list:
+        """The same budget constraints as cvxpy constraints over ``variables``.
+
+        ``variables`` maps parameter name -> a cvxpy Variable shaped like that
+        parameter (``(n,)`` or ``(n, 1)``).  The gradient path enforces the
+        budget by projection (:class:`ProjectionQP`); the single-level LPs
+        (``MonolithicPlanningProblem``, ``RelaxedPlanningProblem``) state it
+        directly, and this is where they get it.
+        """
+        out = []
+        for constraint in self.constraints:
+            terms = []
+            for param_name, idx_to_coef in constraint.coefficients.items():
+                if param_name not in variables:
+                    raise KeyError(
+                        f"budget constraint {constraint.name!r} refers to parameter "
+                        f"{param_name!r}, which is not a planning variable "
+                        f"({sorted(variables)})"
+                    )
+                var = variables[param_name]
+                if var.ndim == 2 and var.shape[1] != 1:
+                    raise ValueError(
+                        f"budget constraints expect column-shaped parameters; "
+                        f"{param_name!r} has shape {var.shape}"
+                    )
+                for array_idx, coef in idx_to_coef.items():
+                    entry = var[array_idx] if var.ndim == 1 else var[array_idx, 0]
+                    terms.append(float(coef) * entry)
+
+            expr = cp.sum(cp.hstack(terms)) if terms else cp.Constant(0.0)
+            if constraint.sense == "le":
+                out.append(expr <= constraint.rhs)
+            else:
+                out.append(expr >= constraint.rhs)
+        return out
+
     def __len__(self):
         return len(self.constraints)
 

@@ -1,13 +1,13 @@
 includes: [../base.yaml, ../datasets/ca2040_z4.yaml, ../methods/lp_highs.yaml]
 name: op_benchmark_z4_2020
-dataset: {years: [2020], window: {start: 0, stop: 8760}}
+dataset: {years: [2020], window: {start: 0, stop: 8736}}   # 8736 = 52*168 = 364*24 so the full-year reference tiles both block sizes
 # export_mode: drop — the export stores have e_nom=0 as built, so an as-built
 # operations run must not export; unlimited sinks with the -178 $/MWh export
 # price would otherwise dominate the objective (orchestrator, 2026-09-08).
 system:  {voll: 10000.0, demand_scaling: peak_fraction, peak_capacity_fraction: 0.85, export_mode: drop}
 selection:
   blocks: [24, 168]
-  reference: window
+  reference: full_year   # full-year LP solves in ~16 s locally (2026-09-08)
   # 28 days of August, aligned to both block sizes so the blocked sums cover
   # the reference window exactly: 5040 = 30*168 = 210*24, 5712 = 34*168.
   reference_window: {start: 5040, hours: 672}

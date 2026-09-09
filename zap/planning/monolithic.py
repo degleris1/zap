@@ -4,7 +4,7 @@ from copy import deepcopy
 
 from zap.network import DispatchOutcome
 from zap.planning.operation_objectives import EmissionsObjective
-from zap.planning.problem_abstract import StochasticPlanningProblem
+from zap.planning.problem_abstract import StochasticPlanningProblem, weighted_subproblems
 
 
 class MonolithicPlanningProblem:
@@ -15,6 +15,14 @@ class MonolithicPlanningProblem:
         s.t.            theta in [lower, upper], y in F(theta)
     using only the primal dispatch problem -- no dual devices, no McCormick
     envelope, no strong-duality coupling.
+
+    For a :class:`StochasticPlanningProblem` the objective is the weighted
+    mixture its forward pass evaluates,
+    ``sum_i w_i * (snapshot_weight_i * op_i(y_i) + inv_i(theta))``, where
+    ``inv_i`` is subproblem ``i``'s investment objective (capital cost already
+    pro-rated to the block by ``sample_time``).  Summed over all blocks the
+    investment term is therefore ``coverage * CAPEX``, and the LP optimum equals
+    ``StochasticPlanningProblem.forward()`` at the LP's optimal parameters.
 
     Valid when the planning operation_objective matches the dispatch cost.
     Suitable for transport networks (no AC lines) because the primal dispatch
@@ -60,14 +68,32 @@ class MonolithicPlanningProblem:
             lower_bounds[p] = lower
             upper_bounds[p] = upper
 
-        if isinstance(self.problem, StochasticPlanningProblem):
-            inv_func = self.problem.subproblems[0].investment_objective
-        else:
-            inv_func = self.problem.investment_objective
-
-        investment_objective = inv_func(la=cp, **network_parameters)
+        # Investment term: sum_i w_i * inv_i(theta), matching the forward pass of
+        # StochasticPlanningProblem exactly.  Every subproblem's devices came out
+        # of `sample_time(block, total_hours)`, which pro-rates capital cost by
+        # `block_hours / total_hours`, so a single subproblem's investment
+        # objective is only that block's share of the capex.  Using
+        # `subproblems[0]` alone (as this did) charged the LP
+        # `(block_0_hours / total_hours) * CAPEX` instead of `coverage * CAPEX`,
+        # i.e. it under-weighted capital cost by the number of blocks.
+        subs, weights = weighted_subproblems(self.problem)
+        investment_objective = sum(
+            w * sub.investment_objective(la=cp, **network_parameters)
+            for w, sub in zip(weights, subs)
+        )
 
         return network_parameters, lower_bounds, upper_bounds, investment_objective
+
+    def budget_constraints(self, net_params):
+        """The problem's budget constraints, as cvxpy constraints on ``net_params``.
+
+        The gradient path enforces a :class:`BudgetConstraintSet` by projection;
+        a single-level LP has to state it, or a budget CSV is silently a no-op.
+        """
+        budget = getattr(self.problem, "budget_constraints", None)
+        if budget is None or len(budget) == 0:
+            return []
+        return budget.cvxpy_constraints(net_params)
 
     def setup_inner_problem(self, sub_problem, net_params):
         """Build the primal dispatch problem for one subproblem."""
@@ -97,13 +123,13 @@ class MonolithicPlanningProblem:
 
         operation_objective = sub_problem.operation_objective(y, parameters=parameters, la=cp)
 
-        emissions_term = None
-        if self.emissions_limit is not None:
-            # Build a fresh EmissionsObjective per subproblem -- the device
-            # list is sample_time-sliced and differs across subs.
-            emissions_term = EmissionsObjective(devices)(
-                y, parameters=parameters, la=cp
-            )
+        # Build a fresh EmissionsObjective per subproblem -- the device list is
+        # sample_time-sliced and differs across subs.  This is built whether or
+        # not a cap is imposed: it is a cvxpy *expression*, not a constraint, so
+        # it costs nothing to carry, and reading `.value` off the solved problem
+        # is how the caller reports the design's emissions without paying for a
+        # second full forward pass.
+        emissions_term = EmissionsObjective(devices)(y, parameters=parameters, la=cp)
 
         return operation_objective, primal_constraints, emissions_term
 
@@ -112,28 +138,27 @@ class MonolithicPlanningProblem:
         net_params, lower, upper, investment_objective = self.model_outer_problem()
         box_constraints = [lower[p] <= net_params[p] for p in sorted(net_params.keys())]
         box_constraints += [net_params[p] <= upper[p] for p in sorted(net_params.keys())]
+        budget_constraints = self.budget_constraints(net_params)
 
         operation_objectives = []
         primal_constraints = []
         emissions_terms = []
 
+        subs, weights = weighted_subproblems(self.problem)
         if isinstance(self.problem, StochasticPlanningProblem):
-            print(
-                f"Solving monolithic single-level problem with "
-                f"{len(self.problem.subproblems)} scenarios."
-            )
-            subs = self.problem.subproblems
-        else:
-            subs = [self.problem]
+            print(f"Solving monolithic single-level problem with {len(subs)} scenarios.")
 
-        for sub in subs:
+        for w, sub in zip(weights, subs):
             op, pc, em = self.setup_inner_problem(sub, net_params)
-            operation_objectives.append(op)
+            # Same weighting as StochasticPlanningProblem.forward:
+            # w_i * snapshot_weight_i * op_i.  With the uniform weights and unit
+            # snapshot weights of phase 1 this is the identity.
+            scale = w * float(getattr(sub, "snapshot_weight", 1.0))
+            operation_objectives.append(scale * op)
             primal_constraints += list(pc)
-            if em is not None:
-                emissions_terms.append(em)
+            emissions_terms.append(scale * em)
 
-        constraints = box_constraints + list(primal_constraints)
+        constraints = box_constraints + budget_constraints + list(primal_constraints)
         emissions_constraint = None
         if self.emissions_limit is not None:
             emissions_constraint = cp.sum(emissions_terms) <= self.emissions_limit
@@ -150,6 +175,7 @@ class MonolithicPlanningProblem:
             "lower_bounds": lower,
             "upper_bounds": upper,
             "box_constraints": box_constraints,
+            "budget_constraints": budget_constraints,
             "investment_objective": investment_objective,
             "operation_objective": operation_objectives,
             "primal_constraints": primal_constraints,

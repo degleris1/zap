@@ -1,0 +1,33 @@
+# Gradient descent through implicit differentiation of the dispatch KKT system.
+# CLARABEL by default: the KKT solve needs well-conditioned duals, which an
+# interior-point solver gives and a vertex solution does not (R-W2).
+mode: plan
+selection: {strategy: all, block_size: 168}
+planning:
+  method: gradient
+  dispatch_solver: CLARABEL
+  num_workers: 4
+  warm_start: {enabled: true, solver: HIGHS}
+  optimizer:
+    num_iterations: 200
+    # Tuned for MW / $ units (WP1 pins power_unit = cost_unit = 1.0; the old
+    # experiments/multi_year configs used power_unit = 1000, so anything
+    # inherited from them is off by ~1e3 -- R-W5).
+    #
+    # GradientDescent.step clips the TOTAL gradient norm to `clip` and then
+    # moves `step_size * clip`: that product is a hard cap, in MW, on the L2
+    # capacity movement of one iteration. The measured gradient norm is ~1.3e4
+    # at the as-built point of the 48-hour test fixture (~9e3 thereafter) and
+    # ~1.8e7 on z4-2020, i.e. always above `clip`, so the cap binds every
+    # iteration and the step is exactly `step_size * clip` along the (clipped)
+    # descent direction.
+    #
+    #   0.2 * 5e3 = 1,000 MW/iteration ~ 0.5 % of z4-2020's ~209 GW fleet,
+    #   ~200 GW of cumulative movement over 200 iterations.
+    #
+    # The shipped defaults were 1e-3 * 5e3 = 5 MW/iteration, which on z4 is
+    # 0.0024 % of the fleet: the method was a no-op (WP5 verification).
+    step_size: 0.2
+    clip: 5.0e+3
+    batch_size: 4
+    batch_strategy: random

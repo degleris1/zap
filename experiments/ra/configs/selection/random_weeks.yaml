@@ -1,0 +1,3 @@
+# 12 weekly blocks drawn uniformly at random. Coverage < 1, so the objective is
+# annualized by total_hours / sampled_hours before it reaches the card (spec 6).
+selection: {strategy: random, block_size: 168, num_blocks: 12, seed: 42}

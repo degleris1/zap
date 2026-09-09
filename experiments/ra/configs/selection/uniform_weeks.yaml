@@ -1,0 +1,2 @@
+# 12 weekly blocks spread evenly across the horizon (deterministic; no seed use).
+selection: {strategy: uniform, block_size: 168, num_blocks: 12}

@@ -1,0 +1,4 @@
+# A $50/tCO2 price added to every subproblem's operation objective. Valid for
+# every method (D-W5); it constrains nothing, it only shifts the design.
+planning:
+  emissions: {mode: price, price: 50.0}

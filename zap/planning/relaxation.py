@@ -4,10 +4,24 @@ from copy import deepcopy
 
 import zap.dual
 from zap.network import DispatchOutcome
-from zap.planning.problem_abstract import AbstractPlanningProblem, StochasticPlanningProblem
+from zap.planning.problem_abstract import (
+    AbstractPlanningProblem,
+    StochasticPlanningProblem,
+    weighted_subproblems,
+)
 
 
 class RelaxedPlanningProblem:
+    """Strong-duality relaxation of a planning problem.
+
+    The objective is the same weighted mixture
+    ``sum_i w_i * (snapshot_weight_i * op_i + inv_i(theta))`` that
+    :meth:`StochasticPlanningProblem.forward` evaluates: the per-subproblem
+    investment objectives already carry the ``block_hours / total_hours``
+    pro-rating applied by ``sample_time``, so summing them over the blocks gives
+    ``coverage * CAPEX``.
+    """
+
     def __init__(
         self,
         problem: AbstractPlanningProblem,
@@ -51,14 +65,30 @@ class RelaxedPlanningProblem:
             lower_bounds[p] = lower
             upper_bounds[p] = upper
 
-        if isinstance(self.problem, StochasticPlanningProblem):
-            inv_func = self.problem.subproblems[0].investment_objective
-        else:
-            inv_func = self.problem.investment_objective
-
-        investment_objective = inv_func(la=cp, **network_parameters)
+        # Investment term: sum_i w_i * inv_i(theta), matching
+        # StochasticPlanningProblem.forward.  Each subproblem's devices were
+        # produced by `sample_time(block, total_hours)`, which pro-rates capital
+        # cost by `block_hours / total_hours`; taking `subproblems[0]` alone (as
+        # this did) charged only block 0's share of the capex, under-weighting
+        # investment by the number of blocks.
+        subs, weights = weighted_subproblems(self.problem)
+        investment_objective = sum(
+            w * sub.investment_objective(la=cp, **network_parameters)
+            for w, sub in zip(weights, subs)
+        )
 
         return network_parameters, lower_bounds, upper_bounds, investment_objective
+
+    def budget_constraints(self, net_params):
+        """The problem's budget constraints, as cvxpy constraints on ``net_params``.
+
+        The gradient path enforces a :class:`BudgetConstraintSet` by projection;
+        a single-level LP has to state it, or a budget CSV is silently a no-op.
+        """
+        budget = getattr(self.problem, "budget_constraints", None)
+        if budget is None or len(budget) == 0:
+            return []
+        return budget.cvxpy_constraints(net_params)
 
     def solve(self):
         """Solve strong-duality relaxed planning problem."""
@@ -67,36 +97,36 @@ class RelaxedPlanningProblem:
         net_params, lower, upper, investment_objective = self.model_outer_problem()
         box_constraints = [lower[p] <= net_params[p] for p in sorted(net_params.keys())]
         box_constraints += [net_params[p] <= upper[p] for p in sorted(net_params.keys())]
+        budget_constraints = self.budget_constraints(net_params)
 
         # Define primal and dual problems
+        subs, weights = weighted_subproblems(self.problem)
         if isinstance(self.problem, StochasticPlanningProblem):
-            operation_objectives = []
-            sd_constraints = []
-            primal_constraints = []
-            dual_constraints = []
+            print(f"Solving stochastic relaxation with {len(subs)} scenarios.")
 
-            print(f"Solving stochastic relaxation with {len(self.problem.subproblems)} scenarios.")
+        operation_objectives = []
+        sd_constraints = []
+        primal_constraints = []
+        dual_constraints = []
 
-            for prob in self.problem.subproblems:
-                op, pc, dc, sd = self.setup_inner_problem(prob, net_params, lower, upper)
+        for w, prob in zip(weights, subs):
+            op, pc, dc, sd = self.setup_inner_problem(prob, net_params, lower, upper)
 
-                operation_objectives += [op]
-                primal_constraints += pc
-                dual_constraints += dc
-                sd_constraints += [sd]
-
-        else:
-            operation_objective, primal_constraints, dual_constraints, sd_constraint = (
-                self.setup_inner_problem(self.problem, net_params, lower, upper)
-            )
-
-            operation_objectives = [operation_objective]
-            sd_constraints = [sd_constraint]
+            # w_i * snapshot_weight_i * op_i, as in the stochastic forward pass.
+            scale = w * float(getattr(prob, "snapshot_weight", 1.0))
+            operation_objectives += [scale * op]
+            primal_constraints += list(pc)
+            dual_constraints += list(dc)
+            sd_constraints += [sd]
 
         # Create full problem and solve
         problem = cp.Problem(
             cp.Minimize(investment_objective + cp.sum(operation_objectives)),
-            box_constraints + sd_constraints + list(primal_constraints) + list(dual_constraints),
+            box_constraints
+            + budget_constraints
+            + sd_constraints
+            + list(primal_constraints)
+            + list(dual_constraints),
         )
         problem.solve(solver=self.solver, **self.solver_kwargs)
 
@@ -105,6 +135,7 @@ class RelaxedPlanningProblem:
             "lower_bounds": lower,
             "upper_bounds": upper,
             "box_constraints": box_constraints,
+            "budget_constraints": budget_constraints,
             "investment_objective": investment_objective,
             "problem": problem,
             "sd_constraint": sd_constraints,

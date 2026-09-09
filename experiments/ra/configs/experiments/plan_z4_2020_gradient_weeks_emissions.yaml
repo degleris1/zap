@@ -1,0 +1,18 @@
+# The gradient design under an emissions target, enforced by subgradient ascent
+# on the emissions price. Whether the penalty actually holds the target when
+# operations are sampled stochastically is the open question (PROJECT.md 2.2).
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_gradient.yaml
+  - ../selection/all_weeks.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/dual_ascent.yaml
+name: plan_z4_2020_gradient_weeks_emissions
+dataset: {years: [2020], window: {start: 0, stop: 8736}}
+system: {export_mode: drop}
+planning:
+  dispatch_solver: CLARABEL
+  num_workers: 8
+  warm_start: {enabled: true, num_blocks: 12, solver: GUROBI}

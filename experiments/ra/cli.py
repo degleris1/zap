@@ -21,7 +21,16 @@ from . import metrics as metrics_mod
 from . import paths, runcard
 from . import system as system_mod
 from . import tasks as tasks_mod
-from .config import ConfigError, base_config, deep_merge, dump_config, load_config
+from .config import (
+    DISPATCH_SELECTION_KEYS,
+    PLAN_SELECTION_KEYS,
+    ConfigError,
+    base_config,
+    deep_merge,
+    dump_config,
+    is_plan_mode,
+    load_config,
+)
 from .identity import config_hash, env_info, run_id
 
 logger = logging.getLogger("experiments.ra")
@@ -77,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     show = sub.add_parser("show", help="print a run's card and status counts")
     show.add_argument("--run-id", required=True)
     show.add_argument("--runs-root", default=None)
+
+    design = sub.add_parser("design", help="print a summary of a run's design(s)")
+    design.add_argument("--run-id", required=True)
+    design.add_argument("--design-id", default=None, help="one design; default: all of them")
+    design.add_argument("--runs-root", default=None)
 
     return parser
 
@@ -171,11 +185,41 @@ def cmd_plan(args) -> int:
     return 0
 
 
+def log_selection_keys(cfg: dict) -> None:
+    """Say which half of the ``selection`` block this mode reads (R-W9).
+
+    ``mode: dispatch`` reads ``blocks / reference / reference_window``;
+    ``mode: plan`` reads ``strategy / block_size / num_blocks / seed /
+    avoid_year_boundaries``.  The other half is silently ignored, so a config
+    that sets it non-default gets a warning in ``log.txt`` rather than a
+    surprise.
+    """
+    plan_mode = is_plan_mode(cfg)
+    read_keys = PLAN_SELECTION_KEYS if plan_mode else DISPATCH_SELECTION_KEYS
+    ignored_keys = DISPATCH_SELECTION_KEYS if plan_mode else PLAN_SELECTION_KEYS
+    sel = cfg["selection"]
+    logger.info(
+        "mode=%s reads selection keys %s: %s",
+        cfg["mode"],
+        list(read_keys),
+        {k: sel[k] for k in read_keys},
+    )
+    defaults = base_config()["selection"]
+    non_default = {k: sel[k] for k in ignored_keys if sel[k] != defaults[k]}
+    if non_default:
+        logger.warning(
+            "mode=%s ignores these selection keys, which are set to non-default values: %s",
+            cfg["mode"],
+            non_default,
+        )
+
+
 def cmd_run(args) -> int:
     cfg = resolve_config(args)
     run_dir = run_directory(cfg)
     _configure_logging(run_dir)
     touch_run_dir(cfg, run_dir)
+    log_selection_keys(cfg)
 
     all_tasks = tasks_mod.enumerate_tasks(cfg)
     selected = tasks_mod.select_shard(all_tasks, cfg["execution"]["shard"])
@@ -266,6 +310,51 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_design(args) -> int:
+    run_dir = paths.run_dir(args.run_id, args.runs_root)
+    if not run_dir.exists():
+        print(f"no such run directory: {run_dir}", file=sys.stderr)
+        return 1
+    from .planning.design import design_paths, read_design_record
+
+    found = design_paths(run_dir)
+    if args.design_id:
+        found = [p for p in found if p.stem == args.design_id]
+    if not found:
+        print(f"no designs in {run_dir / 'designs'}", file=sys.stderr)
+        return 1
+
+    for path in found:
+        record = read_design_record(path)
+        print(f"# {record.get('design_id')}  ({path})")
+        print(f"  schema_version: {record.get('schema_version')}")
+        print(
+            f"  method:         {record.get('method')} (preset {record.get('preset')}, "
+            f"kind {record.get('kind')})"
+        )
+        print(
+            f"  dataset:        {record.get('dataset')} years={record.get('years')} "
+            f"window={record.get('window')}"
+        )
+        print(
+            f"  selection:      {record.get('selection', {}).get('strategy')} "
+            f"block_size={record.get('selection', {}).get('block_size')} "
+            f"n_blocks={len(record.get('selection', {}).get('blocks') or [])}"
+        )
+        print(f"  annualization:  {record.get('annualization')}")
+        print(f"  objective:      {record.get('objective')}")
+        print(f"  emissions:      {record.get('emissions')}")
+        print(f"  solver:         {record.get('solver')}")
+        print(f"  timing:         {record.get('timing')}")
+        for cls_name, entry in (record.get("capacities") or {}).items():
+            attr = next((k for k in entry if k != "names"), None)
+            values = entry.get(attr) or []
+            total = sum(float(v) for v in values)
+            print(f"  {cls_name:<14s} {len(values):4d} rows, total {attr} = {total:,.4g}")
+        print()
+    return 0
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.command != "run":
@@ -275,6 +364,7 @@ def main(argv=None) -> int:
         "run": cmd_run,
         "aggregate": cmd_aggregate,
         "show": cmd_show,
+        "design": cmd_design,
     }
     return handlers[args.command](args)
 
