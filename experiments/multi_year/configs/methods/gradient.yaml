@@ -1,0 +1,47 @@
+# Gradient-based stochastic: monolithic LP warm-start + mini-batched gradient descent.
+method: gradient
+
+block_size: 168               # weekly
+sampling_strategy: all
+
+relaxation:
+  should_solve: true          # solve LP for warm-start + lower bound
+  kind: monolithic
+  solver: GUROBI
+  solver_kwargs:
+    Method: 2
+    Crossover: 0
+    Threads: 8
+    OutputFlag: 0
+
+dispatch_solver: GUROBI
+dispatch_solver_kwargs:
+  Method: -1
+  Crossover: 0
+  BarConvTol: 1.0e-2
+  OptimalityTol: 1.0e-2
+  FeasibilityTol: 1.0e-2
+  Threads: 1
+  OutputFlag: 0
+
+num_workers: 8
+
+emissions_weight: 0.0
+
+optimizer:
+  num_iterations: 1000
+  step_size: 0.001
+  clip: 5000
+  batch_size: 8               # match num_workers
+  batch_strategy: random
+  initial_state: relaxation
+  init_full_loss: false
+  peak_net_load_k: 1
+  peak_net_load_rerank_every: 20
+
+export:
+  should_export: true
+
+wandb:
+  enabled: true
+  project: zap-multiyear

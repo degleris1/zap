@@ -1,0 +1,19 @@
+# Large network: 5 years of weather data.
+# Intended for stochastic / gradient methods only -- monolithic is infeasible here.
+network: large
+
+# Symlink / drop additional WY .nc files in experiments/multi_year/data/ to extend.
+network_files:
+  - 2010_elec_s50_c7_ec_lv1.0_ERM-1h.nc
+  - 2011_elec_s50_c7_ec_lv1.0_ERM-1h.nc
+  - 2011_raw_network.nc
+  - 2012_raw_network.nc
+  - elec_s200_c7a_ec_lv1.0_REM-ERM-1h_E.nc
+
+hours_per_year: 8760
+
+seed: 42
+
+pypsa_args:
+  power_unit: 1000.0
+  cost_unit: 1.0

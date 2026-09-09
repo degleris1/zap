@@ -1,0 +1,14 @@
+# Small network: 1 month of one weather year.
+# Intended for quick smoke tests + monolithic feasibility checks.
+network: small
+
+network_files:
+  - 2011_raw_network.nc
+
+hours_per_year: 720          # ~1 month (30 days * 24h)
+
+seed: 42
+
+pypsa_args:
+  power_unit: 1000.0
+  cost_unit: 1.0

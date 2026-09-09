@@ -1,0 +1,37 @@
+# Monolithic single-level LP: one block for the full time horizon, no decomposition.
+# Suitable only for small / normal networks; the LP would blow up on large.
+method: monolithic
+
+block_size: null              # null sentinel: runner sets block_size = total_hours
+sampling_strategy: all
+
+relaxation:
+  should_solve: true
+  kind: monolithic            # use MonolithicPlanningProblem
+  solver: GUROBI
+  solver_kwargs:
+    Method: 2                 # barrier
+    Crossover: 0
+    BarConvTol: 1.0e-4
+    Threads: 8
+    OutputFlag: 0
+
+# Dispatch settings unused (no gradient descent), but include defaults so the
+# runner's pre-Step-8 plumbing doesn't choke.
+dispatch_solver: GUROBI
+dispatch_solver_kwargs:
+  Threads: 1
+  OutputFlag: 0
+
+num_workers: 1
+
+emissions_weight: 0.0
+
+optimizer:
+  num_iterations: 0           # skip gradient descent
+
+export:
+  should_export: true
+
+wandb:
+  enabled: false

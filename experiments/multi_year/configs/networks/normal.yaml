@@ -1,0 +1,14 @@
+# Normal network: 1 year of one weather year.
+# Intended for production-sized single-year runs.
+network: normal
+
+network_files:
+  - 2011_raw_network.nc
+
+hours_per_year: 8760
+
+seed: 42
+
+pypsa_args:
+  power_unit: 1000.0
+  cost_unit: 1.0

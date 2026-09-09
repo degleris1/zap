@@ -1,0 +1,4 @@
+# ADMM-based gradient-stochastic with GPU.
+# STUB: runner raises NotImplementedError. Follow-up to port ADMMLayer / ADMMSolver
+# pathway from experiments/plan/runner.py:288-316.
+method: admm_gpu

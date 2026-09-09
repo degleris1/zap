@@ -1,0 +1,37 @@
+# Stochastic single-level LP: joint LP over many weekly subproblems.
+# MonolithicPlanningProblem on a StochasticPlanningProblem -- still one LP solve.
+method: stochastic
+
+block_size: 168               # weekly
+sampling_strategy: all
+
+relaxation:
+  should_solve: true
+  kind: monolithic
+  solver: GUROBI
+  solver_kwargs:
+    Method: 2
+    Crossover: 0
+    BarConvTol: 1.0e-4
+    Threads: 8
+    OutputFlag: 0
+  # Optionally subsample blocks for a smaller LP:
+  # num_subproblems: 12
+
+dispatch_solver: GUROBI
+dispatch_solver_kwargs:
+  Threads: 1
+  OutputFlag: 0
+
+num_workers: 8
+
+emissions_weight: 0.0
+
+optimizer:
+  num_iterations: 0
+
+export:
+  should_export: true
+
+wandb:
+  enabled: false

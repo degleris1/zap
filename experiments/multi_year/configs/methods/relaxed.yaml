@@ -1,0 +1,37 @@
+# Strong-duality LP relaxation (RelaxedPlanningProblem).
+# Equivalent optimum to monolithic on transport networks when objectives match,
+# but goes through primal + dual + strong-duality coupling + McCormick envelope.
+method: relaxed
+
+block_size: null              # full-horizon single block
+sampling_strategy: all
+
+relaxation:
+  should_solve: true
+  kind: strong_duality        # use RelaxedPlanningProblem
+  price_bound: 100.0          # max_price for DualInjector
+  solver: GUROBI
+  solver_kwargs:
+    Method: 2
+    Crossover: 0
+    BarConvTol: 1.0e-4
+    Threads: 8
+    OutputFlag: 0
+
+dispatch_solver: GUROBI
+dispatch_solver_kwargs:
+  Threads: 1
+  OutputFlag: 0
+
+num_workers: 1
+
+emissions_weight: 0.0
+
+optimizer:
+  num_iterations: 0
+
+export:
+  should_export: true
+
+wandb:
+  enabled: false
