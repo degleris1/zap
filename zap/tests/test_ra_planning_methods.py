@@ -30,6 +30,8 @@ import itertools
 import json
 import sys
 import tempfile
+import types
+import typing
 import unittest
 from pathlib import Path
 
@@ -842,6 +844,206 @@ class TestAdmm(PlanningFixtureMixin, unittest.TestCase):
         )
         with self.assertRaises(ConfigError):
             planning.make_method(cfg)
+
+
+# ===========================================================================
+# ADMM warm starts (warm-start spec 2026-09-09, tests 7h)
+# ===========================================================================
+
+
+WARM_START_SPEC = "warm-start spec 2026-09-09"
+
+
+def _admm_layer_feature(name: str) -> bool:
+    """Whether the installed ``ADMMLayer`` carries a warm-start feature (task W1)."""
+    import inspect
+
+    from zap.admm import ADMMLayer
+
+    if name in inspect.signature(ADMMLayer.__init__).parameters:
+        return True
+    # `warm_start_stats` is an instance attribute, so look for it in the source.
+    return name in (inspect.getsource(ADMMLayer) or "")
+
+
+class TestAdmmWarmStart(PlanningFixtureMixin, unittest.TestCase):
+    """The `planning.admm.warm_start` keys, end to end (spec sections 2.6, 6)."""
+
+    #: 2 blocks x 24 h over the 48-hour fixture, float64 so the residuals mean
+    #: something, and a `minimum_iterations` floor high enough that a warm
+    #: restart cannot converge on a stale dual residual (spec section 3.4).
+    SOLVER_KWARGS: typing.ClassVar[dict] = {
+        "num_iterations": 4000,
+        "rho_power": 1.0,
+        "minimum_iterations": 100,
+        "verbose": 0,
+    }
+
+    #: A deliberately tiny step: the second forward pass then sees almost the
+    #: parameters the carried state was produced at, which is what isolates
+    #: "the state was reused" from "the state was stale".  A full-size step on
+    #: this fixture moves capacities by more than the fleet (clip 5e3 MW on a
+    #: ~700 MW system) and a warm start can then cost *more* than a cold one --
+    #: risk R3 of the spec, and the reason the run card reports both means.
+    STEP_SIZE = 1.0e-9
+
+    def admm_plan(self, *, warm_start=True, reset_every=None, num_iterations=2):
+        return self.plan(
+            selection={"strategy": "all", "block_size": 24},
+            planning={
+                "method": "admm",
+                "admm": {
+                    "machine": "cpu",
+                    "dtype": "float64",
+                    "warm_start": warm_start,
+                    "warm_start_reset_every": reset_every,
+                    "solver_kwargs": dict(self.SOLVER_KWARGS),
+                },
+                "optimizer": {
+                    "num_iterations": num_iterations,
+                    "batch_size": 0,
+                    "step_size": self.STEP_SIZE,
+                },
+            },
+        )
+
+    # -- 7h1 -------------------------------------------------------------
+
+    def test_admm_warm_start_config_reaches_the_layer(self):
+        """The two config keys arrive on every block's ``ADMMLayer``."""
+        from experiments.ra.planning import parameters as parameters_mod
+
+        if not _admm_layer_feature("warm_start_reset_every"):
+            self.skipTest(f"ADMMLayer has no `warm_start_reset_every` yet ({WARM_START_SPEC} 2.3)")
+
+        for warm_start, reset_every in ((False, 3), (True, None)):
+            with self.subTest(warm_start=warm_start, reset_every=reset_every):
+                cfg = plan_config(
+                    self.dataset,
+                    planning={
+                        "method": "admm",
+                        "admm": {
+                            "machine": "cpu",
+                            "dtype": "float32",
+                            "warm_start": warm_start,
+                            "warm_start_reset_every": reset_every,
+                        },
+                    },
+                )
+                method = planning.make_method(cfg)
+                method.network = self.loaded.network
+                method.parameter_names = parameters_mod.setup_parameter_names(self.loaded.devices)
+                devices = method.prepare_devices(list(self.loaded.devices))
+                layer = method.layer_kwargs()["layer_factory"](devices, 24)
+                self.assertIs(layer.warm_start, warm_start)
+                self.assertEqual(layer.warm_start_reset_every, reset_every)
+
+    def test_admm_warm_start_defaults_to_true(self):
+        """The default is on: today's behaviour, now explicit (spec section 0)."""
+        from experiments.ra.planning import base as planning_base
+
+        admm = planning_base.PLANNING_DEFAULTS["admm"]
+        self.assertIs(admm["warm_start"], True)
+        self.assertIsNone(admm["warm_start_reset_every"])
+
+    # -- 7h2 -------------------------------------------------------------
+
+    def test_admm_warm_start_reset_every_zero_rejected(self):
+        cfg = plan_config(
+            self.dataset,
+            planning={
+                "method": "admm",
+                "admm": {"machine": "cpu", "dtype": "float32", "warm_start_reset_every": 0},
+            },
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            planning.make_method(cfg)
+        self.assertIn("warm_start_reset_every", str(ctx.exception))
+
+    def test_low_minimum_iterations_warns(self):
+        """Spec section 3.4: the only defence against a stale dual residual."""
+        from experiments.ra.planning.methods import admm as admm_method
+
+        with self.assertWarns(UserWarning) as ctx:
+            admm_method.validate_warm_start(
+                {"warm_start": True, "solver_kwargs": {"minimum_iterations": 10}}
+            )
+        self.assertIn("minimum_iterations", str(ctx.warning))
+
+        import warnings as _warnings
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            admm_method.validate_warm_start(
+                {"warm_start": True, "solver_kwargs": {"minimum_iterations": 100}}
+            )
+            admm_method.validate_warm_start(
+                {"warm_start": False, "solver_kwargs": {"minimum_iterations": 1}}
+            )
+
+    # -- 7h3 -------------------------------------------------------------
+
+    def test_admm_method_reports_warm_start(self):
+        """Two planner passes over two blocks reuse each block's ADMM state.
+
+        `optimizer.num_iterations: 2` with `init_full_loss` gives at least two
+        forward passes per block, so every block contributes one cold pass (its
+        first, there is no state yet) and at least one warm pass, and -- at the
+        near-zero step size of `STEP_SIZE` -- the warm passes stop at the
+        `minimum_iterations` floor because they start from the previous pass's
+        converged iterate.
+        """
+        if not _admm_layer_feature("warm_start_stats"):
+            self.skipTest(f"ADMMLayer records no `warm_start_stats` yet ({WARM_START_SPEC} 2.3)")
+
+        result = self.admm_plan(warm_start=True)
+        summary = result.compute["admm_warm_start"]
+
+        self.assertIs(summary["enabled"], True)
+        self.assertIsNone(summary["reset_every"])
+        self.assertGreaterEqual(summary["forward_passes"], 4)  # 2 blocks x >= 2 passes
+        self.assertGreaterEqual(summary["cold_passes"], 2)  # one per block
+        self.assertGreaterEqual(summary["warm_passes"], 1)
+        self.assertEqual(summary["refusal_reasons"], {})
+        self.assertLess(
+            summary["mean_iterations_warm"],
+            summary["mean_iterations_cold"],
+            "a warm-started pass should need fewer ADMM iterations than a cold one",
+        )
+        self.assert_within_bounds(result)
+
+    def test_admm_warm_start_disabled_reports_all_cold(self):
+        """`warm_start: false` restores cold behaviour, and says so on the card."""
+        if not _admm_layer_feature("warm_start_stats"):
+            self.skipTest(f"ADMMLayer records no `warm_start_stats` yet ({WARM_START_SPEC} 2.3)")
+
+        result = self.admm_plan(warm_start=False)
+        summary = result.compute["admm_warm_start"]
+
+        self.assertIs(summary["enabled"], False)
+        self.assertEqual(summary["warm_passes"], 0)
+        self.assertEqual(summary["cold_passes"], summary["forward_passes"])
+        self.assertIsNone(summary["mean_iterations_warm"])
+        self.assertIsNotNone(summary["mean_iterations_cold"])
+
+    def test_warm_start_summary_present_without_layer_support(self):
+        """The run-card block exists even when no layer recorded anything."""
+        from experiments.ra.planning.methods import admm as admm_method
+
+        cfg = plan_config(
+            self.dataset,
+            planning={
+                "method": "admm",
+                "admm": {"machine": "cpu", "dtype": "float32", "warm_start_reset_every": 2},
+            },
+        )
+        method = planning.make_method(cfg)
+        ctx = types.SimpleNamespace(problem=types.SimpleNamespace(subproblems=[]))
+        summary = admm_method.AdmmGradientMethod._warm_start_summary(method, ctx)
+        self.assertEqual(summary["forward_passes"], 0)
+        self.assertEqual(summary["warm_passes"], 0)
+        self.assertEqual(summary["reset_every"], 2)
+        self.assertIsNone(summary["mean_iterations_warm"])
 
 
 # ===========================================================================

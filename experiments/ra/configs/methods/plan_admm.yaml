@@ -5,6 +5,15 @@ mode: plan
 selection: {strategy: all, block_size: 168}
 planning:
   method: admm
-  admm: {machine: cpu, dtype: float32, solver_kwargs: {num_iterations: 1000, rho_power: 1.0}}
+  # `minimum_iterations: 100` is load-bearing with `warm_start: true`: the dual
+  # residual is a difference between consecutive iterates, so the first one
+  # after a warm restart is ~0 and a smaller floor lets the solve declare
+  # convergence on a stale residual (spec 2026-09-09 section 3.4).
+  admm:
+    machine: cpu
+    dtype: float32
+    warm_start: true
+    warm_start_reset_every: null
+    solver_kwargs: {num_iterations: 1000, rho_power: 1.0, minimum_iterations: 100}
   warm_start: {enabled: false}
   optimizer: {num_iterations: 100, batch_size: 4, batch_strategy: random}

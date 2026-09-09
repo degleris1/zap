@@ -81,7 +81,12 @@ PLANNING_DEFAULTS: dict = {
         "dtype": "float32",
         "adapt_rho": False,
         "adapt_rho_rate": 0.1,
-        "solver_kwargs": {"num_iterations": 1000, "rho_power": 1.0},
+        # Carry each block's ADMM state between planner forward passes
+        # (``ADMMLayer.warm_start``).  Not to be confused with the top-level
+        # ``planning.warm_start``, which is the single-level LP warm start.
+        "warm_start": True,
+        "warm_start_reset_every": None,
+        "solver_kwargs": {"num_iterations": 1000, "rho_power": 1.0, "minimum_iterations": 100},
     },
     "emissions": {
         "mode": "none",

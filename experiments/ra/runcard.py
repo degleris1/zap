@@ -197,6 +197,23 @@ def planning_sections(run_dir: Path, cfg: dict, df: pd.DataFrame | None) -> list
     )
     lines.append("")
 
+    warm_rows = []
+    for record in records:
+        summary = (record.get("compute") or {}).get("admm_warm_start")
+        if summary:
+            warm_rows.append({"design_id": record.get("design_id"), **summary})
+    if warm_rows:
+        lines.append("## ADMM warm starts\n")
+        lines.append(
+            "Each block's ADMM state is carried between planner forward passes "
+            "(`planning.admm.warm_start`). `mean_iterations_warm` below "
+            "`mean_iterations_cold` is the whole point; the reverse means the "
+            "carried state is stale and `warm_start_reset_every` (or "
+            "`warm_start: false`) is the lever."
+        )
+        lines.append("")
+        lines.append(_table(pd.DataFrame(warm_rows)))
+
     lines.append("## Period selection\n")
     lines.append(f"- **Strategy:** `{sel['strategy']}` — **seed:** {sel['seed']}")
     lines.append(

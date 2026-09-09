@@ -88,7 +88,13 @@ planning:                   # `mode: plan` only (WP5 spec 8.1)
     dtype: float32
     adapt_rho: false
     adapt_rho_rate: 0.1
-    solver_kwargs: {num_iterations: 1000, rho_power: 1.0}
+    # Carry each block's ADMM state between planner forward passes.  Distinct
+    # from `planning.warm_start`, which is the single-level LP warm start.
+    warm_start: true
+    warm_start_reset_every: null   # null | positive int; cold-start every Nth pass
+    # minimum_iterations >= 100 guards against spurious convergence right after a
+    # warm restart (warm-start spec §3.4).
+    solver_kwargs: {num_iterations: 1000, rho_power: 1.0, minimum_iterations: 100}
   emissions:
     mode: none              # none | price | cap | dual_ascent  (D-W5)
     price: 0.0

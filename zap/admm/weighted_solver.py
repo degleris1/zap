@@ -39,10 +39,25 @@ class WeightedADMMSolver(ADMMSolver):
     weighting_seed: int = 0
 
     def __post_init__(self):
+        super().__post_init__()
         assert self.weighting_strategy in ["uniform", "random", "smart_cost", "smart_bounds"]
 
-    def initialize_solver(self, net, devices, time_horizon) -> ExtendedADMMState:
-        st = super().initialize_solver(net, devices, time_horizon)
+    def initialize_solver(
+        self,
+        net,
+        devices,
+        time_horizon,
+        num_contingencies: int = 0,
+        contingency_device=None,
+    ) -> ExtendedADMMState:
+        # W1-5: the base class calls this with five arguments; the old
+        # three-argument signature raised TypeError the moment it was reached.
+        if num_contingencies > 0:
+            raise NotImplementedError("WeightedADMMSolver does not support contingencies")
+
+        st = super().initialize_solver(
+            net, devices, time_horizon, num_contingencies, contingency_device
+        )
 
         # Set weights
         rng = np.random.default_rng(self.weighting_seed)
@@ -76,15 +91,17 @@ class WeightedADMMSolver(ADMMSolver):
             _angle_weights=_angle_weights,
             inv_sq_power_weights=inv_sq_power_weights,
             avg_inv_sq_power_weights=avg_inv_sq_power_weights,
-            **st.__dict__,
+            **{f.name: getattr(st, f.name) for f in dataclasses.fields(st)},
         )
 
-    def set_power(self, dev: AbstractDevice, dev_index: int, st: ExtendedADMMState):
+    def set_power(self, dev: AbstractDevice, dev_index: int, st: ExtendedADMMState, nc: int = 0):
         return [
             z - omega for z, omega in zip(st.copy_power[dev_index], st.full_dual_power[dev_index])
         ]
 
-    def set_phase(self, dev: AbstractDevice, dev_index: int, st: ExtendedADMMState):
+    def set_phase(
+        self, dev: AbstractDevice, dev_index: int, st: ExtendedADMMState, nc: int = 0, cont_dev=None
+    ):
         if st.dual_phase[dev_index] is None:
             return None
         else:
@@ -104,8 +121,12 @@ class WeightedADMMSolver(ADMMSolver):
         )
         return st
 
-    def update_averages_and_residuals(self, st: ExtendedADMMState, net, devices, time_horizon):
-        st = super().update_averages_and_residuals(st, net, devices, time_horizon)
+    def update_averages_and_residuals(
+        self, st: ExtendedADMMState, net, devices, time_horizon, num_contingencies: int = 0
+    ):
+        st = super().update_averages_and_residuals(
+            st, net, devices, time_horizon, num_contingencies
+        )
 
         # ====
         # (1) Update power

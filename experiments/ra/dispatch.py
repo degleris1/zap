@@ -236,6 +236,11 @@ def solve_block_admm(loaded, devices, task, cfg: dict) -> dict[str, Any]:
     solver = ADMMSolver(machine=machine, dtype=dtype, **solver_kwargs)
 
     start = time.perf_counter()
+    # Deliberately cold-started: no `initial_state=`.  Each SLURM array task
+    # solves one block exactly once, so there is nothing to warm-start from, and
+    # a cold start keeps the reported `admm_iterations` comparable across blocks
+    # and against the LP row.  (Warm starts live in the planning path only --
+    # `ADMMLayer.warm_start` / `planning.admm.warm_start`; spec section 5.1.)
     state, history = solver.solve(loaded.network, torch_devices, task.block.hours)
     wall = time.perf_counter() - start
 

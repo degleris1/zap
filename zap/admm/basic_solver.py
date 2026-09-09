@@ -1,5 +1,6 @@
 import dataclasses
 import functools
+import math
 import warnings
 from typing import Optional
 
@@ -25,6 +26,106 @@ from zap.admm.util import (
 )
 
 
+def _clone_detach(value):
+    """Deep-copy tensors, recurse through lists/tuples, pass everything else through."""
+    if torch.is_tensor(value):
+        return value.clone().detach()
+    if isinstance(value, list):
+        return [_clone_detach(v) for v in value]
+    if isinstance(value, tuple):
+        cloned = [_clone_detach(v) for v in value]
+        # Preserve namedtuples (e.g. StorageUnitVariable) instead of downcasting.
+        return type(value)(*cloned) if hasattr(value, "_fields") else tuple(cloned)
+    return value
+
+
+def _isclose(a, b) -> bool:
+    if a is None or b is None:
+        return a is b
+    return bool(math.isclose(float(a), float(b), rel_tol=1e-12, abs_tol=0.0))
+
+
+@dataclasses.dataclass(frozen=True)
+class ADMMLayout:
+    """Everything about a problem that an :class:`ADMMState` is only valid for.
+
+    Two states are interchangeable iff their layouts compare equal.  This is the
+    fingerprint that makes warm starting safe: a state carried from a different
+    horizon, network, device set, machine or dtype is refused (and the solve
+    falls back to a cold start) rather than being fed into the iteration, where
+    it would either crash deep inside ``dc_average`` or silently mix shapes.
+
+    Deliberately *not* fingerprinted:
+
+    * ``rho_power`` / ``rho_angle`` -- a rho change is an exact change of
+      variables on the scaled duals, handled by
+      :meth:`ADMMSolver._accept_initial_state`, not an incompatibility.
+    * the *values* of the device parameters -- a capacity change is the entire
+      reason the warm start exists.
+    """
+
+    time_horizon: int
+    num_nodes: int
+    num_contingencies: int
+    contingency_device: Optional[int]
+    #: one entry per device: (class name, num_devices, num_terminals_per_device, is_ac)
+    device_shapes: tuple
+    machine: str
+    dtype: str
+
+    #: Compared in this order by :meth:`explain_mismatch`.
+    _FIELD_ORDER = (
+        "time_horizon",
+        "num_nodes",
+        "num_contingencies",
+        "contingency_device",
+        "device_shapes",
+        "machine",
+        "dtype",
+    )
+
+    @classmethod
+    def of(
+        cls,
+        net,
+        devices,
+        time_horizon,
+        machine,
+        dtype,
+        num_contingencies: int = 0,
+        contingency_device: Optional[int] = None,
+    ) -> "ADMMLayout":
+        return cls(
+            time_horizon=int(time_horizon),
+            num_nodes=int(net.num_nodes),
+            num_contingencies=int(num_contingencies),
+            contingency_device=(None if contingency_device is None else int(contingency_device)),
+            device_shapes=tuple(
+                (
+                    type(d).__name__,
+                    int(d.num_devices),
+                    int(d.num_terminals_per_device),
+                    bool(d.is_ac),
+                )
+                for d in devices
+            ),
+            # `str` normalises so that "cpu" and torch.device("cpu"), or
+            # torch.float64 and "torch.float64", compare equal.
+            machine=str(machine),
+            dtype=str(dtype),
+        )
+
+    def explain_mismatch(self, other: "ADMMLayout") -> Optional[str]:
+        """``None`` if equal, else a one-line reason naming the first differing field."""
+        if not isinstance(other, ADMMLayout):
+            return f"layout is a {type(other).__name__}, not an ADMMLayout"
+        for name in self._FIELD_ORDER:
+            mine, theirs = getattr(self, name), getattr(other, name)
+            if mine != theirs:
+                return f"{name} changed: state has {theirs!r}, this solve needs {mine!r}"
+        return None
+
+
 @dataclasses.dataclass
 class ADMMState:
     num_terminals: object
@@ -43,6 +144,12 @@ class ADMMState:
     rho_power: object = None
     rho_angle: object = None
     local_variables: object = None
+    #: ``ADMMLayout | None`` -- the problem this state is valid for. ``None`` on a
+    #: state produced before warm-start hardening, which is refused as a warm start.
+    layout: object = None
+    #: Outer ADMM iterations that have gone into producing this state, across all
+    #: solves that carried it.
+    cumulative_iteration: int = 0
 
     def update(self, **kwargs):
         """Return a new state with fields updated."""
@@ -57,27 +164,19 @@ class ADMMState:
         return [None for _ in self.phase]
 
     def copy(self):
-        return ADMMState(
-            num_terminals=self.num_terminals,
-            num_ac_terminals=self.num_ac_terminals,
-            power=[[pi.clone().detach() for pi in p] for p in self.power],
-            phase=[None if v is None else [vi.clone().detach() for vi in v] for v in self.phase],
-            dual_power=self.dual_power.clone().detach(),
-            dual_phase=[
-                None if v is None else [vi.clone().detach() for vi in v] for v in self.dual_phase
-            ],
-            avg_power=self.avg_power.clone().detach(),
-            avg_phase=self.avg_phase.clone().detach(),
-            resid_power=[[pi.clone().detach() for pi in p] for p in self.resid_power],
-            resid_phase=[
-                None if v is None else [vi.clone().detach() for vi in v] for v in self.resid_phase
-            ],
-            objective=self.objective,
-            clone_power=[[pi.clone().detach() for pi in p] for p in self.clone_power],
-            clone_phase=self.clone_phase.clone().detach(),
-            rho_power=self.rho_power,
-            rho_angle=self.rho_angle,
-            local_variables=self.local_variables,
+        """A detached deep copy, generically over the dataclass fields.
+
+        Generic on purpose: the previous hand-written version enumerated fields
+        and hard-coded ``ADMMState(...)``, so it silently dropped any new field
+        and *downcast* an :class:`~zap.admm.weighted_solver.ExtendedADMMState`,
+        losing its weights.  ``type(self)`` keeps the subclass;
+        ``dataclasses.fields`` keeps every field.
+
+        The copy is detached, so a state carried into the next forward pass is an
+        autograd leaf and nothing from the previous pass's tape is retained.
+        """
+        return type(self)(
+            **{f.name: _clone_detach(getattr(self, f.name)) for f in dataclasses.fields(self)}
         )
 
     def as_outcome(self) -> DispatchOutcome:
@@ -136,6 +235,10 @@ class ADMMSolver:
     scale_dual_residuals: bool = None  # Deprecated
 
     def __post_init__(self):
+        # Warm-start bookkeeping exists from construction, not only after solve().
+        self.warm_started = False
+        self.warm_start_reason = None
+        self.warm_start_rho_rescaled = False
         if self.machine is None:
             # Infer machine
             self.machine = infer_machine()
@@ -157,6 +260,18 @@ class ADMMSolver:
                 DeprecationWarning,
                 stacklevel=2,
             )
+        # A warm-started solve restarts with `resid_power` carried from the previous
+        # parameters, so the first dual residual -- which is a *difference* between
+        # consecutive `resid_power` iterates -- is spuriously tiny and the solver can
+        # declare convergence long before the primal residual has caught up with the
+        # new parameters. `minimum_iterations` is the only defence against this, so it
+        # must be meaningful (>= 100 in every ADMM planning config).
+        if self.minimum_iterations < 10:
+            warnings.warn(
+                "minimum_iterations < 10 makes a warm-started solve liable to "
+                "declare convergence on a stale dual residual"
+            )
+
         if not (self.rho_min <= self.rho_max):
             raise ValueError(f"rho_min ({self.rho_min}) must not exceed rho_max ({self.rho_max})")
         if isinstance(self.verbose, bool):
@@ -217,13 +332,45 @@ class ADMMSolver:
         )
         self.total_terminals = self.num_dc_terminals + self.num_ac_terminals
         history = self.initialize_history()
+        layout = ADMMLayout.of(
+            net,
+            devices,
+            time_horizon,
+            self.machine,
+            self.dtype,
+            num_contingencies,
+            contingency_device,
+        )
+
+        # Defined before the loop so that `num_iterations=0` returns the initial
+        # state instead of raising AttributeError on `self.converged`.
+        self.iteration = 0
+        self.converged = False
+        self.warm_started = False
+        self.warm_start_reason = None
+        self.warm_start_rho_rescaled = False
 
         if initial_state is None:
             st = self.initialize_solver(
                 net, devices, time_horizon, num_contingencies, contingency_device
             )
         else:
-            st = initial_state
+            st, self.warm_start_reason = self._accept_initial_state(initial_state, layout)
+            if st is None:
+                # A refused warm start is always recoverable: fall back to a cold
+                # start with a logged reason rather than killing a multi-hour run.
+                if self.verbose >= 1:
+                    warnings.warn(
+                        "ADMM warm start refused, falling back to a cold start: "
+                        f"{self.warm_start_reason}"
+                    )
+                st = self.initialize_solver(
+                    net, devices, time_horizon, num_contingencies, contingency_device
+                )
+            else:
+                self.warm_started = True
+
+        st = st.update(layout=layout)
 
         for d in devices:
             d.has_changed = True
@@ -279,11 +426,59 @@ class ADMMSolver:
             print("Final value of rho_power:", self.rho_power)
             print("Final value of rho_angle:", self.rho_angle)
 
+        # Stamp the state with the rho its scaled duals are relative to. `adjust_rho`
+        # only writes these fields on the iterations where rho actually moves, so
+        # read the current value here rather than trusting the state.
+        rho_power_now, rho_angle_now = self.get_rho()
+        st = st.update(
+            cumulative_iteration=st.cumulative_iteration + self.iteration,
+            rho_power=rho_power_now,
+            rho_angle=rho_angle_now,
+        )
+
         # Restore original settings
         for k, v in original_settings.items():
             setattr(self, k, v)
 
         return st, history
+
+    def _accept_initial_state(self, state, layout: "ADMMLayout"):
+        """Return ``(state, None)`` if reusable as a warm start, else ``(None, reason)``.
+
+        Rescales the carried *scaled* duals when only rho differs: ``u = nu / rho``,
+        so preserving the unscaled price ``nu`` across a rho change is an exact
+        change of variables (the same transformation :meth:`adjust_rho` applies
+        mid-solve), not an incompatibility.
+        """
+        if not isinstance(state, ADMMState):
+            return None, f"initial_state is a {type(state).__name__}, not an ADMMState"
+        if state.layout is None:
+            return None, "initial_state carries no layout fingerprint"
+
+        reason = layout.explain_mismatch(state.layout)
+        if reason is not None:
+            return None, reason
+
+        rho_power, rho_angle = self.get_rho()
+        angle_changed = (
+            state.rho_angle is not None
+            and rho_angle is not None
+            and not _isclose(state.rho_angle, rho_angle)
+        )
+        if state.rho_power is not None and (
+            not _isclose(state.rho_power, rho_power) or angle_changed
+        ):
+            old_angle = state.rho_angle if state.rho_angle is not None else state.rho_power
+            new_angle = rho_angle if rho_angle is not None else rho_power
+            state = state.update(
+                dual_power=state.dual_power * (state.rho_power / rho_power),
+                dual_phase=nested_ax(state.dual_phase, old_angle / new_angle),
+                rho_power=rho_power,
+                rho_angle=rho_angle,
+            )
+            self.warm_start_rho_rescaled = True
+
+        return state, None
 
     # ====
     # Update Rules

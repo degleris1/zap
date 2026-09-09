@@ -303,6 +303,10 @@ def _normalize_planning(plan: dict) -> None:
     admm["dtype"] = str(admm["dtype"])
     admm["adapt_rho"] = bool(admm["adapt_rho"])
     admm["adapt_rho_rate"] = float(admm["adapt_rho_rate"])
+    admm["warm_start"] = bool(admm["warm_start"])
+    admm["warm_start_reset_every"] = (
+        None if admm["warm_start_reset_every"] is None else int(admm["warm_start_reset_every"])
+    )
 
     emis = plan["emissions"]
     emis["mode"] = str(emis["mode"])

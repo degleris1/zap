@@ -46,6 +46,11 @@ class PlanningProblemADMM(AbstractPlanningProblem):
         # with torch.amp.autocast(device_type=self.layer.solver.machine):
         self.rho_power_history += [self.layer.solver.rho_power]
         self.rho_angle_history += [self.layer.solver.rho_angle]
+        # `initial_state=None` (the default) is the warm-start hook: the layer then
+        # reuses the state it kept from its own last forward pass, subject to
+        # `ADMMLayer.warm_start` / `warm_start_reset_every` and to the layout
+        # fingerprint check in `ADMMSolver._accept_initial_state`. Passing an
+        # explicit state here overrides that.
         admm_state = self.layer.forward(initial_state=initial_state, **kwargs)
         state = admm_state.as_outcome()
 
