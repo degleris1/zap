@@ -619,9 +619,12 @@ def has_lifetime_columns(static_df: pd.DataFrame) -> bool:
 def retired_mask(static_df: pd.DataFrame, model_year: Optional[int]) -> np.ndarray:
     """Rows whose asset life has ended by ``model_year``.
 
-    A row is retired iff ``lifetime`` is finite and ``build_year + lifetime <=
-    model_year``; an infinite (or missing) lifetime never retires, which is the
-    rule ``zap/importers/pypsa.py::get_active_assets`` applied.  The PyPSA
+    A row is retired iff ``lifetime`` is finite and positive and
+    ``build_year + lifetime <= model_year``; an infinite, missing, or **zero**
+    lifetime never retires.  ``lifetime == 0`` is a pypsa-usa missing-data
+    marker (e.g. Hoover hydro, build_year 1942) and is read as infinite by
+    decision (Kamran, 2026-09-09).  Otherwise this is the rule
+    ``zap/importers/pypsa.py::get_active_assets`` applied.  The PyPSA
     ``active`` column is *not* consulted: pypsa-usa writes ``active == True``
     everywhere because activity is resolved per investment period at solve time.
 
@@ -633,7 +636,7 @@ def retired_mask(static_df: pd.DataFrame, model_year: Optional[int]) -> np.ndarr
         return np.zeros(n, dtype=bool)
     build = pd.to_numeric(static_df["build_year"], errors="coerce").to_numpy(dtype=np.float64)
     life = pd.to_numeric(static_df["lifetime"], errors="coerce").to_numpy(dtype=np.float64)
-    ok = np.isfinite(build) & np.isfinite(life)
+    ok = np.isfinite(build) & np.isfinite(life) & (life > 0)
     out = np.zeros(n, dtype=bool)
     out[ok] = (build[ok] + life[ok]) <= float(model_year)
     return out

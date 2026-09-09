@@ -644,18 +644,22 @@ def test_model_year_is_detected_from_the_store(dataset):
 
 
 def test_retired_mask_rule():
-    gens = _static_frame = pd.DataFrame(
+    gens = pd.DataFrame(
         {
-            "build_year": [1990, 2010, 2040, 1985, 2020],
-            "lifetime": [30.0, 40.0, 30.0, np.inf, np.nan],
+            "build_year": [1990, 2010, 2040, 1985, 2020, 1942],
+            "lifetime": [30.0, 40.0, 30.0, np.inf, np.nan, 0.0],
         }
     )
-    np.testing.assert_array_equal(retired_mask(gens, 2040), [True, False, False, False, False])
+    np.testing.assert_array_equal(
+        retired_mask(gens, 2040), [True, False, False, False, False, False]
+    )
     # 2010 + 40 == 2050 > 2040, but by 2050 it is retired (<= is inclusive).
     np.testing.assert_array_equal(retired_mask(gens, 2050)[:2], [True, True])
+    # lifetime == 0 is a missing-data marker and means infinite: never retires.
+    assert not retired_mask(gens, 3000)[5]
     # No model year, or no lifetime columns at all: nothing retires.
     assert not retired_mask(gens, None).any()
-    assert not retired_mask(_static_frame.drop(columns=["lifetime"]), 2040).any()
+    assert not retired_mask(gens.drop(columns=["lifetime"]), 2040).any()
 
 
 def test_lifetimes_zero_retired_capacity_and_keep_row_order(dataset):
@@ -815,19 +819,21 @@ def test_real_z4_structural():
 
 @unittest.skipIf(real_z4_dir() is None, "data/ca2040_z4/weather.zarr is not present")
 def test_real_z4_lifetime_retirements():
-    """The CA 2040 z4 fleet loses 15 rows / 6,215 MW to the lifetime rule."""
+    """The CA 2040 z4 fleet loses 11 rows / 5,623 MW to the lifetime rule.
+
+    Hoover hydro (4 rows, 592 MW) carries lifetime == 0, read as infinite."""
     root = real_z4_dir()
     system = load_system(root, LoadOptions(years=(2020,), window=HourWindow(0, 24)))
     meta = system.meta
 
     assert meta["model_year"] == 2040
-    assert meta["retired_rows"] == {"Generator": 15, "StorageUnit": 0}
-    assert meta["retired_capacity_mw"]["Generator"] == pytest.approx(6215.0, abs=1.0)
+    assert meta["retired_rows"] == {"Generator": 11, "StorageUnit": 0}
+    assert meta["retired_capacity_mw"]["Generator"] == pytest.approx(5623.0, abs=1.0)
     assert meta["retired_capacity_mw"]["StorageUnit"] == 0.0
 
     by_carrier = meta["retired_capacity_mw_by_carrier"]["Generator"]
-    assert set(by_carrier) == {"onwind", "biomass", "hydro", "OCGT", "solar", "oil"}
-    assert sum(by_carrier.values()) == pytest.approx(6215.0, abs=1.0)
+    assert set(by_carrier) == {"onwind", "biomass", "OCGT", "solar", "oil"}
+    assert sum(by_carrier.values()) == pytest.approx(5623.0, abs=1.0)
 
     gens = pd.read_csv(root / "static" / "generators.csv", index_col=0)
     generator = system.index.get(system.devices, "Generator")
