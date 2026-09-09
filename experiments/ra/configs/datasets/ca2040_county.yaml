@@ -1,0 +1,5 @@
+# CA 2040, county resolution.
+dataset:
+  dir: ca2040_county
+  years: [2020]
+  window: {start: 0, stop: 8760}

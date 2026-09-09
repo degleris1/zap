@@ -1,0 +1,4 @@
+# UCAP-style forced-outage derate (NOT an accreditation; see spec R5).
+heuristics:
+  ucap_derate: true
+  outage_draws: []

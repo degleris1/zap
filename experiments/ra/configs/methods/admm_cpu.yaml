@@ -1,0 +1,13 @@
+# ADMM dispatch on the CPU. Never gates a run (required: false); see spec R7.
+methods:
+  lp:
+    enabled: true
+    solver: HIGHS
+    required: true
+  admm:
+    enabled: true
+    required: false
+    solver: ADMM
+    solver_kwargs: {num_iterations: 5000, rho_power: 1.0, atol: 1.0e-4, rtol: 1.0e-4}
+    dtype: float64
+    timeout_s: 3600

@@ -1,0 +1,46 @@
+# Full key space of an RA run config. Every other config is a delta on this
+# file; validation rejects any key that does not appear here (except inside the
+# free-form `solver_kwargs` blocks).
+name: unnamed
+dataset:
+  dir: ca2040_z4            # relative to data_root()
+  years: [2020]
+  window: {start: 0, stop: 8760}
+system:
+  voll: 10000.0
+  demand_scaling: peak_fraction   # none | fixed | peak_fraction
+  peak_capacity_fraction: 0.85
+  scale_load: 1.0
+  clip_scale_to_one: true
+  link_losses: true
+  export_mode: sink
+  carbon_tax: 0.0
+  storage_init_soc: 0.5
+  storage_final_soc: 0.5
+heuristics:
+  ucap_derate: false
+  outage_draws: []          # list of draw indices; [] means weather only
+selection:
+  blocks: [24, 168]         # block sizes to solve, hours
+  reference: window         # window | full_year | none
+  reference_window: {start: 5040, hours: 672}   # 28 days from hour 5040 = 30*168 = 210*24
+methods:
+  lp:
+    enabled: true
+    solver: HIGHS           # any cvxpy solver name, or STUB for a dry pipeline
+    solver_kwargs: {}
+    timeout_s: 3600
+    required: true          # a failure here fails the run
+  admm:
+    enabled: false
+    required: false         # a failure here never fails the run
+    solver: ADMM            # ADMM, or STUB for a dry pipeline
+    solver_kwargs: {num_iterations: 5000, rho_power: 1.0, atol: 1.0e-4, rtol: 1.0e-4}
+    dtype: float64
+    timeout_s: 3600
+execution:
+  shard: null               # "k/n"; null = all tasks
+  max_tasks: null
+  force: false
+output:
+  runs_root: null           # null -> paths.runs_root()

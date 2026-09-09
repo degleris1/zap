@@ -1,0 +1,5 @@
+# CA 2040, 4-zone aggregation (dev / benchmark dataset).
+dataset:
+  dir: ca2040_z4
+  years: [2020]
+  window: {start: 0, stop: 8760}

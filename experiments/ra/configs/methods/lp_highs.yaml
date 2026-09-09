@@ -1,0 +1,10 @@
+# Linear program via HiGHS (the laptop / no-license path).
+methods:
+  lp:
+    enabled: true
+    solver: HIGHS
+    solver_kwargs: {}
+    timeout_s: 3600
+    required: true
+  admm:
+    enabled: false
