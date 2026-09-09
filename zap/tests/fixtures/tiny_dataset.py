@@ -22,12 +22,19 @@ from typing import Optional, Sequence
 import numpy as np
 import pandas as pd
 
-# name, bus, carrier, p_nom, marginal_cost, efficiency, capital_cost, p_max_pu, in_parquet
+# name, bus, carrier, p_nom, marginal_cost, efficiency, capital_cost, p_max_pu,
+# in_parquet, build_year, lifetime
+#
+# The model year of the fixture is 2040 (the timeseries snapshots are stamped
+# 2040), so ``z2 old CCGT`` (1990 + 30 = 2020 <= 2040) is retired by the
+# lifetime rule and ``z1 legacy CCGT`` (infinite lifetime) never is.
+TINY_MODEL_YEAR = 2040
+
 TINY_GENERATORS = [
-    ("z1 CCGT", "z1", "CCGT", 100.0, 30.0, 0.50, 29000.0, 1.0, True),
-    ("z1 solar", "z1", "solar", 80.0, 0.0, 1.00, 21000.0, 1.0, True),
-    ("z2 CCGT", "z2", "CCGT", 120.0, 35.0, 0.45, 29000.0, 1.0, True),
-    ("z2 onwind", "z2", "onwind", 60.0, 0.0, 1.00, 31000.0, 1.0, True),
+    ("z1 CCGT", "z1", "CCGT", 100.0, 30.0, 0.50, 29000.0, 1.0, True, 2030, 30.0),
+    ("z1 solar", "z1", "solar", 80.0, 0.0, 1.00, 21000.0, 1.0, True, 2035, 25.0),
+    ("z2 CCGT", "z2", "CCGT", 120.0, 35.0, 0.45, 29000.0, 1.0, True, 2030, 30.0),
+    ("z2 onwind", "z2", "onwind", 60.0, 0.0, 1.00, 31000.0, 1.0, True, 2035, 25.0),
     # No column in the p_max_pu parquet: exercises the static-scalar fallback.
     (
         "z1_imports unspecified_imports",
@@ -39,9 +46,19 @@ TINY_GENERATORS = [
         0.0,
         0.9,
         False,
+        2030,
+        30.0,
     ),
-    ("z2 hydro", "z2", "hydro", 40.0, 1.0, 1.00, 0.0, 1.0, True),
+    ("z2 hydro", "z2", "hydro", 40.0, 1.0, 1.00, 0.0, 1.0, True, 2020, 40.0),
+    # Retired by 2040: build_year + lifetime == 2020 <= 2040.
+    ("z2 old CCGT", "z2", "CCGT", 500.0, 45.0, 0.45, 29000.0, 1.0, True, 1990, 30.0),
+    # Infinite lifetime: never retires, however old it is.  Small and expensive
+    # so it does not displace the CCGT fleet in the dispatch/emissions tests.
+    ("z1 legacy CCGT", "z1", "CCGT", 20.0, 55.0, 0.40, 29000.0, 1.0, True, 1985, np.inf),
 ]
+
+#: Generator rows the lifetime rule retires at :data:`TINY_MODEL_YEAR`.
+TINY_RETIRED_GENERATORS = ["z2 old CCGT"]
 
 # name, bus
 TINY_LOADS = [("z1 AC", "z1"), ("z2 AC", "z2")]
@@ -54,10 +71,11 @@ TINY_LINKS = [
     ("z1_exports_link", "z1", "z1_exports", "exports", 60.0, 1.0, 0.0, True),
 ]
 
-# name, bus, carrier, p_nom, max_hours, efficiency_store, efficiency_dispatch, capital_cost
+# name, bus, carrier, p_nom, max_hours, efficiency_store, efficiency_dispatch,
+# capital_cost, build_year, lifetime
 TINY_STORAGE = [
-    ("z1 battery", "z1", "battery", 30.0, 4.0, 0.95, 0.95, 27491.0),
-    ("z2 PHS", "z2", "PHS", 20.0, 8.0, 0.90, 0.90, 0.0),
+    ("z1 battery", "z1", "battery", 30.0, 4.0, 0.95, 0.95, 27491.0, 2035, 20.0),
+    ("z2 PHS", "z2", "PHS", 20.0, 8.0, 0.90, 0.90, 0.0, 1970, np.inf),
 ]
 
 TINY_BUSES = ["z1", "z2", "z1_imports", "z1_exports"]
@@ -159,8 +177,23 @@ def write_tiny_dataset(
                 "efficiency": eff,
                 "committable": False,
                 "sign": 1.0,
+                "active": True,
+                "build_year": build_year,
+                "lifetime": lifetime,
             }
-            for name, bus, carrier, p_nom, mc, eff, cc, p_max_pu, _ in TINY_GENERATORS
+            for (
+                name,
+                bus,
+                carrier,
+                p_nom,
+                mc,
+                eff,
+                cc,
+                p_max_pu,
+                _,
+                build_year,
+                lifetime,
+            ) in TINY_GENERATORS
         ]
     ).set_index("name")
     gens.to_csv(static / "generators.csv")
@@ -210,8 +243,22 @@ def write_tiny_dataset(
                 "capital_cost": cc,
                 "standing_loss": 0.0,
                 "inflow": 0.0,
+                "active": True,
+                "build_year": build_year,
+                "lifetime": lifetime,
             }
-            for name, bus, carrier, p_nom, max_hours, eff_s, eff_d, cc in TINY_STORAGE
+            for (
+                name,
+                bus,
+                carrier,
+                p_nom,
+                max_hours,
+                eff_s,
+                eff_d,
+                cc,
+                build_year,
+                lifetime,
+            ) in TINY_STORAGE
         ]
     ).set_index("name").to_csv(static / "storage_units.csv")
 

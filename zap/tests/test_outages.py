@@ -190,6 +190,87 @@ class TestUnitPool(OutageTestCase):
         self.assertEqual(comps, {"Generator", "StorageUnit"})
 
 
+class TestLifetimes(OutageTestCase):
+    """Pool sizing honours `build_year + lifetime` (see `wy_store.retired_mask`)."""
+
+    def _dataset_with_lifetimes(self) -> Path:
+        ds = write_static(self.tmp / "life")
+        for filename, rows in [
+            ("generators.csv", DEFAULT_GENERATORS),
+            ("storage_units.csv", DEFAULT_STORAGE),
+        ]:
+            path = ds / "static" / filename
+            df = pd.read_csv(path)
+            # `z1 CCGT` retires by 2040 (1990 + 30); everything else outlives it,
+            # and `z2 PHS` has an infinite lifetime.
+            df["active"] = True
+            df["build_year"] = [1990 if n == "z1 CCGT" else 2030 for n in df["name"]]
+            df["lifetime"] = [
+                np.inf if n == "z2 PHS" else (30.0 if n == "z1 CCGT" else 40.0) for n in df["name"]
+            ]
+            df.to_csv(path, index=False)
+        return ds
+
+    def test_retired_row_gets_the_minimum_pool(self):
+        ds = self._dataset_with_lifetimes()
+        pool = ox.build_unit_pool(ds, self.params, model_year=2040)
+        # 1000 MW at 250 MW/unit x3 would be 12 units; retired -> the minimum.
+        self.assertEqual(pool.row_units["z1 CCGT"], self.params.min_units_per_row)
+        # Untouched rows keep their sizing, including the infinite-lifetime one.
+        self.assertEqual(pool.row_units["z2 CCGT"], 3)
+        self.assertEqual(pool.row_units["z2 PHS"], math.ceil(3 * 1200 / 200))
+
+        # The row keeps its slot and its position on the unit axis.
+        full = ox.build_unit_pool(ds, self.params, model_year=1999)
+        self.assertEqual(list(pool.row_offset), list(full.row_offset))
+        self.assertEqual(pool.row_offset["z1 CCGT"], 0)
+        offset = 0
+        for row, n in pool.row_units.items():
+            self.assertEqual(pool.row_offset[row], offset)
+            offset += n
+        self.assertEqual(offset, pool.n_units)
+
+    def test_datasets_without_lifetime_columns_are_unchanged(self):
+        """The hermetic fixtures have no build_year/lifetime: nothing retires."""
+        self.assertIsNone(ox.resolve_model_year(self.dataset, None))
+        bare = ox.build_unit_pool(self.dataset, self.params)
+        explicit = ox.build_unit_pool(self.dataset, self.params, model_year=2040)
+        self.assertEqual(dict(bare.row_units), dict(explicit.row_units))
+
+    def test_store_records_the_model_year_and_ucap_zeroes_retired_rows(self):
+        ds = self._dataset_with_lifetimes()
+        ox.generate(
+            ds,
+            years=[2020],
+            draws=1,
+            base_seed=7,
+            params=self.params,
+            init=True,
+            hours_per_year=24,
+            chunk_hours=24,
+            verbose=False,
+            model_year=2040,
+        )
+        root = zarr.open_group(str(ds / "outages.zarr"), mode="r")
+        self.assertEqual(int(root.attrs["model_year"]), 2040)
+        self.assertEqual(
+            int(root.attrs["n_units"]), self.params.min_units_per_row + 3 + 3 + 24 + 18
+        )
+
+        table = ox.write_ucap(ds).set_index("row")
+        # The retired row is carried at 0 MW, so its empirical UCAP falls back
+        # to the analytic value instead of derating a capacity that is gone.
+        self.assertEqual(table.loc["z1 CCGT", "p_nom_mw"], 0.0)
+        self.assertEqual(table.loc["z1 CCGT", "n_samples"], 0)
+        self.assertAlmostEqual(
+            table.loc["z1 CCGT", "ucap_empirical"],
+            table.loc["z1 CCGT", "ucap_analytic"],
+            places=12,
+        )
+        self.assertEqual(table.loc["z2 CCGT", "p_nom_mw"], 250.0)
+        self.assertGreater(table.loc["z2 CCGT", "n_samples"], 0)
+
+
 class TestSampling(OutageTestCase):
     def _uniform_pool(self, n_units: int, forced_outage_rate=0.05, mttr_h=50.0):
         ds = write_static(

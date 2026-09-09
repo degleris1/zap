@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
 import shutil
 import subprocess
@@ -400,6 +401,9 @@ def convert_dataset(
             "source_files": source_files,
             "chunk_hours": int(chunk_hours),
             "skipped_years": skipped_years,
+            # The snapshots carry the *model* year (2040 for the CH3 exports);
+            # `detect_model_year` reads this back for the retirement rule.
+            "model_year": int(pd.Timestamp(str(timestep_iso[0])).year),
         }
     )
 
@@ -527,6 +531,10 @@ class LoadOptions:
     clip_scale_to_one: bool = True
     ucap_derate: bool = False
     outage_draw: Optional[int] = None
+    #: Investment year the system represents.  ``None`` -> :func:`detect_model_year`.
+    model_year: Optional[int] = None
+    #: Zero the as-built capacity of rows whose ``build_year + lifetime <= model_year``.
+    apply_lifetimes: bool = True
     link_losses: bool = True
     ignore_min_power: bool = True
     export_mode: Literal["sink", "drop"] = "sink"
@@ -589,6 +597,146 @@ def _read_static(dataset_dir: Path) -> dict[str, pd.DataFrame]:
 
 #: Public alias: planning reads the static tables to recover PyPSA extendability.
 read_static = _read_static
+
+
+# ===========================================================================
+# Asset lifetimes (retirements)
+# ===========================================================================
+
+#: Static columns the retirement rule needs.  A table missing either of them
+#: carries no lifetime information and nothing in it can retire.
+LIFETIME_COLUMNS = ("build_year", "lifetime")
+
+#: Component -> static table key for the two tables that carry lifetimes.
+RETIREMENT_TABLES = {"Generator": "generators", "StorageUnit": "storage_units"}
+
+
+def has_lifetime_columns(static_df: pd.DataFrame) -> bool:
+    """True when a static table carries both ``build_year`` and ``lifetime``."""
+    return all(c in static_df.columns for c in LIFETIME_COLUMNS)
+
+
+def retired_mask(static_df: pd.DataFrame, model_year: Optional[int]) -> np.ndarray:
+    """Rows whose asset life has ended by ``model_year``.
+
+    A row is retired iff ``lifetime`` is finite and ``build_year + lifetime <=
+    model_year``; an infinite (or missing) lifetime never retires, which is the
+    rule ``zap/importers/pypsa.py::get_active_assets`` applied.  The PyPSA
+    ``active`` column is *not* consulted: pypsa-usa writes ``active == True``
+    everywhere because activity is resolved per investment period at solve time.
+
+    ``model_year is None`` or a table without :data:`LIFETIME_COLUMNS` returns an
+    all-``False`` mask, so callers can use this unconditionally.
+    """
+    n = len(static_df)
+    if model_year is None or n == 0 or not has_lifetime_columns(static_df):
+        return np.zeros(n, dtype=bool)
+    build = pd.to_numeric(static_df["build_year"], errors="coerce").to_numpy(dtype=np.float64)
+    life = pd.to_numeric(static_df["lifetime"], errors="coerce").to_numpy(dtype=np.float64)
+    ok = np.isfinite(build) & np.isfinite(life)
+    out = np.zeros(n, dtype=bool)
+    out[ok] = (build[ok] + life[ok]) <= float(model_year)
+    return out
+
+
+def detect_model_year(dataset_dir: Path) -> tuple[int, str]:
+    """``(model_year, source)`` for a dataset: the year the snapshots are stamped.
+
+    The CH3 exports are single-investment-period PyPSA networks whose snapshots
+    carry the *model* year (2040) while the weather-year index carries the
+    weather year, so the model year is read, in order, from
+
+    1. ``weather.zarr`` ``attrs["model_year"]`` (written by newer conversions),
+    2. the first ``weather.zarr`` ``timestep_iso`` stamp,
+    3. ``meta/wy*.json`` -> ``scenario.planning_horizons``,
+    4. the ``timestep`` index of a ``timeseries/*.parquet``.
+    """
+    dataset_dir = Path(dataset_dir)
+
+    store_path = dataset_dir / STORE_NAME
+    if store_path.exists():
+        try:
+            root = zarr.open_group(str(store_path), mode="r")
+            attrs = dict(root.attrs)
+        except (OSError, ValueError, KeyError):  # pragma: no cover - unreadable store
+            root, attrs = None, {}
+        if attrs.get("model_year") is not None:
+            return int(attrs["model_year"]), "weather_store_attrs"
+        if root is not None and "timestep_iso" in root:
+            stamps = root["timestep_iso"][:1]
+            if len(stamps):
+                return int(pd.Timestamp(str(stamps[0])).year), "weather_store:timestep_iso"
+
+    meta_dir = dataset_dir / "meta"
+    if meta_dir.is_dir():
+        for meta_path in sorted(meta_dir.glob("wy*.json")):
+            try:
+                raw = json.loads(meta_path.read_text())
+            except (OSError, ValueError):  # pragma: no cover - unreadable meta
+                continue
+            horizons = (raw.get("scenario") or {}).get("planning_horizons")
+            if horizons:
+                return int(next(iter(horizons))), f"meta/{meta_path.name}:planning_horizons"
+
+    ts_dir = dataset_dir / "timeseries"
+    if ts_dir.is_dir():
+        for path in sorted(ts_dir.glob("*.parquet")):
+            index = pd.read_parquet(path, columns=[]).index
+            if "timestep" not in (index.names or []):
+                continue
+            stamps = index.get_level_values("timestep")
+            if len(stamps):
+                return int(pd.Timestamp(stamps[0]).year), f"timeseries/{path.name}:timestep"
+
+    raise ValueError(
+        f"Cannot determine the model year of {dataset_dir}: no model_year/timestep_iso in "
+        "the weather store, no scenario.planning_horizons in meta/wy*.json and no parquet "
+        "timestep index. Pass LoadOptions.model_year explicitly."
+    )
+
+
+def apply_retirements(
+    static: dict[str, pd.DataFrame], model_year: Optional[int]
+) -> tuple[dict[str, pd.DataFrame], dict]:
+    """Zero the as-built capacity of every retired generator / storage row.
+
+    Rows are *kept*: order, names and count are unchanged, so outage-pool
+    offsets, :class:`SystemIndex`, ``design.json`` and ``Design.apply`` all keep
+    working; only ``p_nom`` becomes 0.  Returns ``(static, summary)`` where
+    ``static`` holds copies of the two touched tables.
+    """
+    out = dict(static)
+    summary: dict[str, Any] = {
+        "model_year": None if model_year is None else int(model_year),
+        "retired_rows": {},
+        "retired_capacity_mw": {},
+        "retired_capacity_mw_by_carrier": {},
+        "retired_names": {},
+    }
+    for component, key in RETIREMENT_TABLES.items():
+        df = static.get(key)
+        if df is None:
+            continue
+        mask = retired_mask(df, model_year)
+        capacity = df["p_nom"].to_numpy(dtype=np.float64)
+        by_carrier: dict[str, float] = {}
+        if mask.any():
+            df = df.copy()
+            if "carrier" in df.columns:
+                grouped = (
+                    pd.Series(capacity[mask], index=df["carrier"].to_numpy()[mask])
+                    .groupby(level=0)
+                    .sum()
+                    .sort_values(ascending=False)
+                )
+                by_carrier = {str(k): float(v) for k, v in grouped.items()}
+            df.loc[mask, "p_nom"] = 0.0
+            out[key] = df
+        summary["retired_rows"][component] = int(mask.sum())
+        summary["retired_capacity_mw"][component] = float(capacity[mask].sum())
+        summary["retired_capacity_mw_by_carrier"][component] = by_carrier
+        summary["retired_names"][component] = [str(n) for n in df.index[mask]]
+    return out, summary
 
 
 def _thermal_carriers() -> frozenset[str]:
@@ -1224,6 +1372,41 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
     store = WeatherStore.open(dataset_dir)
     static = _read_static(dataset_dir)
 
+    # ---- Asset lifetimes -------------------------------------------------
+    # pypsa-usa exports carry `active == True` on every row because PyPSA
+    # resolves activity per investment period at solve time; the retirement rule
+    # lives in `build_year + lifetime` (see `retired_mask`).
+    model_year: Optional[int] = None
+    model_year_source = "disabled"
+    if options.apply_lifetimes:
+        if options.model_year is not None:
+            model_year, model_year_source = int(options.model_year), "LoadOptions.model_year"
+        else:
+            model_year, model_year_source = detect_model_year(dataset_dir)
+    static, retirements = apply_retirements(static, model_year)
+    retirements["model_year_source"] = model_year_source
+    retirements["apply_lifetimes"] = bool(options.apply_lifetimes)
+    n_retired = sum(retirements["retired_rows"].values())
+    if n_retired:
+        by_carrier = retirements["retired_capacity_mw_by_carrier"]["Generator"]
+        logger.info(
+            "Lifetimes (model_year=%s from %s): retired %d rows / %.1f MW "
+            "(generators %d rows %.1f MW, storage %d rows %.1f MW); generator carriers: %s",
+            model_year,
+            model_year_source,
+            n_retired,
+            sum(retirements["retired_capacity_mw"].values()),
+            retirements["retired_rows"]["Generator"],
+            retirements["retired_capacity_mw"]["Generator"],
+            retirements["retired_rows"]["StorageUnit"],
+            retirements["retired_capacity_mw"]["StorageUnit"],
+            ", ".join(f"{k} {v:.1f} MW" for k, v in by_carrier.items()) or "none",
+        )
+    else:
+        logger.info(
+            "Lifetimes (model_year=%s from %s): no rows retired.", model_year, model_year_source
+        )
+
     years = tuple(int(y) for y in options.years)
     if not years:
         raise ValueError("LoadOptions.years is empty")
@@ -1340,6 +1523,13 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "voll": float(options.voll),
         "ucap_derate": bool(options.ucap_derate),
         "outage_draw": options.outage_draw,
+        "model_year": model_year,
+        "model_year_source": model_year_source,
+        "apply_lifetimes": bool(options.apply_lifetimes),
+        "retired_rows": retirements["retired_rows"],
+        "retired_capacity_mw": retirements["retired_capacity_mw"],
+        "retired_capacity_mw_by_carrier": retirements["retired_capacity_mw_by_carrier"],
+        "retired_names": retirements["retired_names"],
         "link_losses": bool(options.link_losses),
         "power_unit": float(options.power_unit),
         "cost_unit": float(options.cost_unit),

@@ -23,15 +23,19 @@ from zap.importers.wy_store import (
     available_capacity,
     chunk_hours_for,
     convert_dataset,
+    detect_model_year,
     import_bus_mask,
     load_system,
     peak_available_mw,
+    retired_mask,
 )
 from zap.planning.operation_objectives import UnservedEnergyObjective
 from zap.tests.fixtures.tiny_dataset import (
     EXPORT_MARGINAL_COST,
     TINY_GENERATORS,
     TINY_LINKS,
+    TINY_MODEL_YEAR,
+    TINY_RETIRED_GENERATORS,
     real_z4_dir,
     write_tiny_dataset,
     write_tiny_ucap_csv,
@@ -171,7 +175,7 @@ def test_load_system_device_order_and_shapes(dataset):
 
     generator = system.index.get(system.devices, "Generator")
     load = system.index.get(system.devices, "Load")
-    assert generator.dynamic_capacity.shape == (6, 24)
+    assert generator.dynamic_capacity.shape == (len(TINY_GENERATORS), 24)
     assert load.load.shape == (2, 24)
     for device in system.devices:
         assert device.time_horizon in (0, 24)
@@ -183,9 +187,8 @@ def test_generator_fields_match_static(dataset):
     gens = _static(dataset, "generators")
     carriers = _static(dataset, "carriers")
 
-    np.testing.assert_allclose(
-        generator.nominal_capacity.ravel(), gens["p_nom"].to_numpy(), rtol=1e-12
-    )
+    active_p_nom = np.where(retired_mask(gens, TINY_MODEL_YEAR), 0.0, gens["p_nom"].to_numpy())
+    np.testing.assert_allclose(generator.nominal_capacity.ravel(), active_p_nom, rtol=1e-12)
     np.testing.assert_allclose(
         generator.linear_cost.ravel(), gens["marginal_cost"].to_numpy(), rtol=1e-12
     )
@@ -196,12 +199,8 @@ def test_generator_fields_match_static(dataset):
         carriers.loc[gens["carrier"], "co2_emissions"].to_numpy() / gens["efficiency"].to_numpy()
     )
     np.testing.assert_allclose(generator.emission_rates.ravel(), expected_rates, rtol=1e-12)
-    np.testing.assert_allclose(
-        generator.min_nominal_capacity.ravel(), gens["p_nom"].to_numpy(), rtol=1e-12
-    )
-    np.testing.assert_allclose(
-        generator.max_nominal_capacity.ravel(), gens["p_nom"].to_numpy(), rtol=1e-12
-    )
+    np.testing.assert_allclose(generator.min_nominal_capacity.ravel(), active_p_nom, rtol=1e-12)
+    np.testing.assert_allclose(generator.max_nominal_capacity.ravel(), active_p_nom, rtol=1e-12)
     assert list(generator.name) == list(gens.index)
     assert list(generator.fuel_type) == list(gens["carrier"])
 
@@ -628,6 +627,140 @@ def test_load_system_without_store_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Asset lifetimes (retirements)
+# ---------------------------------------------------------------------------
+
+
+def test_model_year_is_detected_from_the_store(dataset):
+    year, source = detect_model_year(dataset)
+    assert year == TINY_MODEL_YEAR
+    assert source in ("weather_store_attrs", "weather_store:timestep_iso")
+
+    # ... and without a converted store, from the parquet timestep index.
+    bare = write_tiny_dataset(dataset.parent / "bare", n_hours=N_HOURS, years=YEARS)
+    year, source = detect_model_year(bare)
+    assert year == TINY_MODEL_YEAR
+    assert source.startswith("timeseries/")
+
+
+def test_retired_mask_rule():
+    gens = _static_frame = pd.DataFrame(
+        {
+            "build_year": [1990, 2010, 2040, 1985, 2020],
+            "lifetime": [30.0, 40.0, 30.0, np.inf, np.nan],
+        }
+    )
+    np.testing.assert_array_equal(retired_mask(gens, 2040), [True, False, False, False, False])
+    # 2010 + 40 == 2050 > 2040, but by 2050 it is retired (<= is inclusive).
+    np.testing.assert_array_equal(retired_mask(gens, 2050)[:2], [True, True])
+    # No model year, or no lifetime columns at all: nothing retires.
+    assert not retired_mask(gens, None).any()
+    assert not retired_mask(_static_frame.drop(columns=["lifetime"]), 2040).any()
+
+
+def test_lifetimes_zero_retired_capacity_and_keep_row_order(dataset):
+    system = _load(dataset)
+    gens = _static(dataset, "generators")
+    generator = system.index.get(system.devices, "Generator")
+
+    # Row order, names and count are untouched: outage-pool offsets, SystemIndex
+    # and design.json all index by position.
+    assert list(generator.name) == list(gens.index)
+    assert generator.num_devices == len(TINY_GENERATORS)
+    assert list(system.index.names["Generator"]) == list(gens.index)
+
+    retired = TINY_RETIRED_GENERATORS[0]
+    row = list(gens.index).index(retired)
+    assert gens["p_nom"].iloc[row] > 0.0  # the CSV still carries the as-built MW
+    assert generator.nominal_capacity.ravel()[row] == 0.0
+    assert generator.min_nominal_capacity.ravel()[row] == 0.0
+    assert generator.max_nominal_capacity.ravel()[row] == 0.0
+
+    # The infinite-lifetime row is untouched, however old it is.
+    inf_row = list(gens.index).index("z1 legacy CCGT")
+    assert not np.isfinite(gens["lifetime"].iloc[inf_row])
+    assert generator.nominal_capacity.ravel()[inf_row] == pytest.approx(gens["p_nom"].iloc[inf_row])
+
+    # Every other row keeps its as-built capacity.
+    expected = np.where(retired_mask(gens, TINY_MODEL_YEAR), 0.0, gens["p_nom"].to_numpy())
+    np.testing.assert_allclose(generator.nominal_capacity.ravel(), expected, rtol=1e-12)
+
+    # Storage carries lifetimes too, and none of it retires by 2040.
+    units = _static(dataset, "storage_units")
+    storage = system.index.get(system.devices, "StorageUnit")
+    np.testing.assert_allclose(
+        storage.power_capacity.ravel(), units["p_nom"].to_numpy(), rtol=1e-12
+    )
+
+
+def test_apply_lifetimes_false_restores_the_old_behaviour(dataset):
+    system = _load(dataset, apply_lifetimes=False)
+    gens = _static(dataset, "generators")
+    generator = system.index.get(system.devices, "Generator")
+    np.testing.assert_allclose(
+        generator.nominal_capacity.ravel(), gens["p_nom"].to_numpy(), rtol=1e-12
+    )
+    assert system.meta["model_year"] is None
+    assert system.meta["apply_lifetimes"] is False
+    assert system.meta["retired_rows"] == {"Generator": 0, "StorageUnit": 0}
+
+    # ... and an explicit model year before any retirement does the same.
+    early = _load(dataset, model_year=1999)
+    early_gen = early.index.get(early.devices, "Generator")
+    np.testing.assert_allclose(
+        early_gen.nominal_capacity.ravel(), gens["p_nom"].to_numpy(), rtol=1e-12
+    )
+    assert early.meta["model_year_source"] == "LoadOptions.model_year"
+
+
+def test_retirement_meta_and_peak_capacity(dataset):
+    system = _load(dataset)
+    meta = system.meta
+    gens = _static(dataset, "generators")
+    retired = TINY_RETIRED_GENERATORS[0]
+    retired_mw = float(gens.loc[retired, "p_nom"])
+
+    assert meta["model_year"] == TINY_MODEL_YEAR
+    assert meta["apply_lifetimes"] is True
+    assert meta["retired_rows"] == {"Generator": 1, "StorageUnit": 0}
+    assert meta["retired_capacity_mw"]["Generator"] == pytest.approx(retired_mw)
+    assert meta["retired_capacity_mw"]["StorageUnit"] == 0.0
+    assert meta["retired_capacity_mw_by_carrier"]["Generator"] == {
+        gens.loc[retired, "carrier"]: pytest.approx(retired_mw)
+    }
+    assert meta["retired_capacity_mw_by_carrier"]["StorageUnit"] == {}
+    assert meta["retired_names"]["Generator"] == TINY_RETIRED_GENERATORS
+
+    # available_capacity() takes capacity from the system, so it follows.
+    kept = _load(dataset, apply_lifetimes=False)
+    assert meta["peak_available_mw"] == pytest.approx(kept.meta["peak_available_mw"] - retired_mw)
+    assert peak_available_mw(system) == pytest.approx(peak_available_mw(kept) - retired_mw)
+
+
+def test_retired_row_gets_the_minimum_outage_pool(dataset):
+    """The pool keeps the retired row's slot, sized as if it were a 0 MW candidate."""
+    ox = pytest.importorskip("zap.reliability.outages")
+    params = ox.load_outage_params()
+
+    pool = ox.build_unit_pool(dataset, params)
+    retired = TINY_RETIRED_GENERATORS[0]
+    assert retired in pool.row_offset
+    assert pool.row_units[retired] == params.min_units_per_row
+
+    # Without the lifetime rule the same row is sized on its 70 MW as-built.
+    kept = ox.build_unit_pool(dataset, params, model_year=1999)
+    assert kept.row_units[retired] > params.min_units_per_row
+
+    # Offsets stay a running cumulative sum over the same rows in the same order.
+    assert list(pool.row_offset) == list(kept.row_offset)
+    offset = 0
+    for row, n in pool.row_units.items():
+        assert pool.row_offset[row] == offset
+        offset += n
+    assert offset == pool.n_units
+
+
+# ---------------------------------------------------------------------------
 # 14: the real dataset (opt-in)
 # ---------------------------------------------------------------------------
 
@@ -648,7 +781,8 @@ def test_real_z4_structural():
         .groupby(level=0)
         .sum()
     )
-    expected = gens.groupby("carrier")["p_nom"].sum()
+    active = gens.assign(p_nom=np.where(retired_mask(gens, 2040), 0.0, gens["p_nom"].to_numpy()))
+    expected = active.groupby("carrier")["p_nom"].sum()
     pd.testing.assert_series_equal(
         by_carrier.sort_index(), expected.sort_index(), check_names=False, rtol=1e-12
     )
@@ -668,12 +802,40 @@ def test_real_z4_structural():
         else:
             weather[i, :] = gens["p_max_pu"].iloc[i]
     mask = import_bus_mask(gens["bus"].to_numpy())
-    hourly = (weather[~mask, :] * gens["p_nom"].to_numpy()[~mask, None]).sum(axis=0)
+    hourly = (weather[~mask, :] * active["p_nom"].to_numpy()[~mask, None]).sum(axis=0)
     assert system.meta["peak_available_mw"] == pytest.approx(hourly.max(), abs=1.0)
 
-    storage_p_nom = pd.read_csv(root / "static" / "storage_units.csv", index_col=0)["p_nom"].sum()
+    storage = pd.read_csv(root / "static" / "storage_units.csv", index_col=0)
+    assert not retired_mask(storage, 2040).any()
+    storage_p_nom = storage["p_nom"].sum()
     assert system.meta["peak_available_incl_storage_mw"] == pytest.approx(
         hourly.max() + storage_p_nom, abs=1.0
+    )
+
+
+@unittest.skipIf(real_z4_dir() is None, "data/ca2040_z4/weather.zarr is not present")
+def test_real_z4_lifetime_retirements():
+    """The CA 2040 z4 fleet loses 15 rows / 6,215 MW to the lifetime rule."""
+    root = real_z4_dir()
+    system = load_system(root, LoadOptions(years=(2020,), window=HourWindow(0, 24)))
+    meta = system.meta
+
+    assert meta["model_year"] == 2040
+    assert meta["retired_rows"] == {"Generator": 15, "StorageUnit": 0}
+    assert meta["retired_capacity_mw"]["Generator"] == pytest.approx(6215.0, abs=1.0)
+    assert meta["retired_capacity_mw"]["StorageUnit"] == 0.0
+
+    by_carrier = meta["retired_capacity_mw_by_carrier"]["Generator"]
+    assert set(by_carrier) == {"onwind", "biomass", "hydro", "OCGT", "solar", "oil"}
+    assert sum(by_carrier.values()) == pytest.approx(6215.0, abs=1.0)
+
+    gens = pd.read_csv(root / "static" / "generators.csv", index_col=0)
+    generator = system.index.get(system.devices, "Generator")
+    assert list(generator.name) == list(gens.index)
+    mask = retired_mask(gens, 2040)
+    np.testing.assert_allclose(generator.nominal_capacity.ravel()[mask], 0.0)
+    np.testing.assert_allclose(
+        generator.nominal_capacity.ravel()[~mask], gens["p_nom"].to_numpy()[~mask], rtol=1e-12
     )
 
 

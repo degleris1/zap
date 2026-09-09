@@ -372,7 +372,9 @@ class TestExpansionAndBounds(TinyPlanningMixin):
             if name in EXTENDABLE_GENERATORS:
                 continue
             with self.subTest(generator=name):
-                self.assertAlmostEqual(gen_lo[i], max(p_nom[i], 0.1))
+                # The 0.1 MW floor is clipped to the upper bound, so a row
+                # retired by the lifetime rule (p_nom 0, frozen) stays at 0.
+                self.assertAlmostEqual(gen_lo[i], min(max(p_nom[i], 0.1), p_nom[i]))
                 self.assertAlmostEqual(gen_hi[i], p_nom[i])
 
         i_solar = gen_names.index("z1 solar")

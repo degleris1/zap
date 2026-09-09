@@ -253,15 +253,54 @@ def _read_static(dataset_dir: Path, filename: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def build_unit_pool(dataset_dir: Path, params: OutageParams) -> UnitPool:
+def resolve_model_year(dataset_dir: Path, model_year: int | None) -> int | None:
+    """Model year for the retirement rule, auto-detected when not given.
+
+    Returns ``None`` -- meaning "no lifetime information, nothing retires" --
+    when neither static table carries ``build_year``/``lifetime`` (the hermetic
+    test fixtures) or when the dataset has no snapshot stamps to read a year
+    from, so a bare ``build_unit_pool(dir, params)`` keeps working everywhere.
+    """
+    if model_year is not None:
+        return int(model_year)
+
+    from zap.importers.wy_store import detect_model_year, has_lifetime_columns
+
+    dataset_dir = Path(dataset_dir)
+    lifetimes = False
+    for _, filename in _COMPONENT_FILES:
+        path = dataset_dir / "static" / filename
+        if path.exists() and has_lifetime_columns(pd.read_csv(path, nrows=0)):
+            lifetimes = True
+    if not lifetimes:
+        return None
+    try:
+        year, _ = detect_model_year(dataset_dir)
+    except ValueError:
+        return None
+    return int(year)
+
+
+def build_unit_pool(
+    dataset_dir: Path, params: OutageParams, model_year: int | None = None
+) -> UnitPool:
     """Build the deterministic virtual-unit pool for a dataset.
 
     Rows are ``generators.csv`` then ``storage_units.csv``, each in CSV order,
     keeping only rows whose carrier has outage parameters. A carrier that appears
     in the data but in neither ``carriers`` nor ``excluded_carriers`` is a hard
     error, so new datasets cannot silently skip units.
+
+    Pool *sizing* uses the capacity that is active in ``model_year``: a row
+    retired by ``build_year + lifetime <= model_year`` contributes 0 MW and so
+    gets ``min_units_per_row`` units, exactly like a zero-``p_nom`` expansion
+    candidate.  It keeps its slot on the unit axis (offsets stay row-aligned) and
+    a planner may still rebuild it -- up to ``min_units_per_row * unit_size_mw``
+    before :func:`row_availability` runs out of units for it.  ``model_year is
+    None`` (or a dataset without lifetime columns) sizes on raw ``p_nom``.
     """
     dataset_dir = Path(dataset_dir)
+    model_year = resolve_model_year(dataset_dir, model_year)
     records = []
     seen_rows: set[str] = set()
 
@@ -269,6 +308,10 @@ def build_unit_pool(dataset_dir: Path, params: OutageParams) -> UnitPool:
         df = _read_static(dataset_dir, filename)
         if len(df) == 0:
             continue
+
+        from zap.importers.wy_store import retired_mask
+
+        retired = pd.Series(retired_mask(df, model_year), index=df.index)
 
         unknown = sorted(
             set(df["carrier"].astype(str)) - set(params.carriers) - params.excluded_carriers
@@ -279,7 +322,7 @@ def build_unit_pool(dataset_dir: Path, params: OutageParams) -> UnitPool:
                 "`excluded_carriers` of the outage parameters; add them explicitly"
             )
 
-        for _, row in df.iterrows():
+        for _index, row in df.iterrows():
             carrier = str(row["carrier"])
             if carrier not in params.carriers:
                 continue
@@ -290,7 +333,8 @@ def build_unit_pool(dataset_dir: Path, params: OutageParams) -> UnitPool:
             seen_rows.add(name)
 
             cp = params.carriers[carrier]
-            reference_mw = max(float(row["p_nom"]), params.min_pool_capacity_mw)
+            active_mw = 0.0 if bool(retired.loc[_index]) else float(row["p_nom"])
+            reference_mw = max(active_mw, params.min_pool_capacity_mw)
             n_units = max(
                 params.min_units_per_row,
                 math.ceil(params.pool_multiplier * reference_mw / cp.unit_size_mw),
@@ -514,6 +558,7 @@ def init_store(
     hours_per_year: int = HOURS_PER_YEAR,
     chunk_hours: int = 168,
     overwrite: bool = False,
+    model_year: int | None = None,
 ) -> Path:
     """Create the empty outage store, its coordinates, and ``outage_units.csv``.
 
@@ -534,7 +579,8 @@ def init_store(
             f"{out_path} already exists; pass overwrite=True (--overwrite) to replace it"
         )
 
-    pool = build_unit_pool(dataset_dir, params)
+    model_year = resolve_model_year(dataset_dir, model_year)
+    pool = build_unit_pool(dataset_dir, params, model_year=model_year)
     n_units = pool.n_units
     if n_units == 0:
         raise ValueError("the unit pool is empty; check `carriers` in the outage parameters")
@@ -606,6 +652,9 @@ def init_store(
             "n_draws": int(draws),
             "hours_per_year": int(hours_per_year),
             "n_units": int(n_units),
+            # Model year the pool was sized for: rows retired by then (see
+            # `zap.importers.wy_store.retired_mask`) get the minimum pool.
+            "model_year": None if model_year is None else int(model_year),
             "completed": [],
         }
     )
@@ -655,6 +704,7 @@ def generate(
     hours_per_year: int = HOURS_PER_YEAR,
     chunk_hours: int = 168,
     verbose: bool = True,
+    model_year: int | None = None,
 ) -> Path:
     """Generate outage draws into ``outages.zarr``.
 
@@ -679,6 +729,7 @@ def generate(
             hours_per_year=hours_per_year,
             chunk_hours=chunk_hours,
             overwrite=overwrite,
+            model_year=model_year,
         )
     elif not out_path.exists():
         raise FileNotFoundError(
@@ -704,7 +755,7 @@ def generate(
         )
 
     hours = int(root.attrs["hours_per_year"])
-    pool = build_unit_pool(dataset_dir, params)
+    pool = build_unit_pool(dataset_dir, params, model_year=root.attrs.get("model_year"))
     _assert_units_csv_matches(out_path, root, pool)
 
     year_ix = {y: i for i, y in enumerate(store_years)}
@@ -775,7 +826,8 @@ def write_ucap(
 
     root = zarr.open_group(str(store_path), mode="r")
     params = OutageParams.from_dict(root.attrs["params"], sha256=root.attrs["params_sha256"])
-    pool = build_unit_pool(dataset_dir, params)
+    model_year = resolve_model_year(dataset_dir, root.attrs.get("model_year"))
+    pool = build_unit_pool(dataset_dir, params, model_year=model_year)
     if pool.n_units != int(root.attrs["n_units"]):
         raise ValueError("the pool rebuilt from static/*.csv does not match the store")
 
@@ -793,12 +845,18 @@ def write_ucap(
     mean_uptime = uptime / n_samples
 
     # Capacities: the current p_nom of every pooled row.
+    # Capacities: the p_nom of every pooled row that is still active in
+    # `model_year` (a retired row contributes 0 MW, so its UCAP falls back to the
+    # analytic value -- it derates nothing because its capacity is zero).
+    from zap.importers.wy_store import retired_mask
+
     caps = {}
     for _, filename in _COMPONENT_FILES:
         df = _read_static(dataset_dir, filename)
-        for _, r in df.iterrows():
+        retired = retired_mask(df, model_year)
+        for (_, r), gone in zip(df.iterrows(), retired, strict=True):
             if str(r["name"]) in pool.row_offset:
-                caps[str(r["name"])] = float(r["p_nom"])
+                caps[str(r["name"])] = 0.0 if bool(gone) else float(r["p_nom"])
 
     records = []
     for row, offset in pool.row_offset.items():
@@ -899,6 +957,12 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--dataset-dir", type=Path, required=True)
         sp.add_argument("--params", type=Path, default=None, help="outage_params.yaml override")
         sp.add_argument("--out", type=Path, default=None, help="store path")
+        sp.add_argument(
+            "--model-year",
+            type=int,
+            default=None,
+            help="investment year for the lifetime rule (default: detect from the dataset)",
+        )
 
     init_p = sub.add_parser("init", help="create the empty store and its coordinates")
     common(init_p)
@@ -945,7 +1009,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     if args.command == "pool":
-        pool = build_unit_pool(args.dataset_dir, params)
+        pool = build_unit_pool(args.dataset_dir, params, model_year=args.model_year)
+        print(f"model year: {resolve_model_year(args.dataset_dir, args.model_year)}")
         _print_pool_summary(pool, params, args.years, args.draws, HOURS_PER_YEAR)
         return 0
 
@@ -954,7 +1019,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "init":
-        pool = build_unit_pool(args.dataset_dir, params)
+        pool = build_unit_pool(args.dataset_dir, params, model_year=args.model_year)
+        print(f"model year: {resolve_model_year(args.dataset_dir, args.model_year)}")
         _print_pool_summary(pool, params, args.years, args.draws, args.hours_per_year)
         if args.dry_run:
             print("--dry-run: nothing written")
@@ -969,6 +1035,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             hours_per_year=args.hours_per_year,
             chunk_hours=args.chunk_hours,
             overwrite=args.overwrite,
+            model_year=args.model_year,
         )
         print(f"initialised {path}")
         return 0
@@ -989,7 +1056,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             years, draws, seed = args.years, args.draws, args.seed
 
         if args.dry_run:
-            pool = build_unit_pool(args.dataset_dir, params)
+            pool = build_unit_pool(args.dataset_dir, params, model_year=args.model_year)
             _print_pool_summary(pool, params, years, draws, args.hours_per_year)
             print(f"--dry-run: shard {k}/{n} would write {len(_shard_jobs(years, draws, (k, n)))}")
             return 0
@@ -1007,9 +1074,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             init=args.init,
             hours_per_year=args.hours_per_year,
             chunk_hours=args.chunk_hours,
+            model_year=args.model_year,
         )
         raw = _dir_size(path)
-        pool = build_unit_pool(args.dataset_dir, params)
+        pool = build_unit_pool(args.dataset_dir, params, model_year=args.model_year)
         proj = storage_projection(pool, years, draws, args.hours_per_year)
         print(
             json.dumps(

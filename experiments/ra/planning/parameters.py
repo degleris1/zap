@@ -61,7 +61,10 @@ def setup_bounds(
     Reads ``min_*``/``max_*`` off the devices (which
     :func:`~experiments.ra.planning.expansion.apply_expansion` has already made
     finite) and applies the configured floors.  A missing or infinite bound is
-    an error here, not a silently invented number.
+    an error here, not a silently invented number.  A floor is clipped to the
+    row's upper bound, so a row that is retired (upper bound 0, see
+    ``LoadOptions.apply_lifetimes``) stays at 0 instead of being floored above
+    its own maximum.
     """
     lower_bounds: dict[str, np.ndarray] = {}
     upper_bounds: dict[str, np.ndarray] = {}
@@ -86,9 +89,12 @@ def setup_bounds(
             )
         ub = np.asarray(ub, dtype=float).copy()
 
-        lb = np.maximum(lb, float(min_capacity_mw))
-        if isinstance(device, StorageUnit):
-            lb = np.maximum(lb, float(min_storage_mw))
+        floor = float(min_storage_mw if isinstance(device, StorageUnit) else min_capacity_mw)
+        # The floor keeps an *existing* unit from being retired below it; it must
+        # not raise a row that cannot exist at all in this model year -- a row
+        # retired by the lifetime rule (`wy_store.retired_mask`), or any other
+        # row whose upper bound is 0, keeps a lower bound of 0.
+        lb = np.maximum(lb, np.minimum(floor, ub))
 
         if np.any(lb > ub + 1e-12):
             bad = int(np.argmax(lb - ub))
