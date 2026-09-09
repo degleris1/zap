@@ -32,10 +32,20 @@ ConstraintMatrix = namedtuple(
 
 
 def get_time_horizon(array: NDArray) -> int:
-    if len(array.shape) < 2:
-        return 1
-    else:
-        return array.shape[1]
+    """Time horizon implied by a dynamic attribute; ``0`` means *static*.
+
+    ``make_dynamic`` reshapes 1-D data to ``(N, 1)``, so a second dimension of 1
+    is a static attribute and must report ``0`` -- the value
+    ``PowerNetwork.dispatch`` accepts alongside the network horizon -- exactly as
+    ``Transporter`` and ``StorageUnit`` report for their static case.  Returning
+    ``1`` here made any injector with static bounds (e.g. an export sink) claim a
+    one-hour horizon, which fails ``dispatch``'s
+    ``d.time_horizon in [0, time_horizon]`` assertion for every T != 1, and made
+    a sliced device keep the horizon of the array it was sliced from.
+    """
+    if len(array.shape) < 2 or array.shape[1] == 1:
+        return 0
+    return array.shape[1]
 
 
 def make_dynamic(array: Optional[NDArray]) -> NDArray:
@@ -272,15 +282,11 @@ class AbstractDevice:
 
         for k, v in new_device.__dict__.items():
             if isinstance(v, np.ndarray) and np.issubdtype(v.dtype, np.number):
-                v_dtype = (
-                    TORCH_INTEGER_DTYPE if np.issubdtype(v.dtype, np.integer) else dtype
-                )
+                v_dtype = TORCH_INTEGER_DTYPE if np.issubdtype(v.dtype, np.integer) else dtype
                 new_device.__dict__[k] = torch.tensor(v, device=machine, dtype=v_dtype)
 
             elif isinstance(v, torch.Tensor):
-                v_dtype = (
-                    TORCH_INTEGER_DTYPE if v.dtype in TORCH_INTEGER_TYPES else dtype
-                )
+                v_dtype = TORCH_INTEGER_DTYPE if v.dtype in TORCH_INTEGER_TYPES else dtype
                 new_device.__dict__[k] = v.to(device=machine, dtype=v_dtype)
 
         new_device.torched = True
@@ -293,10 +299,7 @@ class AbstractDevice:
     # Modeling Tools
 
     def parameterize(self, la=np, **params):
-        new_params = {
-            k: make_dynamic(replace_none(v, getattr(self, k)))
-            for k, v in params.items()
-        }
+        new_params = {k: make_dynamic(replace_none(v, getattr(self, k))) for k, v in params.items()}
         if la == torch:
             new_params = torchify(new_params)
         return list(new_params.values())[0]
@@ -338,15 +341,11 @@ class AbstractDevice:
         return hessians
 
     def equality_matrices(self, equalities, power, angle, local_vars, **kwargs):
-        equalities = self.get_empty_constraint_matrix(
-            equalities, power, angle, local_vars
-        )
+        equalities = self.get_empty_constraint_matrix(equalities, power, angle, local_vars)
         return self._equality_matrices(equalities, **kwargs)
 
     def inequality_matrices(self, inequalities, power, angle, local_vars, **kwargs):
-        inequalities = self.get_empty_constraint_matrix(
-            inequalities, power, angle, local_vars
-        )
+        inequalities = self.get_empty_constraint_matrix(inequalities, power, angle, local_vars)
         return self._inequality_matrices(inequalities, **kwargs)
 
     def _get_empty_constraint_matrix(self, constr, power, angle, local_vars):
@@ -369,10 +368,7 @@ class AbstractDevice:
         )
 
     def get_empty_constraint_matrix(self, constraints, power, angle, local_vars):
-        return [
-            self._get_empty_constraint_matrix(c, power, angle, local_vars)
-            for c in constraints
-        ]
+        return [self._get_empty_constraint_matrix(c, power, angle, local_vars) for c in constraints]
 
     def operation_cost_gradients(self, power, angle, local_variables, **kwargs):
         power = torchify(power, requires_grad=True)
@@ -405,8 +401,7 @@ class AbstractDevice:
         # Constraint terms
         eqs = self.equality_constraints(power, angle, local_vars, **kwargs, la=la)
         eq_terms = [
-            la.sum(la.multiply(constraint, dual))
-            for constraint, dual in zip(eqs, equality_duals)
+            la.sum(la.multiply(constraint, dual)) for constraint, dual in zip(eqs, equality_duals)
         ]
 
         ineqs = self.inequality_constraints(power, angle, local_vars, **kwargs, la=la)
