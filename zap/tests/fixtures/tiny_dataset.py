@@ -80,6 +80,9 @@ TINY_STORAGE = [
 
 TINY_BUSES = ["z1", "z2", "z1_imports", "z1_exports"]
 
+#: ``(x, y)`` per bus, in the same order as :data:`TINY_BUSES`.
+TINY_BUS_COORDS = [(-121.5, 38.6), (-118.2, 34.1), (-119.8, 36.7), (-117.2, 33.0)]
+
 TINY_CARRIERS = {
     "CCGT": 0.181,
     "solar": 0.0,
@@ -91,6 +94,18 @@ TINY_CARRIERS = {
     "exports": 0.0,
     "battery": 0.0,
     "PHS": 0.0,
+}
+
+#: PyPSA-USA ships a ``color`` column on ``carriers.csv``; mirror it here so
+#: readers that expect it (``persist.build_system_static``) see the real shape.
+TINY_CARRIER_COLORS = {
+    "CCGT": "#b20101",
+    "solar": "#f9d002",
+    "onwind": "#235ebc",
+    "hydro": "#08ad97",
+    "battery": "#b8ea04",
+    "PHS": "#08ad97",
+    "AC": "#70af1d",
 }
 
 EXPORT_MARGINAL_COST = -178.0
@@ -157,6 +172,10 @@ def write_tiny_dataset(
             "name": TINY_BUSES,
             "v_nom": 230.0,
             "carrier": ["AC", "AC", "imports", "exports"],
+            # The real exports carry coordinates; `persist.write_system_static`
+            # copies them so a later map figure has somewhere to draw.
+            "x": [x for x, _ in TINY_BUS_COORDS],
+            "y": [y for _, y in TINY_BUS_COORDS],
         }
     ).set_index("name").to_csv(static / "buses.csv")
 
@@ -277,9 +296,17 @@ def write_tiny_dataset(
         ]
     ).set_index("name").to_csv(static / "stores.csv")
 
-    pd.DataFrame([{"name": k, "co2_emissions": v} for k, v in TINY_CARRIERS.items()]).set_index(
-        "name"
-    ).to_csv(static / "carriers.csv")
+    pd.DataFrame(
+        [
+            {
+                "name": k,
+                "co2_emissions": v,
+                "color": TINY_CARRIER_COLORS.get(k, ""),
+                "nice_name": k.replace("_", " ").title(),
+            }
+            for k, v in TINY_CARRIERS.items()
+        ]
+    ).set_index("name").to_csv(static / "carriers.csv")
 
     gen_cols = [g[0] for g in TINY_GENERATORS if g[8]]
     _timeseries_frame(gen_cols, generator_profile, years, n_hours).to_parquet(

@@ -150,6 +150,11 @@ class GradientMethod(base.PlanningMethod):
         trackers = list(tr.DEFAULT_TRACKERS)
         if opt["save_param_history"]:
             trackers.append(tr.PARAM)
+        # `DEFAULT_TRACKERS` carries the 1-norm of the gradient, which is not the
+        # quantity `GradientDescent.step` compares to `clip`; the batch is a local
+        # of `problem.solve` unless it is tracked.  Both are needed by the
+        # iteration tables (spec section 3.4).
+        trackers += [tr.BATCH, tr.GRAD_NORM_L2]
         return algorithm, trackers
 
     def _solve_kwargs(self) -> dict:

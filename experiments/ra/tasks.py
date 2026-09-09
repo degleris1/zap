@@ -256,6 +256,25 @@ def solve_plan(task: Task, cfg: dict, run_dir: Path) -> dict:
     result.run_id = run_id(cfg)
     design_path = result.write(run_dir)
 
+    iteration_paths: list[str] = []
+    if (cfg.get("output") or {}).get("save_iterations", True):
+        from .planning.history import write_iteration_tables
+
+        try:
+            iteration_paths = [
+                str(Path(p).relative_to(run_dir))
+                for p in write_iteration_tables(result, run_dir, cfg, task=task)
+            ]
+        except Exception as exc:  # never lose a design over a summary table
+            logger.warning("could not write the iteration tables: %s", exc, exc_info=True)
+
+    try:
+        from . import persist
+
+        persist.write_system_static(run_dir, loaded, cfg)
+    except Exception as exc:  # noqa: BLE001 - provenance is best-effort
+        logger.warning("could not write system_static.json: %s", exc)
+
     payload_metrics = metrics_mod.planning_metrics(result)
     payload_metrics["solve_wall_clock_s"] = solve_wall
     return {
@@ -264,13 +283,14 @@ def solve_plan(task: Task, cfg: dict, run_dir: Path) -> dict:
         "n_variables": result.solver.get("n_variables"),
         "n_constraints": result.solver.get("n_constraints"),
         "design_path": str(Path(design_path).relative_to(run_dir)),
+        "iteration_paths": iteration_paths,
         "system_meta": dict(getattr(loaded, "meta", {}) or {}),
     }
 
 
-def _solve_entry(task: Task, cfg: dict, design=None) -> dict:
+def _solve_entry(task: Task, cfg: dict, design=None, run_dir=None) -> dict:
     """Module-level entry point so the reference solve can run in a subprocess."""
-    return dispatch.solve_block(task, cfg, design=design)
+    return dispatch.solve_block(task, cfg, design=design, run_dir=run_dir)
 
 
 def _run_in_subprocess(fn, args: tuple, timeout_s: float, label: str) -> dict:
@@ -300,8 +320,10 @@ def _use_subprocess(task: Task, cfg: dict) -> bool:
     return True
 
 
-def _solve_with_timeout(task: Task, cfg: dict, timeout_s: float, design=None) -> dict:
-    return _run_in_subprocess(_solve_entry, (task, cfg, design), timeout_s, label=task.task_id)
+def _solve_with_timeout(task: Task, cfg: dict, timeout_s: float, design=None, run_dir=None) -> dict:
+    return _run_in_subprocess(
+        _solve_entry, (task, cfg, design, run_dir), timeout_s, label=task.task_id
+    )
 
 
 def run_task(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any]:
@@ -327,9 +349,9 @@ def run_task(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any
                 solve_plan, (task, cfg, run_dir), timeout_s, label=task.task_id
             )
         elif _use_subprocess(task, cfg):
-            payload = _solve_with_timeout(task, cfg, timeout_s, design)
+            payload = _solve_with_timeout(task, cfg, timeout_s, design, run_dir)
         else:
-            payload = dispatch.solve_block(task, cfg, design=design)
+            payload = dispatch.solve_block(task, cfg, design=design, run_dir=run_dir)
     except TimeoutError as exc:
         status = STATUS_TIMEOUT
         error = str(exc)
@@ -365,6 +387,12 @@ def run_task(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any
         "draw": task.draw,
         "design_id": task.design_id,
         "design_path": payload.get("design_path"),
+        # Per-task artefacts written by `persist` (relative to run_dir), so the
+        # ledger says exactly which files belong to this task.
+        "hourly_path": payload.get("hourly_path"),
+        "ens_profile_path": payload.get("ens_profile_path"),
+        "admm_trace_path": payload.get("admm_trace_path"),
+        "iteration_paths": payload.get("iteration_paths"),
         "metrics": metrics,
         "wall_clock_s": wall,
         "solver_status": payload.get("solver_status"),

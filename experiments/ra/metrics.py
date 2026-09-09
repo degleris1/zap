@@ -16,6 +16,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from . import persist
+
 logger = logging.getLogger(__name__)
 
 #: Metrics that are sums over hours, and can therefore be added across blocks.
@@ -158,14 +160,12 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
     # nominal_capacity, which is 1.0 for every Load built by the WP1 reader.
     ens = 0.0
     lost_load_hours = 0
-    for i in groups.get("Load", []):
-        device = devices[i]
-        demand = np.asarray(device.load, dtype=np.float64) * np.asarray(
-            device.nominal_capacity, dtype=np.float64
-        )
-        shortfall = demand + power[i][0]
-        ens += float(shortfall.sum())
-        lost_load_hours += int(np.count_nonzero(shortfall > SHORTFALL_TOL_MW))
+    # Factored into `persist.load_shortfall` so the ENS profile written for the
+    # R5 heat map and this scalar can never disagree about what "unserved" means.
+    shortfalls = persist.load_shortfall(devices, power, groups)
+    for entry in shortfalls:
+        ens += float(entry.shortfall.sum())
+        lost_load_hours += int(np.count_nonzero(entry.shortfall > SHORTFALL_TOL_MW))
     metrics["unserved_energy_mwh"] = ens
     metrics["lost_load_hours"] = lost_load_hours
 
@@ -186,6 +186,10 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
     curtailment = float("nan")
     curtailment_total = 0.0
     saw_vre = False
+    # Per-hour in-state available capacity (imports excluded), so `eval.parquet`
+    # has an exact minimum available capacity per design without hourly data.
+    available_by_hour = np.zeros(int(block.hours), dtype=np.float64)
+    saw_available = False
     for i in groups.get("Generator", []):
         device = devices[i]
         gen = _row_sum(power[i][0])
@@ -193,6 +197,19 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
         if carriers is not None:
             for carrier, value in zip(carriers, gen):
                 gen_by_carrier[str(carrier)] = gen_by_carrier.get(str(carrier), 0.0) + float(value)
+
+        gen_available = np.broadcast_to(
+            np.asarray(device.nominal_capacity, dtype=np.float64)
+            * np.asarray(device.dynamic_capacity, dtype=np.float64),
+            power[i][0].shape,
+        )
+        in_state = np.ones(gen.size, dtype=bool)
+        import_mask = getattr(index, "import_mask", None) if index is not None else None
+        if import_mask is not None and np.size(import_mask) == gen.size:
+            in_state = ~np.asarray(import_mask, dtype=bool)
+        if gen_available.shape[1] == available_by_hour.size:
+            available_by_hour += gen_available[in_state, :].sum(axis=0)
+            saw_available = True
 
         vre_mask = getattr(index, "vre_mask", None) if index is not None else None
         if vre_mask is not None and np.size(vre_mask) == gen.size:
@@ -205,6 +222,12 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
             saw_vre = True
     metrics["generation_mwh_by_carrier"] = json.dumps(gen_by_carrier, sort_keys=True)
     metrics["curtailment_mwh"] = curtailment_total if saw_vre else curtailment
+    metrics["available_mw_min"] = (
+        float(available_by_hour.min()) if saw_available else float("nan")
+    )
+    metrics["available_mwh_total"] = (
+        float(available_by_hour.sum()) if saw_available else float("nan")
+    )
 
     # --- Links: export revenue, imports, exports -----------------------------
     export_revenue = 0.0
@@ -321,7 +344,10 @@ _ENERGY_METRICS = (
     "curtailment_mwh",
     "imports_mwh",
     "exports_mwh",
+    "available_mwh_total",
 )
+#: Metrics denominated in power alone (MW), scaled by ``power_unit``.
+_POWER_METRICS = ("available_mw_min",)
 #: Emission rates are divided by `cost_unit` too (`AbstractInjector.scale_costs`
 #: scales them with costs so prices stay in $/MWh), so emissions carry both units.
 _EMISSION_METRICS = ("co2_tonnes",)
@@ -344,6 +370,9 @@ def _to_physical_units(metrics: dict[str, Any], meta: dict) -> dict[str, Any]:
         if key in metrics:
             metrics[key] *= cost_unit * power_unit
     for key in _ENERGY_METRICS:
+        if key in metrics:
+            metrics[key] *= power_unit
+    for key in _POWER_METRICS:
         if key in metrics:
             metrics[key] *= power_unit
     for key in _EMISSION_METRICS:
@@ -398,11 +427,22 @@ def records_to_frame(records: Iterable[dict]) -> pd.DataFrame:
     return frame
 
 
-def aggregate(run_dir: Path) -> pd.DataFrame:
-    """Read every task file into one row and write ``metrics.csv``."""
+def aggregate(run_dir: Path, cfg: dict | None = None) -> pd.DataFrame:
+    """Read every task file into one row and write ``metrics.csv``.
+
+    When ``cfg`` is given and ``output.combine_hourly`` is true, the per-task
+    parquet directories (``hourly/``, ``ens_profile/``, ``admm_trace/``) are
+    also concatenated into their sibling single files (D3).
+    """
     run_dir = Path(run_dir)
     frame = records_to_frame(read_task_records(run_dir))
     frame.to_csv(run_dir / "metrics.csv", index=False)
+    if cfg is not None:
+        try:
+            for path in persist.combine_outputs(run_dir, cfg):
+                logger.info("combined %s", path)
+        except Exception as exc:  # noqa: BLE001 - combination must not fail a run
+            logger.warning("could not combine per-task parquet files: %s", exc)
     return frame
 
 

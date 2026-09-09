@@ -40,6 +40,11 @@ VALID_EXPORT_MODE = ("sink", "drop")
 VALID_STORAGE_SOC_MODE = ("fixed", "cyclic_free")
 VALID_REFERENCE = ("window", "full_year", "none")
 
+#: ``output.save_hourly`` values (D2).  The literal ``device`` is rejected with
+#: a message pointing at the spec: per-device hourly data is written for lines
+#: only, everything else is aggregated to carrier x bus.
+VALID_SAVE_HOURLY = ("none", "carrier_bus")
+
 METHOD_NAMES = ("lp", "admm")
 
 #: Top-level run modes (D-W1).  ``dispatch`` is WP4's block dispatch of a design;
@@ -247,6 +252,7 @@ def normalize(cfg: dict) -> dict:
     sel["seed"] = int(sel["seed"])
 
     _normalize_planning(cfg["planning"])
+    _normalize_output(cfg["output"])
 
     for name in METHOD_NAMES:
         method = cfg["methods"][name]
@@ -256,6 +262,63 @@ def normalize(cfg: dict) -> dict:
         method["timeout_s"] = float(method["timeout_s"])
 
     return cfg
+
+
+def _normalize_output(out: dict) -> None:
+    """Coerce the ``output`` block in place (persistence flags; spec section 2)."""
+    if out.get("runs_root") is not None:
+        out["runs_root"] = str(out["runs_root"])
+    out["save_hourly"] = str(out["save_hourly"])
+    quantities = out["hourly_quantities"]
+    if isinstance(quantities, str):
+        out["hourly_quantities"] = str(quantities)
+    elif isinstance(quantities, (list, tuple)):
+        out["hourly_quantities"] = [str(q) for q in quantities]
+    for key in ("combine_hourly", "save_ens_profile", "save_iterations", "figures"):
+        out[key] = bool(out[key])
+    try:
+        out["admm_trace_every"] = int(out["admm_trace_every"])
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"output.admm_trace_every must be an integer, got {out['admm_trace_every']!r}"
+        ) from exc
+
+
+def _validate_output(cfg: dict) -> None:
+    """Validate the ``output`` block (spec section 2)."""
+    from .persist import HOURLY_QUANTITIES
+
+    out = cfg["output"]
+    if out["save_hourly"] == "device":
+        raise ConfigError(
+            "output.save_hourly 'device' is not implemented; hourly data is written at "
+            "carrier x bus resolution, with per-line flows written device-wise "
+            "(see memory/plans/2026-09-09-plots-spec.md D2)"
+        )
+    if out["save_hourly"] not in VALID_SAVE_HOURLY:
+        raise ConfigError(
+            f"output.save_hourly must be one of {VALID_SAVE_HOURLY}, got {out['save_hourly']!r}"
+        )
+    quantities = out["hourly_quantities"]
+    if isinstance(quantities, str):
+        if quantities != "all":
+            raise ConfigError(
+                "output.hourly_quantities must be \"all\" or a list drawn from "
+                f"{list(HOURLY_QUANTITIES)}, got {quantities!r}"
+            )
+    else:
+        unknown = [q for q in quantities if q not in HOURLY_QUANTITIES]
+        if unknown:
+            raise ConfigError(
+                f"unknown output.hourly_quantities {unknown}; the vocabulary is "
+                f"{list(HOURLY_QUANTITIES)}"
+            )
+        if not quantities:
+            raise ConfigError("output.hourly_quantities must not be an empty list")
+    if out["admm_trace_every"] < 0:
+        raise ConfigError(
+            f"output.admm_trace_every must be >= 0, got {out['admm_trace_every']}"
+        )
 
 
 def _normalize_planning(plan: dict) -> None:
@@ -501,6 +564,8 @@ def validate(cfg: dict) -> dict:
 
     if not plan_mode and not any(cfg["methods"][m]["enabled"] for m in METHOD_NAMES):
         raise ConfigError("no method is enabled")
+
+    _validate_output(cfg)
 
     shard = cfg["execution"]["shard"]
     if shard is not None:

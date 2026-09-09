@@ -234,6 +234,10 @@ class AbstractPlanningProblem:
         self.iteration = 0
 
         print(batch) if verbosity >= 2 else None
+        # Stamp the minibatch on the problem so `trackers.track_batch` can record
+        # which subproblems this iteration's gradient actually saw; `batch` is
+        # otherwise a local variable and the trajectory is unattributable.
+        self.batch = list(batch)
         J, grad = self.forward_and_back(**state, batch=batch)
         if self.la == torch:
             torch.cuda.empty_cache()
@@ -288,6 +292,7 @@ class AbstractPlanningProblem:
 
             print(batch) if verbosity >= 2 else None
 
+            self.batch = list(batch)
             J, grad = self.forward_and_back(**state, batch=batch)
 
             # Record stuff

@@ -113,4 +113,7 @@ def env_info(cfg: dict | None = None) -> dict:
     if cfg is not None:
         info["run_id"] = run_id(cfg)
         info["config_hash"] = config_hash(cfg)
+        # `output` is excluded from the hash, so `config.resolved.yaml` stores it
+        # at its defaults; the *effective* persistence flags are recorded here.
+        info["output"] = dict(cfg.get("output") or {})
     return info

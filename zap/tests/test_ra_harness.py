@@ -440,9 +440,9 @@ class TestPipeline(TempRunMixin):
         calls = {"n": 0}
         real = dispatch.solve_block
 
-        def counting(task, cfg_, design=None):
+        def counting(task, cfg_, design=None, **kwargs):
             calls["n"] += 1
-            return real(task, cfg_, design=design)
+            return real(task, cfg_, design=design, **kwargs)
 
         dispatch.solve_block = counting
         try:
@@ -471,9 +471,9 @@ class TestPipeline(TempRunMixin):
         calls = {"n": 0}
         real = dispatch.solve_block
 
-        def counting(task, cfg_, design=None):
+        def counting(task, cfg_, design=None, **kwargs):
             calls["n"] += 1
-            return real(task, cfg_, design=design)
+            return real(task, cfg_, design=design, **kwargs)
 
         dispatch.solve_block = counting
         try:
@@ -494,10 +494,10 @@ class TestPipeline(TempRunMixin):
         cfg = config.load_config(path)
         real = dispatch.solve_block
 
-        def flaky(task, cfg_, design=None):
+        def flaky(task, cfg_, design=None, **kwargs):
             if task.method == "admm":
                 raise RuntimeError("ADMM diverged")
-            return real(task, cfg_, design=design)
+            return real(task, cfg_, design=design, **kwargs)
 
         dispatch.solve_block = flaky
         try:
@@ -518,7 +518,7 @@ class TestPipeline(TempRunMixin):
         path = tiny_config(self.tmp, name="lpfail", window=(0, 24), reference="none")
         real = dispatch.solve_block
 
-        def raiser(task, cfg_, design=None):
+        def raiser(task, cfg_, design=None, **kwargs):
             raise RuntimeError("LP exploded")
 
         dispatch.solve_block = raiser
@@ -1194,8 +1194,8 @@ class TestADMMDispatchRecord(TempRunMixin):
 
         real = dispatch.solve_block
 
-        def infeasible(task, cfg, design=None):
-            payload = real(task, cfg, design=design)
+        def infeasible(task, cfg, design=None, **kwargs):
+            payload = real(task, cfg, design=design, **kwargs)
             payload["status"] = "infeasible"
             payload["error"] = "ADMM iterate violates nodal power balance by 113 MW"
             return payload

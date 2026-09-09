@@ -16,10 +16,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from . import persist
 from . import system as system_mod
 from .blocks import prorate_energy_budgets, window_bounds
 from .metrics import block_metrics, numpyify
@@ -109,8 +111,12 @@ def check_block_horizon(devices, hours: int) -> None:
         )
 
 
-def solve_block(task, cfg: dict, design=None) -> dict[str, Any]:
-    """Solve one task's block with its method. Raises on solver failure."""
+def solve_block(task, cfg: dict, design=None, run_dir=None) -> dict[str, Any]:
+    """Solve one task's block with its method. Raises on solver failure.
+
+    ``run_dir`` is optional: without it nothing is persisted beyond the metrics
+    payload, which keeps ``solve_block`` usable as a pure function in tests.
+    """
     if is_stub(cfg, task.method):
         return solve_block_stub(task, cfg)
 
@@ -118,13 +124,38 @@ def solve_block(task, cfg: dict, design=None) -> dict[str, Any]:
     devices = slice_devices(loaded, cfg, task.block, design=design)
 
     if task.method == "lp":
-        return solve_block_lp(loaded, devices, task, cfg)
+        return solve_block_lp(loaded, devices, task, cfg, run_dir=run_dir)
     if task.method == "admm":
-        return solve_block_admm(loaded, devices, task, cfg)
+        return solve_block_admm(loaded, devices, task, cfg, run_dir=run_dir)
     raise ValueError(f"unknown method {task.method!r}")
 
 
-def solve_block_lp(loaded, devices, task, cfg: dict) -> dict[str, Any]:
+def _persist_block(run_dir, task, cfg, loaded, devices, outcome, block, payload) -> None:
+    """Write the per-block artefacts of a solved block (WP-P1).
+
+    Persistence is never allowed to fail a solve: a broken writer would throw
+    away a solution that is already computed.
+    """
+    if run_dir is None:
+        return
+    for key, fn in (
+        ("hourly_path", persist.write_hourly),
+        ("ens_profile_path", persist.write_ens_profile),
+    ):
+        try:
+            path = fn(run_dir, task, cfg, loaded, devices, outcome, block)
+        except Exception as exc:  # see the docstring: persistence never fails a solve
+            logger.warning("could not write %s for %s: %s", key, task.task_id, exc, exc_info=True)
+            continue
+        if path is not None:
+            payload[key] = str(Path(path).relative_to(Path(run_dir)))
+    try:
+        persist.write_system_static(run_dir, loaded, cfg)
+    except Exception as exc:  # noqa: BLE001 - provenance is best-effort
+        logger.warning("could not write system_static.json: %s", exc)
+
+
+def solve_block_lp(loaded, devices, task, cfg: dict, run_dir=None) -> dict[str, Any]:
     method_cfg = cfg["methods"]["lp"]
     solver = str(method_cfg["solver"]).upper()
     solver_kwargs = dict(method_cfg.get("solver_kwargs") or {})
@@ -151,7 +182,7 @@ def solve_block_lp(loaded, devices, task, cfg: dict) -> dict[str, Any]:
     metrics["n_variables"] = n_variables
     metrics["n_constraints"] = n_constraints
 
-    return {
+    payload = {
         "metrics": metrics,
         "solver_status": metrics["solver_status"],
         "n_variables": n_variables,
@@ -161,6 +192,8 @@ def solve_block_lp(loaded, devices, task, cfg: dict) -> dict[str, Any]:
         "admm_dual_residual": None,
         "system_meta": dict(getattr(loaded, "meta", {}) or {}),
     }
+    _persist_block(run_dir, task, cfg, loaded, devices, outcome, task.block, payload)
+    return payload
 
 
 #: Default gate on the ADMM iterate's worst nodal power-balance violation. An
@@ -217,7 +250,7 @@ def _gate_value(method_cfg: dict, key: str, default: float) -> float:
     return float(default if value is None else value)
 
 
-def solve_block_admm(loaded, devices, task, cfg: dict) -> dict[str, Any]:
+def solve_block_admm(loaded, devices, task, cfg: dict, run_dir=None) -> dict[str, Any]:
     import torch
 
     from zap.admm import ADMMSolver
@@ -286,6 +319,15 @@ def solve_block_admm(loaded, devices, task, cfg: dict) -> dict[str, Any]:
         "admm_dual_residual": dual,
         "system_meta": dict(getattr(loaded, "meta", {}) or {}),
     }
+
+    _persist_block(run_dir, task, cfg, loaded, devices, outcome, task.block, payload)
+    try:
+        trace = persist.write_admm_trace(run_dir, task, cfg, loaded, task.block, history, solver)
+    except Exception as exc:  # noqa: BLE001 - persistence must not fail a solve
+        logger.warning("could not write the ADMM trace for %s: %s", task.task_id, exc)
+        trace = None
+    if trace is not None:
+        payload["admm_trace_path"] = str(Path(trace).relative_to(Path(run_dir)))
 
     # The ADMM iterate's cost is the cost of a *dispatch heuristic*: it neither
     # upper- nor lower-bounds the LP. If the iterate is not even a dispatch --

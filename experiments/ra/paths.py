@@ -60,6 +60,18 @@ def runs_root() -> Path:
     return ZAP_ROOT / "experiments" / "runs"
 
 
+def figures_root() -> Path:
+    """Directory holding the report figures of the brain repo.
+
+    Override with the ``CH3_FIGURES_DIR`` environment variable; the default
+    matches the existing ``figures/phase1/`` convention.
+    """
+    env = os.environ.get("CH3_FIGURES_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return BRAIN_ROOT / "figures"
+
+
 def run_dir(run_id: str, root: str | Path | None = None) -> Path:
     """Directory for a single run."""
     base = Path(root).expanduser() if root is not None else runs_root()

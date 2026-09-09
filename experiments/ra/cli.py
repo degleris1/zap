@@ -87,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--run-id", required=True)
     show.add_argument("--runs-root", default=None)
 
+    plot = sub.add_parser("plot", help="render figures from one or more runs")
+    from .plots.cli import add_arguments as add_plot_arguments
+
+    add_plot_arguments(plot)
+
     design = sub.add_parser("design", help="print a summary of a run's design(s)")
     design.add_argument("--run-id", required=True)
     design.add_argument("--design-id", default=None, help="one design; default: all of them")
@@ -255,9 +260,11 @@ def cmd_run(args) -> int:
         )
 
     if cfg["execution"]["shard"] is None:
-        frame = metrics_mod.aggregate(run_dir)
+        frame = metrics_mod.aggregate(run_dir, cfg)
         runcard.write_card(run_dir, cfg, frame)
         logger.info("wrote %s and %s", run_dir / "metrics.csv", run_dir / "CARD.md")
+        write_eval_tables(run_dir, frame, cfg)
+        write_debug_figures(run_dir, cfg)
     else:
         logger.info("shard finished; run `aggregate` once every shard is done")
 
@@ -286,11 +293,48 @@ def cmd_aggregate(args) -> int:
         cfg = resolve_config(args)
         run_dir = run_directory(cfg)
 
-    frame = metrics_mod.aggregate(run_dir)
+    frame = metrics_mod.aggregate(run_dir, cfg)
     card = runcard.write_card(run_dir, cfg, frame)
     print(f"{len(frame)} task rows -> {run_dir / 'metrics.csv'}")
     print(f"card -> {card}")
+    write_eval_tables(run_dir, frame, cfg)
+    write_debug_figures(run_dir, cfg)
     return 0
+
+
+def write_eval_tables(run_dir: Path, frame, cfg: dict | None = None) -> None:
+    """Rebuild ``eval.parquet`` at aggregate time for an evaluation run.
+
+    A sharded campaign never calls ``evaluate.evaluate_designs`` in one process,
+    so the only place the whole ledger is visible is ``ra aggregate``.  Skipped
+    for a benchmark run (nothing but ``asbuilt``), and never fatal.
+    """
+    from . import evaluate as evaluate_mod
+
+    if not evaluate_mod.is_evaluation_run(frame, cfg):
+        return
+    try:
+        eval_path, _profile = evaluate_mod.write_eval_tables(run_dir)
+        logger.info("wrote %s", eval_path)
+    except Exception as exc:  # a summary table must never fail an aggregate
+        logger.warning("could not write the evaluation tables: %s", exc, exc_info=True)
+
+
+def write_debug_figures(run_dir: Path, cfg: dict) -> None:
+    """The ``output.figures`` hook: debug figures into ``<run_dir>/figures/``.
+
+    Never fatal -- a missing matplotlib backend or a plot that has no data must
+    not fail a run whose numbers are already on disk.
+    """
+    if not (cfg.get("output") or {}).get("figures", False):
+        return
+    try:
+        from .plots.cli import debug_figures
+
+        written = debug_figures(run_dir, cfg)
+        logger.info("wrote %d debug figure(s) to %s", len(written), run_dir / "figures")
+    except Exception as exc:  # see the docstring: this is never fatal
+        logger.warning("could not write the debug figures: %s", exc, exc_info=True)
 
 
 def cmd_show(args) -> int:
@@ -308,6 +352,12 @@ def cmd_show(args) -> int:
         print("Task status counts:")
         print(frame["status"].value_counts().to_string())
     return 0
+
+
+def cmd_plot(args) -> int:
+    from .plots.cli import cmd_plot as _cmd_plot
+
+    return _cmd_plot(args)
 
 
 def cmd_design(args) -> int:
@@ -365,6 +415,7 @@ def main(argv=None) -> int:
         "aggregate": cmd_aggregate,
         "show": cmd_show,
         "design": cmd_design,
+        "plot": cmd_plot,
     }
     return handlers[args.command](args)
 

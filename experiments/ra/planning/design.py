@@ -62,16 +62,23 @@ def serialize_history(history: dict) -> dict:
             return float(x.item()) if x.size == 1 else x.tolist()
         return x
 
+    def _snapshot(x):
+        # `param` snapshots are dicts of arrays; `batch` snapshots are plain
+        # lists of subproblem indices.  Both are per-iteration collections, not
+        # scalars, so neither can go through `_scalar`.
+        if isinstance(x, dict):
+            return {
+                pname: pval.tolist() if hasattr(pval, "tolist") else pval
+                for pname, pval in x.items()
+            }
+        if hasattr(x, "tolist"):
+            return x.tolist()
+        return list(x)
+
     serialized: dict = {}
     for key, values in history.items():
-        if key == "param":
-            serialized[key] = [
-                {
-                    pname: pval.tolist() if hasattr(pval, "tolist") else pval
-                    for pname, pval in snapshot.items()
-                }
-                for snapshot in values
-            ]
+        if key in ("param", "batch"):
+            serialized[key] = [_snapshot(snapshot) for snapshot in values]
         else:
             serialized[key] = [_scalar(x) for x in values]
     return serialized

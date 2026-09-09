@@ -519,6 +519,9 @@ class PlanningMethod(abc.ABC):
         n_years = max(1, len(meta.get("years", [])) or 1)
         meta["year_factor"] = 8760.0 * n_years / float(sampler.total_hours)
         meta["carrier_labels"] = labels
+        # The optimizer settings the iteration tables report (step_size / clip),
+        # so `planning/history.py` never has to re-read the config.
+        meta["optimizer"] = dict(self.options["optimizer"])
         # The as-built capacities, per parameter, in MW.  ``metrics.py`` needs
         # them to report ``capacity_added_mw``, and they only reach it through
         # ``PlanningResult.meta`` (which ``from_context`` copies out of here).
