@@ -43,10 +43,25 @@ CARRIER_COLORS: dict[str, str] = {
     "onwind": "#235ebc",
     "solar": "#f9d002",
     # --- storage ---
+    # The three battery rows are a *duration ramp*, not three shades of one
+    # green: upstream ships #b8ea04 / #a4d600 / #90c200, which differ by an
+    # OKLab dE of 6 and are indistinguishable where they matter most (O6 draws
+    # the 4 h battery and the generic battery as its two dominant series).
+    # #b8ea04 (upstream, generic battery) is kept as the light end and the two
+    # duration rows are re-stepped down in lightness; every pair of the three
+    # now clears the data-viz gates (normal-vision OKLab dE >= 15, protan /
+    # deutan dE >= 8) -- measured 24.3 / 23.3 (battery-4hr), 49.5 / 48.8
+    # (battery-8hr), 25.4 / 25.3 (4hr-8hr) with the bundled `dataviz`
+    # validate_palette.py (tested in test_ra_plots.py).  What no re-step
+    # fixes here is the red/green
+    # collapse the *rest* of this map already has under simulated protanopia
+    # (battery vs solar dE 0.6, the CCGT reds vs any green ~3-6): that is a
+    # property of the upstream PyPSA-USA palette, unchanged by this entry, and
+    # a CVD-safe rebuild of all 30 carriers is a separate decision.
     "PHS": "#08ad97",
     "battery": "#b8ea04",
-    "4hr_battery_storage": "#a4d600",
-    "8hr_battery_storage": "#90c200",
+    "4hr_battery_storage": "#5aa02c",
+    "8hr_battery_storage": "#185430",
     "demand_response": "#dd2e23",
     # --- trade and network (no colour upstream; assigned here) ---
     "imports": "#9a7fbd",
@@ -98,6 +113,46 @@ DATASET_CARRIERS: tuple[str, ...] = (
     "storage_discharge",
 )
 
+#: **The** stacking order for every stacked-by-carrier plot, bottom to top above
+#: the x axis: baseload, then variable renewables, then batteries / storage
+#: discharge, then thermal, with trade last.  One list, used by every stacked
+#: plot *and* its legend, so the order cannot drift between figures (Kamran,
+#: 2026-09-09).  Storage *charging* and exports are drawn below the axis and are
+#: not part of this order.  A carrier not listed here is stacked on top, in
+#: alphabetical order, and warns -- see :func:`stack_order`.
+#:
+#: ``demand_response`` is the one addition to the order as dictated: it is a
+#: storage-class carrier in :data:`CARRIER_COLORS`, and leaving it out would put
+#: it above the thermal block with a warning on every dispatch figure that has it.
+CARRIER_STACK_ORDER: tuple[str, ...] = (
+    # --- baseload ---
+    "nuclear",
+    "coal",
+    "geothermal",
+    "biomass",
+    "waste",
+    "hydro",
+    "PHS",
+    # --- variable renewables ---
+    "solar",
+    "onwind",
+    "offwind_floating",
+    # --- batteries / storage discharge ---
+    "battery",
+    "4hr_battery_storage",
+    "8hr_battery_storage",
+    "demand_response",
+    # --- thermal ---
+    "CCGT",
+    "CCGT-95CCS",
+    "OCGT",
+    "hydrogen_ct",
+    "oil",
+    # --- trade ---
+    "imports",
+    "unspecified_imports",
+)
+
 #: Carriers whose available capacity is weather-driven (O2's VRE series).  Kept
 #: in sync with ``zap.importers.wy_store.VRE_CARRIERS``.
 VRE_CARRIERS = frozenset({"solar", "onwind", "offwind_floating"})
@@ -109,6 +164,20 @@ RUN_STYLES = ("-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 2)))
 RUN_MARKERS = ("o", "s", "^", "D", "v", "P")
 
 GRID_KWARGS = {"color": "0.85", "linewidth": 0.6}
+
+#: Fixed hue order for the plots whose series are *quantities*, not runs (O2's
+#: load / VRE / net load).  These three are never interchangeable, so they get
+#: names rather than a palette position, and each one keeps its colour while the
+#: run stays the linestyle -- one encoding per dimension, and no series that is
+#: told apart only by a dash pattern at 8,736 points.
+SERIES_COLORS = {
+    "load": "#111111",
+    "vre_available": "#1f5f8b",
+    "net_load": "#d2691e",
+}
+
+#: Inches of head room reserved above the axes for a figure-level title.
+SUPTITLE_INCHES = 0.45
 
 #: ``kind -> (label, factor from the MW / $ / tonne base)``.  Every value column
 #: of every CSV carries its unit as a suffix and holds the value **as plotted**.
@@ -140,6 +209,29 @@ def carrier_color(name: str) -> str:
     g = 105 + digest[1] % 70
     b = 130 + digest[2] % 70
     return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def stack_order(carriers) -> list[str]:
+    """``carriers`` in :data:`CARRIER_STACK_ORDER`, unknown ones on top, sorted.
+
+    Every stacked plot orders both its bands and its legend with this, so two
+    figures of the same system always stack in the same order.  An unknown
+    carrier is not dropped -- it goes on top and warns once, so a new carrier
+    shows up in the figure *and* in the log rather than silently reordering it.
+    """
+    present = {str(c) for c in carriers}
+    known = [c for c in CARRIER_STACK_ORDER if c in present]
+    unknown = sorted(present.difference(CARRIER_STACK_ORDER))
+    for name in unknown:
+        key = f"stack:{name}"
+        if key not in _WARNED:
+            _WARNED.add(key)
+            logger.warning(
+                "carrier %r is not in plots.style.CARRIER_STACK_ORDER; stacking it on "
+                "top (add it to the list to pin its position)",
+                name,
+            )
+    return known + unknown
 
 
 def run_style(position: int) -> dict:
@@ -177,13 +269,40 @@ def apply_rc() -> None:
     )
 
 
-def save(fig, table: pd.DataFrame, plot_id: str, out_dir, stem: str) -> tuple[Path, Path]:
-    """Write ``<plot_id>_<stem>.png`` and ``.csv`` into ``out_dir``."""
+def finish(fig, suptitle: str | None = None, *, reserve_inches: float = SUPTITLE_INCHES):
+    """``tight_layout``, reserving head room for ``suptitle`` on tall figures.
+
+    ``tight_layout`` knows nothing about ``suptitle``, and a faceted figure's
+    height grows with the facet count, so the default ``y=0.98`` lands *inside*
+    the first facet's title as soon as there are six or more facets.  Reserving
+    a fixed number of *inches* -- a figure fraction that shrinks as the figure
+    grows -- keeps the gap the same on a 1-facet and a 9-facet figure.
+    """
+    if suptitle:
+        height = float(fig.get_figheight()) or 1.0
+        reserve = min(0.30, float(reserve_inches) / height)
+        fig.suptitle(suptitle, y=1.0 - 0.30 * reserve)
+        fig.tight_layout(rect=(0.0, 0.0, 1.0, 1.0 - reserve))
+    else:
+        fig.tight_layout()
+    return fig
+
+
+def save(
+    fig, table: pd.DataFrame, plot_id: str, out_dir, stem: str, data_dir=None
+) -> tuple[Path, Path]:
+    """Write ``<plot_id>_<stem>.png`` into ``out_dir`` and the ``.csv`` beside it.
+
+    ``data_dir`` sends the table somewhere else (``figures/raw_data/<study>/``),
+    for a figures directory that holds images only.  The two names always match.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    table_dir = out_dir if data_dir is None else Path(data_dir)
+    table_dir.mkdir(parents=True, exist_ok=True)
     name = f"{plot_id}_{slugify(stem)}"
     png = out_dir / f"{name}.png"
-    csv = out_dir / f"{name}.csv"
+    csv = table_dir / f"{name}.csv"
     fig.savefig(png, dpi=150, bbox_inches="tight")
     table.to_csv(csv, index=False)
     plt.close(fig)

@@ -160,12 +160,27 @@ def plot(plot_id: str, runs: Sequence[RunHandle], **opts):
     return fig, table
 
 
-def render(plot_id: str, runs: Sequence[RunHandle], out_dir, *, stem: str | None = None, **opts):
-    """:func:`plot` plus the PNG / CSV pair on disk."""
+def render(
+    plot_id: str,
+    runs: Sequence[RunHandle],
+    out_dir,
+    *,
+    stem: str | None = None,
+    data_dir=None,
+    **opts,
+):
+    """:func:`plot` plus the PNG / CSV pair on disk.
+
+    ``data_dir`` writes the CSV somewhere other than next to the PNG (``ra plot
+    --data-out``); the two file names are the same either way.
+    """
     fig, table = plot(plot_id, runs, **opts)
     if stem is None:
         stem = "-".join(run.label for run in runs) or "run"
-    return style.save(fig, table, plot_id, Path(out_dir), stem)
+    return style.save(
+        fig, table, plot_id, Path(out_dir), stem,
+        data_dir=None if data_dir is None else Path(data_dir),
+    )
 
 
 def catalogue() -> pd.DataFrame:

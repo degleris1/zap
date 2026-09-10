@@ -6,6 +6,8 @@ comparison plots have two inputs), one ADMM run with a convergence trace, and
 one gradient planning run that supplies the designs P1 / P2 / P6 read.
 """
 
+import itertools
+import math
 import shutil
 import sys
 import tempfile
@@ -428,6 +430,307 @@ class TestPhaseAPlots(PlotFixture):
         self.assertIn("output.save_hourly", message)
 
 
+# --- palette maths, so the separation test does not depend on the bundled skill --
+# OKLab (Ottosson 2020) + the Machado, Oliveira & Fernandes (2009) CVD transforms
+# at severity 1.0, i.e. the same computation the `dataviz` skill's
+# validate_palette.py does; the thresholds below are that skill's gates.
+MACHADO = {
+    "protan": ((0.152286, 1.052583, -0.204868),
+               (0.114503, 0.786281, 0.099216),
+               (-0.003882, -0.048116, 1.051998)),
+    "deutan": ((0.367322, 0.860646, -0.227968),
+               (0.280085, 0.672501, 0.047413),
+               (-0.011820, 0.042940, 0.968881)),
+}
+NORMAL_FLOOR = 15.0  # OKLab dE x100, unsimulated vision
+CVD_FLOOR = 8.0      # OKLab dE x100, min(protan, deutan)
+
+
+def _to_linear(hex_color):
+    raw = str(hex_color).lstrip("#")
+    out = []
+    for i in (0, 2, 4):
+        c = int(raw[i:i + 2], 16) / 255
+        out.append(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4)
+    return tuple(out)
+
+
+def _oklab(rgb):
+    r, g, b = rgb
+    l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+    m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+    s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+    l, m, s = l ** (1 / 3), m ** (1 / 3), s ** (1 / 3)
+    return (
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+
+
+def _simulate(rgb, kind):
+    matrix = MACHADO[kind]
+    return tuple(
+        min(1.0, max(0.0, sum(matrix[row][col] * rgb[col] for col in range(3))))
+        for row in range(3)
+    )
+
+
+def delta_e(first, second, kind=None):
+    """OKLab distance x100 between two hex colours, optionally CVD-simulated."""
+    a, b = _to_linear(first), _to_linear(second)
+    if kind is not None:
+        a, b = _simulate(a, kind), _simulate(b, kind)
+    return 100 * math.dist(_oklab(a), _oklab(b))
+
+
+class TestFigureDefects(PlotFixture):
+    """The nine figure-quality defects found by reading every phase-1 PNG."""
+
+    def _titles(self, fig):
+        return [ax.get_title() for ax in fig.axes if ax.get_title()]
+
+    def test_o1_and_o7_keep_one_series_per_run(self):
+        """Defect 1/3: available capacity and line loading do not depend on the solve.
+
+        ``run_a`` solves 24 h blocks *and* a reference window, so before the fix
+        O1 drew the same panel twice and O7 listed every line twice.
+        """
+        runs = self.handles(self.run_a)
+        solves = runs[0].hourly(quantities=["available_capacity_mw"])
+        self.assertGreater(len(set(zip(solves["method"], solves["block_size"]))), 1)
+
+        for plot_id in ("O1", "O7"):
+            with self.subTest(plot=plot_id):
+                fig, table = plots_mod.plot(plot_id, runs)
+                per_run = table.groupby("run_id")[["method", "block_size"]].nunique()
+                self.assertTrue((per_run == 1).all().all(), f"{plot_id}: {per_run}")
+                if plot_id == "O1":
+                    self.assertEqual(len(fig.axes), len(runs))
+                plt.close(fig)
+
+        fig, table = plots_mod.plot("O1", self.handles(self.run_a, self.run_b))
+        self.assertEqual(len(fig.axes), 2)
+        self.assertEqual(len(table.drop_duplicates(["run_id", "method", "block_size"])), 2)
+        plt.close(fig)
+
+    def test_o10_has_no_twin_axes(self):
+        """Defect 5: the objective gets its own panel, never a second y axis."""
+        runs = self.handles(self.run_admm)
+        fig, table = plots_mod.plot("O10", runs)
+        blocks = table.drop_duplicates(["run_id", "block_size", "block_index"])
+        self.assertEqual(len(fig.axes), 2 * len(blocks))
+        # A twinx axes sits exactly on top of its parent; distinct panels do not.
+        boxes = [tuple(round(v, 6) for v in ax.get_position().bounds) for ax in fig.axes]
+        self.assertEqual(len(set(boxes)), len(boxes), boxes)
+        for ax in fig.axes:
+            self.assertEqual(len(ax.get_shared_x_axes().get_siblings(ax)), 2)
+        objective = [ax for ax in fig.axes if "objective" in ax.get_ylabel()]
+        self.assertEqual(len(objective), len(blocks))
+        for ax in objective:
+            self.assertEqual(ax.get_yscale(), "linear")
+        plt.close(fig)
+
+    def test_block_size_suffix_only_for_numeric_sizes(self):
+        """Defect 7: a reference solve is not "reference h blocks"."""
+        from experiments.ra.plots import operational
+
+        self.assertEqual(operational._block_label(24), "24 h blocks")
+        self.assertEqual(operational._block_label("168"), "168 h blocks")
+        self.assertEqual(operational._block_label("reference"), "reference")
+        self.assertEqual(operational._block_label("none"), "none")
+        self.assertEqual(
+            operational._facet_title("run_a", "lp", "reference"), "run_a - lp / reference"
+        )
+
+        for plot_id in ("O1", "O4", "O6"):
+            with self.subTest(plot=plot_id):
+                fig, _table = plots_mod.plot(
+                    plot_id, self.handles(self.run_a), block_size="reference"
+                )
+                titles = self._titles(fig)
+                self.assertTrue(titles, plot_id)
+                for title in titles:
+                    self.assertNotIn("reference h blocks", title)
+                self.assertTrue(any("reference" in t for t in titles), titles)
+                plt.close(fig)
+
+    def test_battery_greens_are_distinguishable(self):
+        """Defect 10: the three battery rows are a ramp, not three shades of one green."""
+        family = [
+            style_mod.CARRIER_COLORS[name]
+            for name in ("battery", "4hr_battery_storage", "8hr_battery_storage")
+        ]
+        self.assertEqual(len(set(family)), 3, family)
+        for first, second in itertools.combinations(family, 2):
+            with self.subTest(pair=(first, second)):
+                self.assertGreaterEqual(delta_e(first, second), NORMAL_FLOOR)
+                for kind in MACHADO:
+                    self.assertGreaterEqual(delta_e(first, second, kind), CVD_FLOOR)
+        # The pre-fix values, kept as the regression this test exists for.
+        self.assertLess(delta_e("#a4d600", "#b8ea04"), NORMAL_FLOOR)
+
+    def test_o11_x_axis_is_logarithmic(self):
+        """Defect 8: 24 h, 168 h and a full year are three decades apart."""
+        fig, table = plots_mod.plot("O11", self.handles(self.run_a, self.run_b))
+        self.assertGreater(table["hours_per_block"].max() / table["hours_per_block"].min(), 1)
+        for ax in fig.axes:
+            self.assertEqual(ax.get_xscale(), "log")
+        plt.close(fig)
+
+    def test_o2_switches_to_weekly_means_over_long_spans(self):
+        """Defect 9: 8,736 hourly points in a 5-inch panel are not a figure."""
+        from experiments.ra.plots import operational
+
+        fig, table = plots_mod.plot("O2", self.handles(self.run_a))
+        span = int(table["hour"].max() - table["hour"].min()) + 1
+        self.assertLessEqual(span, operational.HOURLY_PANEL_HOURS)
+        time_panel = fig.axes[0]
+        self.assertIn("hourly", time_panel.get_title())
+        # Colour is the quantity, so the three series are not one colour + dashes.
+        colors = {line.get_color() for line in time_panel.get_lines()}
+        self.assertEqual(colors, set(style_mod.SERIES_COLORS.values()))
+        plt.close(fig)
+
+        # A span longer than four weeks: 700 synthetic hours from hour 7 (the
+        # shipped window start), so the bins are aligned to the window, not to
+        # hour 0 of the year, and the 28-hour tail bin is dropped rather than
+        # drawn as a mean over 28 hours.
+        long_frame = pd.DataFrame({
+            "hour": range(7, 707),
+            "load_gw": [30.0 + (h % 24) for h in range(7, 707)],
+        })
+        self.assertGreater(
+            operational._span_hours(long_frame), operational.HOURLY_PANEL_HOURS
+        )
+        weekly = operational._weekly_mean(long_frame, ["load_gw"])
+        self.assertEqual(len(weekly), 4)
+        self.assertEqual(list(weekly["hour"]), [7, 175, 343, 511])
+        self.assertAlmostEqual(
+            float(weekly["load_gw"].iloc[0]),
+            float(long_frame["load_gw"].iloc[:168].mean()),
+        )
+
+    def test_suptitle_clears_the_first_facet_on_a_tall_figure(self):
+        """Defect 6: reserve head room as a function of the facet count."""
+        import matplotlib.pyplot as mpl
+
+        for n in (1, 3, 9):
+            with self.subTest(facets=n):
+                fig, axes = mpl.subplots(n, 1, figsize=(9.5, 3.0 * n), squeeze=False)
+                for ax in axes[:, 0]:
+                    ax.set_title("facet")
+                style_mod.finish(fig, "a figure-level title")
+                fig.canvas.draw()
+                renderer = fig.canvas.get_renderer()
+                title = fig._suptitle.get_window_extent(renderer)
+                top = axes[0, 0].title.get_window_extent(renderer)
+                self.assertGreater(title.y0, top.y1, f"{n} facets: suptitle overlaps")
+                mpl.close(fig)
+
+
+class TestStackedPlots(PlotFixture):
+    """The two standing rules for stacked-by-carrier plots (Kamran, 2026-09-09)."""
+
+    def _year_table(self, plot_id):
+        """A synthetic year-long table with the schema the plot's figure reads."""
+        hours = list(range(7, 7 + 8736))
+        carriers = ["solar", "CCGT", "nuclear", "battery"]
+        rows = []
+        for hour in hours:
+            profile = 1.0 + (hour % 24) / 24.0
+            for carrier in carriers:
+                rows.append({
+                    "run_id": "run", "label": "run", "method": "lp", "block_size": "24",
+                    "year": 2020, "hour": hour, "carrier": carrier,
+                    "value": profile * (1.0 + carriers.index(carrier)),
+                })
+        frame = pd.DataFrame(rows)
+        if plot_id == "O1":
+            return frame.rename(columns={"value": "available_gw"})
+        frame = frame.rename(columns={"value": "value_gw"})
+        frame["series"] = "generation"
+        load = frame[frame["carrier"] == "solar"].assign(
+            series="load", carrier="load", value_gw=10.0
+        )
+        charge = frame[frame["carrier"] == "solar"].assign(
+            series="storage_charge", carrier="battery", value_gw=1.0
+        )
+        return pd.concat([frame, load, charge], ignore_index=True)
+
+    def test_stack_order_is_pinned_and_warns_on_unknown_carriers(self):
+        order = style_mod.CARRIER_STACK_ORDER
+        self.assertEqual(len(set(order)), len(order))
+        # baseload < renewables < batteries < thermal < trade
+        self.assertLess(order.index("nuclear"), order.index("solar"))
+        self.assertLess(order.index("PHS"), order.index("solar"))
+        self.assertLess(order.index("offwind_floating"), order.index("battery"))
+        self.assertLess(order.index("8hr_battery_storage"), order.index("CCGT"))
+        self.assertLess(order.index("oil"), order.index("imports"))
+
+        picked = style_mod.stack_order(["CCGT", "solar", "battery", "nuclear"])
+        self.assertEqual(picked, ["nuclear", "solar", "battery", "CCGT"])
+        # Order does not depend on the order the carriers arrive in.
+        self.assertEqual(style_mod.stack_order(reversed(picked)), picked)
+
+        style_mod._WARNED.discard("stack:mystery_fuel")
+        with self.assertLogs(style_mod.logger, level="WARNING"):
+            out = style_mod.stack_order(["CCGT", "mystery_fuel", "aardvark"])
+        self.assertEqual(out, ["CCGT", "aardvark", "mystery_fuel"])
+
+    def test_rendered_stacks_follow_the_pinned_order(self):
+        """O1 and O4 stack and label in CARRIER_STACK_ORDER, not alphabetically."""
+        for plot_id in ("O1", "O4"):
+            with self.subTest(plot=plot_id):
+                fig, _table = plots_mod.plot(plot_id, self.handles(self.run_a))
+                labels = [
+                    text.get_text()
+                    for text in fig.axes[0].get_legend().get_texts()
+                    if text.get_text() in style_mod.CARRIER_STACK_ORDER
+                ]
+                self.assertTrue(labels, plot_id)
+                self.assertEqual(labels, style_mod.stack_order(labels), plot_id)
+                self.assertNotEqual(labels, sorted(labels), plot_id)
+                plt.close(fig)
+
+    def test_a_year_long_stack_becomes_a_twelve_panel_monthly_grid(self):
+        """Rule 1: no stacked plot draws a year of hourly bands."""
+        from experiments.ra.plots import operational
+
+        for plot_id, build in (("O1", operational._o1_figure), ("O4", operational._o4_figure)):
+            with self.subTest(plot=plot_id):
+                table = self._year_table(plot_id)
+                self.assertTrue(operational.is_monthly_view(table))
+                fig = build(table)
+                self.assertEqual(len(fig.axes), 12)
+                self.assertEqual(
+                    [ax.get_title() for ax in fig.axes], list(operational.MONTH_LABELS)
+                )
+                for ax in fig.axes:
+                    self.assertEqual(ax.get_xlim(), (0.0, 23.0))
+                    self.assertEqual(len(ax.get_shared_y_axes().get_siblings(ax)), 12)
+                plt.close(fig)
+
+        # ...and a window of four weeks or less still gets the hourly stack.
+        short = self._year_table("O1")
+        short = short[short["hour"] < 7 + 3 * 168]
+        self.assertFalse(operational.is_monthly_view(short))
+        fig = operational._o1_figure(short)
+        self.assertEqual(len(fig.axes), 1)
+        self.assertNotIn(fig.axes[0].get_title(), operational.MONTH_LABELS)
+        plt.close(fig)
+
+    def test_monthly_profile_uses_local_pacific_hours_and_month_boundaries(self):
+        from experiments.ra.plots import operational
+
+        frame = pd.DataFrame({"hour": [7, 8, 30, 24 * 31 + 7, 8759], "year": [2020] * 5})
+        out = operational.local_calendar(frame)
+        # The shipped window starts at hour 7 = local midnight.
+        self.assertEqual(list(out["hour_of_day"]), [0, 1, 23, 0, 16])
+        # Hours 7, 8 and 30 are all 1-2 Jan; hour 24*31+7 is 1 Feb; 8759 is 31 Dec.
+        self.assertEqual(list(out["month"]), [1, 1, 1, 2, 12])
+
+
 class TestPlotCli(PlotFixture):
     def test_cli_out_dir_resolution(self):
         """T19 (D1)."""
@@ -517,6 +820,28 @@ class TestPlotCli(PlotFixture):
             ]
         )
         self.assertEqual(code, 1)
+
+    def test_cli_data_out_splits_pngs_from_tables(self):
+        """``--data-out``: images in the figures dir, tables in raw_data/."""
+        figures = self.out / "figs"
+        tables = figures / "raw_data"
+        code = cli.main(
+            [
+                "plot",
+                "--run-id", self.run_a,
+                "--runs-root", str(self.runs_root),
+                "--plot", "O4",
+                "--out", str(figures),
+                "--data-out", str(tables),
+            ]
+        )
+        self.assertEqual(code, 0)
+        pngs = list(figures.glob("O4_*.png"))
+        csvs = list(tables.glob("O4_*.csv"))
+        self.assertEqual(len(pngs), 1)
+        self.assertEqual(len(csvs), 1)
+        self.assertEqual(pngs[0].stem, csvs[0].stem)
+        self.assertFalse(list(figures.glob("*.csv")))
 
     def test_cli_list(self):
         self.assertEqual(cli.main(["plot", "--list"]), 0)

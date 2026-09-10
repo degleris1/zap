@@ -24,6 +24,7 @@ import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import FormatStrFormatter, NullFormatter
 
 from . import register, style
 from .loader import MissingDataError
@@ -43,6 +44,34 @@ O9_METRICS = (
 
 #: A flow at or above this share of a line's capacity counts as "at capacity".
 AT_CAPACITY = 0.99
+
+#: The longest span O2 draws hour by hour; above it the time panel is a weekly
+#: mean.  Four weeks of hourly data is ~670 points across a 5-inch panel, which
+#: is the most that still resolves individual hours.
+HOURLY_PANEL_HOURS = 4 * 168
+
+#: The same threshold for a *stacked* plot (O1, O4, any future stacked-by-carrier
+#: figure): above it the hourly stack is replaced by a 3x4 grid of months, each
+#: panel the mean 24 h profile of that month (Kamran, 2026-09-09).  A year of
+#: hourly stacked bands is unreadable at any figure width.
+STACKED_HOURLY_HOURS = HOURLY_PANEL_HOURS
+
+#: Hours to subtract from an absolute (UTC) hour of the weather year to get local
+#: Pacific time.  This is the harness's own fixed convention -- the shipped
+#: window starts at hour 7 so that blocks begin at local midnight -- and it does
+#: not model DST.
+PACIFIC_UTC_OFFSET_HOURS = 7
+
+#: The weather stores are 8,760 hours for every weather year, leap years
+#: included (``data/*/MANIFEST.md``), so hour -> calendar date is resolved
+#: against a fixed **non-leap** year; using the real leap year would slide every
+#: month after February by a day.
+CALENDAR_REFERENCE_YEAR = 2001
+
+MONTH_LABELS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -131,16 +160,175 @@ def _series_totals(frame: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values(index).reset_index(drop=True)
 
 
+#: A weekly bin holding fewer than this many hours is dropped rather than drawn
+#: as a mean over a handful of them.
+WEEKLY_BIN_MIN_HOURS = 84
+
+
+def _weekly_mean(frame: pd.DataFrame, columns) -> pd.DataFrame:
+    """``frame`` averaged into 168 h bins, indexed by each bin's first hour.
+
+    The bins are aligned to the **first hour of the window**, not to hour 0 of
+    the year: the shipped window starts at hour 7 (local midnight), and binning
+    on the absolute hour left a 7-hour tail bin whose mean was seven night hours
+    and dropped off the end of the figure.  A trailing partial bin shorter than
+    ``WEEKLY_BIN_MIN_HOURS`` is dropped for the same reason.
+    """
+    start = int(frame["hour"].min())
+    binned = frame.assign(_bin=((frame["hour"] - start) // 168).astype(int))
+    sizes = binned.groupby("_bin")["hour"].size()
+    keep = set(sizes[sizes >= WEEKLY_BIN_MIN_HOURS].index)
+    if keep:  # a frame shorter than one bin keeps its single partial bin
+        binned = binned[binned["_bin"].isin(keep)]
+    out = binned.groupby("_bin", as_index=False)[list(columns)].mean()
+    out["hour"] = binned.groupby("_bin", as_index=False)["hour"].min()["hour"]
+    return out.sort_values("hour").reset_index(drop=True)
+
+
+def _span_hours(table: pd.DataFrame) -> int:
+    """The number of hours the plotted window covers (inclusive of both ends)."""
+    if table.empty:
+        return 0
+    return int(table["hour"].max() - table["hour"].min()) + 1
+
+
+def is_monthly_view(table: pd.DataFrame) -> bool:
+    """Whether a stacked plot of ``table`` becomes a monthly-profile grid."""
+    return _span_hours(table) > STACKED_HOURLY_HOURS
+
+
+def local_calendar(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add ``hour_of_day`` (local Pacific) and ``month`` to an hourly frame."""
+    local = frame["hour"].astype(int) - PACIFIC_UTC_OFFSET_HOURS
+    stamps = pd.Timestamp(f"{CALENDAR_REFERENCE_YEAR}-01-01") + pd.to_timedelta(
+        local.clip(lower=0), unit="h"
+    )
+    return frame.assign(hour_of_day=(local % 24).astype(int), month=stamps.dt.month.astype(int))
+
+
+def _monthly_figure(groups, *, title_of, ylabel, draw, width=13.0, height=6.8):
+    """One 3x4 grid of month panels per group -- mean 24 h profile per month.
+
+    ``draw(ax, month_rows, handles)`` renders one month; it registers its artists
+    in ``handles`` (``label -> artist``) so the grid can carry a single legend in
+    the stacking order rather than twelve identical ones.
+    """
+    groups = list(groups)
+    fig = plt.figure(figsize=(width, height * len(groups)))
+    # Always a subfigure per group, even for one group: the group's title is the
+    # subfigure's, so it cannot be overwritten by a figure-level ``suptitle``,
+    # and ``subplots_adjust`` (which reserves the legend strip) survives -- the
+    # monthly grid deliberately does **not** run ``tight_layout``.
+    subfigs = list(fig.subfigures(len(groups), 1, squeeze=False)[:, 0])
+    for subfig, (keys, group) in zip(subfigs, groups):
+        axes = subfig.subplots(3, 4, sharex=True, sharey=True)
+        subfig.subplots_adjust(right=0.84, top=0.88, hspace=0.45, wspace=0.15)
+        local = local_calendar(group)
+        handles: dict[str, object] = {}
+        for index in range(12):
+            ax = axes[index // 4][index % 4]
+            ax.set_title(MONTH_LABELS[index], fontsize=8)
+            ax.set_xlim(0, 23)
+            ax.set_xticks([0, 6, 12, 18])
+            ax.tick_params(labelsize=7)
+            month_rows = local[local["month"] == index + 1]
+            if month_rows.empty:
+                ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=7, color="0.5")
+                continue
+            draw(ax, month_rows, handles)
+        for row in range(3):
+            axes[row][0].set_ylabel(ylabel, fontsize=8)
+        for col in range(4):
+            axes[2][col].set_xlabel("hour of day (Pacific)", fontsize=8)
+        subfig.suptitle(title_of(keys, group), fontsize=10)
+        if handles:
+            subfig.legend(list(handles.values()), list(handles), loc="center right", fontsize=7)
+    return fig
+
+
+def _stack_pivot(frame: pd.DataFrame, value: str, index: str, aggfunc: str) -> pd.DataFrame:
+    """A carrier pivot whose columns are already in the global stacking order."""
+    pivot = frame.pivot_table(
+        index=index, columns="carrier", values=value, aggfunc=aggfunc
+    ).fillna(0.0)
+    if pivot.empty:
+        return pivot
+    return pivot[style.stack_order(pivot.columns)]
+
+
 def _facet_axes(n: int, *, width=9.5, height=3.4, sharex=True):
     fig, axes = plt.subplots(n, 1, figsize=(width, height * n), sharex=sharex, squeeze=False)
     return fig, list(axes[:, 0])
+
+
+def _block_label(block_size) -> str:
+    """``24`` -> ``"24 h blocks"``; ``"reference"`` -> ``"reference"``.
+
+    ``block_size`` is the string ``"reference"`` on a reference solve, and
+    appending the suffix unconditionally produced facet titles reading
+    "reference h blocks".
+    """
+    text = str(block_size)
+    try:
+        hours = float(text)
+    except (TypeError, ValueError):
+        return text
+    if not np.isfinite(hours):
+        return text
+    return f"{text} h blocks"
+
+
+def _facet_title(label: str, method, block_size) -> str:
+    return f"{label} - {method} / {_block_label(block_size)}"
+
+
+def _outside_legend(ax, **kwargs) -> None:
+    """A legend in the right margin, so it cannot cover the data or a callout.
+
+    ``save`` writes with ``bbox_inches="tight"``, so the margin costs figure
+    width, never plot area.
+    """
+    options = {"fontsize": 7, "loc": "upper left", "bbox_to_anchor": (1.005, 1.0),
+               "borderaxespad": 0.0, "ncol": 1}
+    options.update(kwargs)
+    ax.legend(**options)
+
+
+def _annotate_point(ax, x, y, text: str, *, xs=None, ys=None) -> None:
+    """Label a point, offset *away* from the nearer edge of the axes.
+
+    An annotation pinned to the left of an early peak used to land inside the
+    legend; the legend now lives outside the axes, and the offset flips near the
+    right edge so the text cannot run off it -- or, for a minimum sitting on the
+    bottom of the frame, above the point instead of below it.
+    """
+
+    def _fraction(value, limits, given):
+        values = np.asarray(limits if given is None else [np.min(given), np.max(given)],
+                            dtype=float)
+        lo, hi = float(values.min()), float(values.max())
+        return (float(value) - lo) / ((hi - lo) or 1.0)
+
+    right_edge = _fraction(x, ax.get_xlim(), xs) > 0.75
+    bottom_edge = _fraction(y, ax.get_ylim(), ys) < 0.2
+    ax.annotate(
+        text,
+        xy=(x, y),
+        xytext=(-4 if right_edge else 4, 10 if bottom_edge else -12),
+        textcoords="offset points",
+        fontsize=7,
+        ha="right" if right_edge else "left",
+        va="bottom" if bottom_edge else "top",
+    )
 
 
 def _stack(ax, pivot: pd.DataFrame, title: str, ylabel: str) -> None:
     if pivot.empty:
         ax.set_title(f"{title} (no data)")
         return
-    carriers = list(pivot.columns)
+    carriers = style.stack_order(pivot.columns)
+    pivot = pivot[carriers]
     ax.stackplot(
         pivot.index.to_numpy(),
         [pivot[c].to_numpy() for c in carriers],
@@ -150,7 +338,7 @@ def _stack(ax, pivot: pd.DataFrame, title: str, ylabel: str) -> None:
     )
     ax.set_title(title)
     ax.set_ylabel(ylabel)
-    ax.legend(ncol=4, fontsize=7, loc="upper left")
+    _outside_legend(ax)
 
 
 # ---------------------------------------------------------------------------
@@ -180,14 +368,20 @@ def o1_available_capacity(runs, *, window=None, year=None, method=None, block_si
     ``available_capacity_mw`` is in-state generators (imports excluded) x
     weather x outage/UCAP derate plus storage power x availability.  The
     storage term is **not** SoC-limited.
+
+    Available capacity does not depend on the solve, so -- exactly as O2 and O3
+    do -- one (method, block_size) per run is kept (``pick_series``): faceting
+    by it drew the same panel once per solved block size.
     """
-    frame = collect_hourly(
-        runs,
-        ["available_capacity_mw"],
-        window=window,
-        year=year,
-        method=method,
-        block_size=block_size,
+    frame = pick_series(
+        collect_hourly(
+            runs,
+            ["available_capacity_mw"],
+            window=window,
+            year=year,
+            method=method,
+            block_size=block_size,
+        )
     )
     table = (
         frame.groupby(
@@ -201,27 +395,63 @@ def o1_available_capacity(runs, *, window=None, year=None, method=None, block_si
     table = table.sort_values(["run_id", "method", "block_size", "year", "hour", "carrier"])
     table = table.reset_index(drop=True)
 
+    fig = _o1_figure(table)
+    return fig, table[list(_columns("O1"))]
+
+
+def _o1_peak(group: pd.DataFrame) -> tuple[int, float]:
+    total = group.groupby("hour")["available_gw"].sum()
+    return int(total.idxmax()), float(total.max())
+
+
+def _o1_figure(table: pd.DataFrame):
+    """O1's figure: hourly stacks for a short window, a monthly grid for a long one."""
+    # One facet per *run*: `pick_series` left a single (method, block_size) per
+    # run, so this groupby no longer multiplies the panels.
     groups = list(table.groupby(["run_id", "label", "method", "block_size"], sort=True))
+    ylabel = f"available [{style.unit_label('power')}]"
+
+    if is_monthly_view(table):
+        def draw(ax, month_rows, handles):
+            pivot = _stack_pivot(month_rows, "available_gw", "hour_of_day", "mean")
+            polygons = ax.stackplot(
+                pivot.index.to_numpy(),
+                [pivot[c].to_numpy() for c in pivot.columns],
+                colors=[style.carrier_color(c) for c in pivot.columns],
+                labels=list(pivot.columns),
+                linewidth=0.0,
+            )
+            for carrier, polygon in zip(pivot.columns, polygons):
+                handles.setdefault(carrier, polygon)
+
+        def title_of(keys, group):
+            _run_id, label, meth, size = keys
+            hour, peak = _o1_peak(group)
+            return (
+                "O1 - available capacity by carrier, mean 24 h profile by month\n"
+                f"{_facet_title(label, meth, size)} - hourly peak {peak:.2f} GW @ h{hour}"
+            )
+
+        return _monthly_figure(groups, title_of=title_of, ylabel=ylabel, draw=draw)
+
     fig, axes = _facet_axes(len(groups))
     for ax, ((_run_id, label, meth, size), group) in zip(axes, groups):
-        pivot = group.pivot_table(
-            index="hour", columns="carrier", values="available_gw", aggfunc="sum"
-        ).fillna(0.0)
-        _stack(ax, pivot, f"{label} - {meth} / {size} h blocks", f"available [{style.unit_label('power')}]")
+        pivot = _stack_pivot(group, "available_gw", "hour", "sum")
+        _stack(ax, pivot, _facet_title(label, meth, size), ylabel)
         total = pivot.sum(axis=1)
         if not total.empty:
             peak_hour = int(total.idxmax())
-            ax.annotate(
+            _annotate_point(
+                ax,
+                peak_hour,
+                total.max(),
                 f"peak {total.max():.2f} GW @ h{peak_hour}",
-                xy=(peak_hour, total.max()),
-                xytext=(4, -12),
-                textcoords="offset points",
-                fontsize=7,
+                xs=pivot.index.to_numpy(),
+                ys=total.to_numpy(),
             )
     axes[-1].set_xlabel("hour of the weather year")
-    fig.suptitle("O1 - available capacity by carrier")
-    fig.tight_layout()
-    return fig, table[list(_columns("O1"))]
+    style.finish(fig, "O1 - available capacity by carrier")
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +481,14 @@ def o2_net_load(runs, *, window=None, year=None, method=None, block_size=None, *
 
     Net load is gross demand minus *available* VRE (before curtailment), so the
     curve is a property of the system and the weather, not of the dispatch.
+
+    The left panel is **hourly only for spans of at most four weeks**
+    (``HOURLY_PANEL_HOURS``); over a longer span -- a whole year is 8,736 points
+    -- it is a weekly mean, which is what is legible at that width, and the
+    hourly record stays in the CSV and in the duration curve on the right.  Pass
+    ``--window`` for the hourly view of a week.  Colour is the *quantity* (fixed
+    order: load, VRE available, net load) and the linestyle is the run, so no two
+    series are told apart by a dash pattern alone.
     """
     frame = pick_series(
         collect_hourly(
@@ -274,28 +512,45 @@ def o2_net_load(runs, *, window=None, year=None, method=None, block_size=None, *
     table["net_load_duration_frac"] = table["net_load_rank"] / counts
     table = table.sort_values(["run_id", "year", "hour"]).reset_index(drop=True)
 
+    span = int(table["hour"].max() - table["hour"].min()) + 1
+    hourly_view = span <= HOURLY_PANEL_HOURS
+    quantities = (
+        ("load_gw", "load", "load"),
+        ("vre_available_gw", "vre_available", "VRE available"),
+        ("net_load_gw", "net_load", "net load"),
+    )
+
     fig, (ax_ts, ax_dc) = plt.subplots(1, 2, figsize=(11.5, 3.8))
+    many = len(set(table["run_id"])) > 1
     for i, (_run_id, group) in enumerate(table.groupby("run_id", sort=True)):
         st = style.run_style(i)
         label = group["label"].iloc[0]
-        ax_ts.plot(group["hour"], group["load_gw"], color=st["color"], linestyle="-",
-                   linewidth=1.0, label=f"{label} load")
-        ax_ts.plot(group["hour"], group["vre_available_gw"], color=st["color"],
-                   linestyle=":", linewidth=1.0, label=f"{label} VRE available")
-        ax_ts.plot(group["hour"], group["net_load_gw"], color=st["color"],
-                   linestyle="--", linewidth=1.2, label=f"{label} net load")
+        series = group if hourly_view else _weekly_mean(group, [q for q, _, _ in quantities])
+        for column, key, name in quantities:
+            ax_ts.plot(
+                series["hour"],
+                series[column],
+                color=style.SERIES_COLORS[key],
+                linestyle=st["linestyle"],
+                linewidth=1.1,
+                label=f"{label} {name}" if many else name,
+            )
         ordered = group.sort_values("net_load_rank")
         ax_dc.plot(ordered["net_load_duration_frac"], ordered["net_load_gw"],
                    color=st["color"], linestyle=st["linestyle"], linewidth=1.2, label=label)
     ax_ts.set_xlabel("hour of the weather year")
     ax_ts.set_ylabel(f"power [{style.unit_label('power')}]")
-    ax_ts.legend(fontsize=7, ncol=2)
+    ax_ts.set_title(
+        f"hourly ({span} h)" if hourly_view else f"weekly mean ({span} h; hourly in the CSV)"
+    )
+    # Below the panel: three full-length series leave no corner free, and a
+    # legend that covers the load peak is exactly the collision this pass removed.
+    ax_ts.legend(fontsize=7, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.18))
     ax_dc.set_xlabel("fraction of hours at or above")
     ax_dc.set_ylabel(f"net load [{style.unit_label('power')}]")
     ax_dc.set_title("net-load duration curve")
     ax_dc.legend(fontsize=7)
-    fig.suptitle("O2 - load, VRE availability and net load")
-    fig.tight_layout()
+    style.finish(fig, "O2 - load, VRE availability and net load")
     return fig, table[list(_columns("O2"))]
 
 
@@ -346,7 +601,9 @@ def o3_headroom(
     )
     picked = pick_series(frame)
     totals = _series_totals(picked)
-    ens = _pivot_hours(frame, "unserved_mw").rename(columns={"value": "ens_mw"})
+    # From `picked`, not `frame`: a benchmark run carries the same hours once per
+    # solved (method, block size), and summing them multiplied the marked ENS.
+    ens = _pivot_hours(picked, "unserved_mw").rename(columns={"value": "ens_mw"})
     totals = totals.merge(ens, on=["run_id", "label", "year", "hour"], how="left")
     totals["ens_mw"] = totals["ens_mw"].fillna(0.0)
 
@@ -376,17 +633,20 @@ def o3_headroom(
                        color=style.carrier_color("unserved"), zorder=5, label=None)
         if not group.empty:
             worst = group.loc[group["headroom_gw"].idxmin()]
-            ax.annotate(
+            _annotate_point(
+                ax,
+                worst["hour"],
+                worst["headroom_gw"],
                 f"min {worst['headroom_gw']:.2f} GW @ h{int(worst['hour'])}",
-                xy=(worst["hour"], worst["headroom_gw"]),
-                xytext=(4, 8), textcoords="offset points", fontsize=7,
+                xs=group["hour"].to_numpy(),
+                ys=group["headroom_gw"].to_numpy(),
             )
     ax.axhline(0.0, color="0.4", linewidth=0.8)
     ax.set_xlabel("hour of the weather year")
     ax.set_ylabel(f"headroom [{style.unit_label('power')}]")
     ax.set_title(f"O3 - headroom (shaded below {float(threshold):.0%} of available)")
     ax.legend(fontsize=7)
-    fig.tight_layout()
+    style.finish(fig)
     return fig, table[list(_columns("O3"))]
 
 
@@ -453,15 +713,74 @@ def o4_dispatch(runs, *, window=None, year=None, method=None, block_size=None, *
     negates it.
     """
     table = _o4_table(runs, window=window, year=year, method=method, block_size=block_size)
+    fig = _o4_figure(table)
+    return fig, table[list(_columns("O4"))]
+
+
+def _o4_figure(table: pd.DataFrame):
+    """O4's figure: hourly stacks for a short window, a monthly grid for a long one."""
     groups = list(table.groupby(["run_id", "label", "method", "block_size"], sort=True))
+    ylabel = f"power [{style.unit_label('power')}]"
+    up_series = ("generation", "storage_discharge")
+
+    if is_monthly_view(table):
+        def draw(ax, month_rows, handles):
+            index, aggfunc = "hour_of_day", "mean"
+            up = month_rows[month_rows["series"].isin(up_series)]
+            # Sum the carriers within an hour first, then average over the month:
+            # a plain mean over rows would divide by the number of *rows*.
+            up = up.groupby(["hour_of_day", "carrier", "hour"], as_index=False)["value_gw"].sum()
+            pivot = _stack_pivot(up, "value_gw", index, aggfunc)
+            if not pivot.empty:
+                polygons = ax.stackplot(
+                    pivot.index.to_numpy(),
+                    [pivot[c].to_numpy() for c in pivot.columns],
+                    colors=[style.carrier_color(c) for c in pivot.columns],
+                    labels=list(pivot.columns),
+                    linewidth=0.0,
+                )
+                for carrier, polygon in zip(pivot.columns, polygons):
+                    handles.setdefault(carrier, polygon)
+            for name, colour, label in (
+                ("storage_charge", "storage_charge", "storage charge"),
+                ("load", "load", "load"),
+                ("unserved", "unserved", "unserved"),
+            ):
+                hourly = (
+                    month_rows[month_rows["series"] == name]
+                    .groupby(["hour", "hour_of_day"], as_index=False)["value_gw"]
+                    .sum()
+                    .groupby("hour_of_day")["value_gw"]
+                    .mean()
+                )
+                if hourly.empty or not float(hourly.abs().max()):
+                    continue
+                if name == "storage_charge":
+                    artist = ax.bar(hourly.index, -hourly.to_numpy(), width=1.0,
+                                    color=style.carrier_color(colour), label=label)
+                elif name == "load":
+                    artist = ax.plot(hourly.index, hourly.to_numpy(),
+                                     color=style.carrier_color(colour), linewidth=1.2,
+                                     label=label)[0]
+                else:
+                    artist = ax.scatter(hourly.index, hourly.to_numpy(), s=10,
+                                        color=style.carrier_color(colour), label=label, zorder=5)
+                handles.setdefault(label, artist)
+
+        def title_of(keys, group):
+            _run_id, label, meth, size = keys
+            return (
+                "O4 - dispatch by carrier, mean 24 h profile by month\n"
+                f"{_facet_title(label, meth, size)}"
+            )
+
+        return _monthly_figure(groups, title_of=title_of, ylabel=ylabel, draw=draw)
+
     fig, axes = _facet_axes(len(groups))
     for ax, ((_run_id, label, meth, size), group) in zip(axes, groups):
-        up = group[group["series"].isin(("generation", "storage_discharge"))]
-        pivot = up.pivot_table(
-            index="hour", columns="carrier", values="value_gw", aggfunc="sum"
-        ).fillna(0.0)
-        _stack(ax, pivot, f"{label} - {meth} / {size} h blocks",
-               f"power [{style.unit_label('power')}]")
+        up = group[group["series"].isin(up_series)]
+        pivot = _stack_pivot(up, "value_gw", "hour", "sum")
+        _stack(ax, pivot, _facet_title(label, meth, size), ylabel)
         charge = group[group["series"] == "storage_charge"].groupby("hour")["value_gw"].sum()
         if not charge.empty:
             ax.bar(charge.index, -charge.to_numpy(), width=1.0,
@@ -475,11 +794,10 @@ def o4_dispatch(runs, *, window=None, year=None, method=None, block_size=None, *
         if not shed.empty:
             ax.scatter(shed.index, shed.to_numpy(), s=12,
                        color=style.carrier_color("unserved"), label="unserved", zorder=5)
-        ax.legend(ncol=4, fontsize=7, loc="upper left")
+        _outside_legend(ax)
     axes[-1].set_xlabel("hour of the weather year")
-    fig.suptitle("O4 - dispatch by carrier")
-    fig.tight_layout()
-    return fig, table[list(_columns("O4"))]
+    style.finish(fig, "O4 - dispatch by carrier")
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -555,8 +873,8 @@ def o5_dispatch_difference(runs, *, window=None, year=None, method=None, block_s
     ax.set_xlabel("hour of the weather year")
     ax.set_ylabel(f"{a.label} - {b.label} [{style.unit_label('power')}]")
     ax.set_title(f"O5 - dispatch difference: {a.label} minus {b.label}")
-    ax.legend(ncol=4, fontsize=7)
-    fig.tight_layout()
+    _outside_legend(ax)
+    style.finish(fig)
     return fig, table[list(_columns("O5"))]
 
 
@@ -628,12 +946,11 @@ def o6_state_of_charge(runs, *, window=None, year=None, method=None, block_size=
                     color=style.carrier_color(carrier), label=carrier)
         for hour in group.loc[group["block_boundary"], "hour"].unique():
             ax.axvline(hour, color="0.75", linewidth=0.6, zorder=0)
-        ax.set_title(f"{label} - {meth} / {size} h blocks")
+        ax.set_title(_facet_title(label, meth, size))
         ax.set_ylabel(f"SoC [{style.unit_label('energy')}]")
-        ax.legend(fontsize=7, ncol=3)
+        _outside_legend(ax)
     axes[-1].set_xlabel("hour of the weather year")
-    fig.suptitle("O6 - storage state of charge")
-    fig.tight_layout()
+    style.finish(fig, "O6 - storage state of charge")
     return fig, table[list(_columns("O6"))]
 
 
@@ -669,6 +986,11 @@ def o7_line_loading(
 ):
     """Mean and peak loading per directed line, as a horizontal bar chart.
 
+    One (method, block_size) per run (``pick_series``, as O2 / O3): a run that
+    solved three block sizes used to draw each line three times under tick labels
+    that did not say which solve was which.  The kept series is named in the axis
+    title.
+
     The county **map** (bus ``x`` / ``y`` are in ``system_static.json``) is out
     of scope: z4 has four nodes and a map of it says nothing.
     """
@@ -678,13 +1000,15 @@ def o7_line_loading(
             "system_static.json already carries the bus coordinates it will need "
             "(see memory/plans/2026-09-09-plots-spec.md section 7)"
         )
-    frame = collect_hourly(
-        runs,
-        ["line_flow_mw"],
-        window=window,
-        year=year,
-        method=method,
-        block_size=block_size,
+    frame = pick_series(
+        collect_hourly(
+            runs,
+            ["line_flow_mw"],
+            window=window,
+            year=year,
+            method=method,
+            block_size=block_size,
+        )
     )
     static = {}
     for run in runs:
@@ -740,9 +1064,13 @@ def o7_line_loading(
     ax.set_yticklabels(ticks, fontsize=7)
     ax.axvline(1.0, color="0.4", linewidth=0.8)
     ax.set_xlabel("flow / capacity")
-    ax.set_title("O7 - line loading")
+    solves = ", ".join(
+        f"{r.label}: {r.method} / {_block_label(r.block_size)}"
+        for r in table.drop_duplicates(["run_id"]).itertuples()
+    )
+    ax.set_title(f"O7 - line loading ({solves})", fontsize=8)
     ax.legend(fontsize=7)
-    fig.tight_layout()
+    style.finish(fig)
     return fig, table
 
 
@@ -774,6 +1102,12 @@ def o8_prices(runs, *, window=None, year=None, method=None, block_size=None, **_
     ``ca2040_z4`` prices the import bus at its marginal unit and the export
     buses at a degenerate negative number; neither is a system price, so the
     hourly writer never records them and this plot has no option to add them.
+
+    The left panel is the pooled CDF of every (method, block_size) -- comparing
+    them *is* the plot.  The right panel is one bar per (bus, run), hue = run,
+    from one representative solve per run (``pick_series``): drawing a bar per
+    (bus, method, block_size) repeated every bus under identical tick labels.
+    Every method's per-bus quantile stays in the CSV.
     """
     frame = collect_hourly(
         runs,
@@ -784,6 +1118,13 @@ def o8_prices(runs, *, window=None, year=None, method=None, block_size=None, **_
         block_size=block_size,
     )
     voll = {run.run_id: run.voll for run in runs}
+    # The representative (method, block_size) of each run, for the per-bus panel.
+    representative = {
+        row.run_id: (row.method, row.block_size)
+        for row in pick_series(frame)[["run_id", "method", "block_size"]]
+        .drop_duplicates()
+        .itertuples()
+    }
 
     rows = []
     keys = ["run_id", "label", "method", "block_size"]
@@ -813,13 +1154,17 @@ def o8_prices(runs, *, window=None, year=None, method=None, block_size=None, **_
     pooled = table[table["bus"] == "__all__"]
     for i, (_run_id, group) in enumerate(pooled.groupby("run_id", sort=True)):
         st = style.run_style(i)
-        for (meth, size), sub in group.groupby(["method", "block_size"], sort=True):
+        # Colour is the run; linestyle and marker separate that run's solves, which
+        # otherwise shared one style and could not be told apart in the legend.
+        for j, ((meth, size), sub) in enumerate(
+            group.groupby(["method", "block_size"], sort=True)
+        ):
             ax_cdf.plot(
                 np.maximum(sub["price_usd_per_mwh"], 1e-3),
                 sub["quantile"],
                 color=st["color"],
-                linestyle=st["linestyle"],
-                marker=st["marker"],
+                linestyle=style.RUN_STYLES[j % len(style.RUN_STYLES)],
+                marker=style.RUN_MARKERS[j % len(style.RUN_MARKERS)],
                 markersize=3,
                 linewidth=1.1,
                 label=f"{sub['label'].iloc[0]} {meth}/{size}",
@@ -835,15 +1180,36 @@ def o8_prices(runs, *, window=None, year=None, method=None, block_size=None, **_
     ax_cdf.legend(fontsize=7)
 
     per_bus = table[(table["bus"] != "__all__") & (table["quantile"] == 0.5)]
+    per_bus = per_bus[
+        [
+            representative.get(r.run_id) == (r.method, r.block_size)
+            for r in per_bus.itertuples()
+        ]
+    ]
     if not per_bus.empty:
-        labels = [f"{r.label}/{r.bus}" for r in per_bus.itertuples()]
-        ax_box.bar(np.arange(len(per_bus)), per_bus["price_usd_per_mwh"], color="#1f5f8b")
-        ax_box.set_xticks(np.arange(len(per_bus)))
-        ax_box.set_xticklabels(labels, rotation=60, ha="right", fontsize=7)
+        buses = sorted(set(per_bus["bus"]))
+        run_ids = sorted(set(per_bus["run_id"]))
+        positions = np.arange(len(buses), dtype=float)
+        width = 0.8 / max(1, len(run_ids))
+        for i, run_id in enumerate(run_ids):
+            sub = per_bus[per_bus["run_id"] == run_id].set_index("bus")
+            meth, size = representative[run_id]
+            heights = [float(sub["price_usd_per_mwh"].get(b, np.nan)) for b in buses]
+            ax_box.bar(
+                positions + (i - (len(run_ids) - 1) / 2) * width,
+                heights,
+                width=width,
+                color=style.run_style(i)["color"],
+                label=f"{sub['label'].iloc[0]} {meth}/{size}",
+            )
+        ax_box.set_xticks(positions)
+        ax_box.set_xticklabels(buses, rotation=0, fontsize=7)
+        if len(run_ids) > 1:
+            ax_box.legend(fontsize=7)
+    ax_box.set_xlabel("load bus")
     ax_box.set_ylabel("median price [$/MWh]")
-    ax_box.set_title("per load bus")
-    fig.suptitle("O8 - load-bus prices")
-    fig.tight_layout()
+    ax_box.set_title("per load bus (one representative solve per run)")
+    style.finish(fig, "O8 - load-bus prices")
     return fig, table
 
 
@@ -942,8 +1308,7 @@ def o9_block_metrics(runs, *, metrics=O9_METRICS, **_):
         ax.set_ylabel(metric, fontsize=7)
         ax.legend(fontsize=6, ncol=3)
     axes[-1, 0].set_xlabel("block start hour")
-    fig.suptitle("O9 - per-block metrics")
-    fig.tight_layout()
+    style.finish(fig, "O9 - per-block metrics")
     return fig, table
 
 
@@ -974,7 +1339,13 @@ def o9_block_metrics(runs, *, metrics=O9_METRICS, **_):
     ),
 )
 def o10_admm_trace(runs, *, block_index=None, **_):
-    """Primal / dual residuals against their tolerances, objective on a twin axis.
+    """Primal / dual residuals against their tolerances, objective below them.
+
+    Each block gets **two stacked panels sharing one x axis**: the residuals (log
+    y, $MW$ / $MWh$) above and the objective (linear y, solver units) below.  The
+    objective used to be drawn on ``ax.twinx()``, i.e. a second y axis on the same
+    panel -- two scales in one frame, which the project's style rules out because
+    the crossing point of two such curves is an artefact of the scaling.
 
     The objective is in **solver units** (the system is scaled by ``power_unit``
     / ``cost_unit``; both are columns of ``admm_trace.parquet``).  There is no
@@ -990,8 +1361,20 @@ def o10_admm_trace(runs, *, block_index=None, **_):
     table = table.reset_index(drop=True)
 
     groups = list(table.groupby(["run_id", "label", "block_size", "block_index"], sort=True))
-    fig, axes = _facet_axes(len(groups), height=2.8, sharex=False)
-    for ax, ((_run_id, label, size, index), group) in zip(axes, groups):
+    # Two rows per block -- residuals (log y) then objective (linear y) -- sharing
+    # the block's iteration axis. No twin axes anywhere.
+    fig, axes = plt.subplots(
+        2 * len(groups),
+        1,
+        figsize=(9.5, 3.6 * len(groups)),
+        squeeze=False,
+        gridspec_kw={"height_ratios": [2.0, 1.0] * len(groups)},
+    )
+    axes = list(axes[:, 0])
+    for position, ((_run_id, label, size, index), group) in enumerate(groups):
+        ax = axes[2 * position]
+        ax_obj = axes[2 * position + 1]
+        ax_obj.sharex(ax)
         ax.semilogy(group["iteration"], group["primal_power"].abs(), color="#1f5f8b",
                     label="primal power")
         ax.semilogy(group["iteration"], group["dual_power"].abs(), color="#d2691e",
@@ -1000,16 +1383,15 @@ def o10_admm_trace(runs, *, block_index=None, **_):
                     linestyle=":", label="primal tol")
         ax.semilogy(group["iteration"], group["dual_tol"].abs(), color="#d2691e",
                     linestyle=":", label="dual tol")
-        twin = ax.twinx()
-        twin.plot(group["iteration"], group["objective"], color="0.35", linewidth=0.9)
-        twin.set_ylabel("objective [solver units]", fontsize=7)
-        twin.grid(False)
-        ax.set_title(f"{label} - block {index} ({size} h)")
+        ax.set_title(f"{label} - block {index} ({_block_label(size)})")
         ax.set_ylabel("residual")
-        ax.legend(fontsize=6, ncol=2)
-    axes[-1].set_xlabel("ADMM iteration")
-    fig.suptitle("O10 - ADMM convergence")
-    fig.tight_layout()
+        ax.tick_params(labelbottom=False)
+        _outside_legend(ax)
+        ax_obj.plot(group["iteration"], group["objective"], color="0.35", linewidth=0.9,
+                    label="objective")
+        ax_obj.set_ylabel("objective\n[solver units]", fontsize=7)
+        ax_obj.set_xlabel("ADMM iteration")
+    style.finish(fig, "O10 - ADMM convergence")
     return fig, table
 
 
@@ -1094,15 +1476,20 @@ def o11_solve_time(runs, **_):
                      linestyle=st["linestyle"], marker=st["marker"], label=label)
         ax_cpu.plot(group["hours_per_block"], group["cpu_seconds"], color=st["color"],
                     linestyle=st["linestyle"], marker=st["marker"], label=label)
+    # Log x: 24 h, 168 h and a full year (8,736 h) are three decades apart, and on
+    # a linear axis the two block sizes collapse onto each other whenever a
+    # full-year point shares the axis.
+    for ax in (ax_time, ax_cpu):
+        ax.set_xscale("log")
+        ax.set_xlabel("hours per block (log)")
+        ax.set_xticks(sorted(set(table["hours_per_block"].dropna())))
+        ax.get_xaxis().set_major_formatter(FormatStrFormatter("%g"))
+        ax.get_xaxis().set_minor_formatter(NullFormatter())
+        ax.legend(fontsize=7)
     ax_time.set_yscale("log")
-    ax_time.set_xlabel("hours per block")
     ax_time.set_ylabel("mean solve time [s] (log)")
-    ax_time.legend(fontsize=7)
-    ax_cpu.set_xlabel("hours per block")
     ax_cpu.set_ylabel("CPU-seconds")
-    ax_cpu.legend(fontsize=7)
-    fig.suptitle("O11 - solve time")
-    fig.tight_layout()
+    style.finish(fig, "O11 - solve time")
     return fig, table
 
 
@@ -1192,12 +1579,14 @@ def o12_price_error_heatmap(runs, *, block_size=None, **_):
         )
         ax.set_yticks(np.arange(pivot.shape[0]))
         ax.set_yticklabels(list(pivot.index), fontsize=7)
-        ax.set_title(f"{label} - block at hour {start} ({block_size} h)")
+        ax.set_title(
+            f"{label} - block at hour {start} "
+            f"({_block_label(group['block_size'].iloc[0])})"
+        )
         fig.colorbar(image, ax=ax, label="$/MWh")
     axes[-1].set_xlabel("absolute hour of the weather year")
     reference = "same-block LP" if quantity == "delta_price_vs_block_lp" else "reference LP"
-    fig.suptitle(f"O12 - ADMM minus {reference} price, load buses")
-    fig.tight_layout()
+    style.finish(fig, f"O12 - ADMM minus {reference} price, load buses")
     return fig, table
 
 
@@ -1278,7 +1667,7 @@ def o13_price_error_per_hour(runs, **_):
             color=st["color"],
             linestyle=st["linestyle"],
             linewidth=1.0,
-            label=f"{label} {size} h",
+            label=f"{label} {_block_label(size)}",
         )
         into = group.groupby("hours_into_block")[quantity].max()
         ax_into.plot(
@@ -1287,7 +1676,7 @@ def o13_price_error_per_hour(runs, **_):
             color=st["color"],
             linestyle=st["linestyle"],
             linewidth=1.0,
-            label=f"{label} {size} h",
+            label=f"{label} {_block_label(size)}",
         )
     reference = "same-block LP" if quantity.endswith("block_lp") else "reference LP"
     ax_abs.set_xlabel("absolute hour of the weather year")
@@ -1296,8 +1685,7 @@ def o13_price_error_per_hour(runs, **_):
     ax_into.set_xlabel("hours into the block")
     ax_into.set_ylabel(f"max |ADMM - {reference}| [$/MWh]")
     ax_into.legend(fontsize=7)
-    fig.suptitle(f"O13 - ADMM dual error per hour vs the {reference}, load buses")
-    fig.tight_layout()
+    style.finish(fig, f"O13 - ADMM dual error per hour vs the {reference}, load buses")
     return fig, out
 
 

@@ -3,6 +3,9 @@
 Output directory (D1):
 
 * ``--out DIR``            wins over everything;
+* ``--data-out DIR``       sends the plotted CSVs there instead of beside the
+  PNGs (the brain repo keeps ``figures/<study>/`` images-only and the tables
+  under ``figures/<study>/raw_data/``);
 * ``--study NAME``         report tier -> ``<brain>/figures/<NAME>/``;
 * exactly one ``--run-id`` -> ``<run_dir>/figures/``;
 * more than one run and no ``--study`` is an error -- a figure that mixes runs
@@ -39,6 +42,8 @@ def add_arguments(parser) -> None:
     parser.add_argument("--study", default=None,
                         help="write into <figures root>/<STUDY>/ instead of the run dir")
     parser.add_argument("--out", default=None, help="explicit output directory")
+    parser.add_argument("--data-out", dest="data_out", default=None,
+                        help="write the plotted CSVs here instead of beside the PNGs")
     parser.add_argument("--window", default=None, metavar="START:STOP")
     parser.add_argument("--year", type=int, default=None)
     parser.add_argument("--method", default=None)
@@ -108,10 +113,12 @@ def cmd_plot(args) -> int:
     }
     opts = {k: v for k, v in opts.items() if v is not None}
 
+    data_dir = Path(args.data_out).expanduser() if getattr(args, "data_out", None) else None
+
     written, skipped, failed = [], [], []
     for plot_id in selected_plots(args):
         try:
-            png, csv = render(plot_id, runs, out_dir, **opts)
+            png, csv = render(plot_id, runs, out_dir, data_dir=data_dir, **opts)
         except (MissingDataError, NotImplementedError, RunCountError) as exc:
             skipped.append((plot_id, str(exc)))
             logger.info("skipping %s: %s", plot_id, exc)
@@ -128,8 +135,8 @@ def cmd_plot(args) -> int:
         written.append((plot_id, png, csv))
         logger.info("%s -> %s", plot_id, png)
 
-    for plot_id, png, _csv in written:
-        print(f"{plot_id}: {png}")
+    for plot_id, png, csv in written:
+        print(f"{plot_id}: {png}" + (f" + {csv}" if data_dir is not None else ""))
     for plot_id, reason in skipped:
         print(f"{plot_id}: skipped ({reason})")
     for plot_id, reason in failed:
