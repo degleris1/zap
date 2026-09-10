@@ -775,9 +775,21 @@ def build_ens_profile_frame(loaded, devices, outcome, block, *, task) -> pd.Data
 
 
 def write_ens_profile(run_dir, task, cfg: dict, loaded, devices, outcome, block) -> Path | None:
+    """Write ``ens_profile/<task_id>.parquet``; ``None`` when there is nothing to say.
+
+    A block that shed nothing writes **no file** (WP-E0 / spec E4): the campaign
+    is 26,000 blocks on z4 and ~3.0 M on the full grid, and almost all of them
+    shed nothing, so an empty parquet per block is a pure file-count cost.  This
+    cannot bias ``eval_ens_profile.parquet``: its denominator is the *case
+    universe* taken from ``metrics.csv`` (``evaluate.case_universe``), which pads
+    every absent case with zeros, and a zero-row frame contributed nothing to the
+    numerator either.
+    """
     if run_dir is None or not bool(output_options(cfg).get("save_ens_profile", True)):
         return None
     frame = build_ens_profile_frame(loaded, devices, outcome, block, task=task)
+    if frame.empty:
+        return None
     path = Path(run_dir) / "ens_profile" / f"{task.task_id}.parquet"
     return write_parquet_atomic(frame, path, ens_profile_schema())
 

@@ -32,6 +32,10 @@ ADDITIVE_METRICS = (
     "curtailment_mwh",
     "imports_mwh",
     "exports_mwh",
+    # Gross scaled demand of the block, the denominator of NEUE = EUE / annual
+    # demand (FORMULATIONS 3.4).  Additive over blocks by construction, and the
+    # weight `evaluate` uses to pool per-block mean prices (WP-E0 / spec E6).
+    "demand_mwh",
 )
 
 SHORTFALL_TOL_MW = 1e-3
@@ -46,6 +50,13 @@ PLANNING_METRICS = (
     "opex_annual",
     "emissions_tonnes_annual",
     "total_capacity_mw",
+    # Which iterate became the design and how far the descent loop got.
+    # `runcard.summarize` coerces these to numbers, so only the numeric half of
+    # the iterate-selection record lives here; the rule (`design_selection`) and
+    # the stop reason (`stopped_by`) are strings and are shown per design in the
+    # card's Objective table instead.
+    "design_iteration",
+    "num_iterations_completed",
 )
 
 
@@ -166,14 +177,20 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
     # LOLH counts *hours* in which the system sheds anywhere, not (bus, hour)
     # pairs: sum the shortfall over load rows first, then count hours.
     system_shortfall = None
+    # Gross demand of the block, i.e. `load * nominal_capacity` summed over rows
+    # and hours -- the same quantity the price weights and the ENS profile use,
+    # *after* `system.demand_scaling` (it is what the LP was asked to serve).
+    demand = 0.0
     for entry in shortfalls:
         ens += float(entry.shortfall.sum())
+        demand += float(np.asarray(entry.demand, dtype=np.float64).sum())
         hourly = np.asarray(entry.shortfall, dtype=np.float64).sum(axis=0)
         system_shortfall = hourly if system_shortfall is None else system_shortfall + hourly
     if system_shortfall is not None:
         lost_load_hours = int(np.count_nonzero(system_shortfall > SHORTFALL_TOL_MW))
     metrics["unserved_energy_mwh"] = ens
     metrics["lost_load_hours"] = lost_load_hours
+    metrics["demand_mwh"] = demand if shortfalls else float("nan")
 
     # --- Emissions -----------------------------------------------------------
     co2 = 0.0
@@ -370,6 +387,7 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
 _MONEY_METRICS = ("operational_cost", "generation_cost", "voll_cost", "export_revenue")
 _ENERGY_METRICS = (
     "unserved_energy_mwh",
+    "demand_mwh",
     "curtailment_mwh",
     "imports_mwh",
     "exports_mwh",
@@ -446,14 +464,58 @@ def _to_physical_units(metrics: dict[str, Any], meta: dict) -> dict[str, Any]:
 
 
 def read_task_records(run_dir: Path) -> list[dict]:
+    """Every task record of a run, **flattened to one record per block**.
+
+    A ``execution.task_granularity: case`` task writes one file holding its 52
+    per-block records under ``blocks`` (WP-E3).  Those elements already carry
+    their own ``task_id`` / ``block_index`` / metrics, so yielding them in place
+    of the case record keeps ``metrics.csv`` exactly per block and leaves every
+    downstream consumer -- ``eval.parquet``, ``deviation_vs_reference``, the
+    plots -- unchanged.  A case whose ``blocks`` list is empty contributes no
+    rows: the case record itself has no block metrics and must never become one.
+    """
     records = []
     for path in sorted((Path(run_dir) / "tasks").glob("*.json")):
         try:
             with open(path, "r") as f:
-                records.append(json.load(f))
+                record = json.load(f)
         except json.JSONDecodeError:  # pragma: no cover - defensive
             logger.warning("skipping unreadable task file %s", path)
+            continue
+        blocks = record.get("blocks") if isinstance(record, dict) else None
+        if isinstance(blocks, list):
+            records.extend(b for b in blocks if isinstance(b, dict))
+        else:
+            records.append(record)
+    _assert_unique_task_ids(records, run_dir)
     return records
+
+
+def _assert_unique_task_ids(records: list[dict], run_dir: Path) -> None:
+    """One row per block, always -- the backstop under the granularity guard.
+
+    A run directory holding both a case file and its blocks' own files yields
+    every block twice, which silently doubles every additive metric and puts
+    ``coverage`` at 2 (verifier F1, 2026-09-09).  ``cli.adopt_task_granularity``
+    stops that being *created*; this refuses to aggregate a directory where it
+    somehow already happened, because a doubled headline is worse than no
+    headline.
+    """
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for record in records:
+        task_id = str(record.get("task_id"))
+        if task_id in seen:
+            duplicates.append(task_id)
+        seen.add(task_id)
+    if duplicates:
+        raise ValueError(
+            f"{run_dir}: {len(duplicates)} task id(s) appear more than once in the ledger "
+            f"(e.g. {sorted(set(duplicates))[:5]}). This directory holds task files of both "
+            "granularities -- `case` records nest the same blocks that the per-block files "
+            "already carry -- so every affected metric would be counted twice. Remove one "
+            "set of files (the per-block ones, or the case ones) and aggregate again."
+        )
 
 
 def records_to_frame(records: Iterable[dict]) -> pd.DataFrame:
@@ -1032,6 +1094,14 @@ def planning_metrics(result) -> dict[str, Any]:
         "emissions_mode": (result.emissions or {}).get("mode"),
         "emissions_cap_applied": (result.emissions or {}).get("cap_applied"),
     }
+
+    # Which iterate the design came from and why the loop stopped (empty for the
+    # single-level presets, which have neither).
+    solver = result.solver or {}
+    metrics["design_selection"] = objective.get("design_selection")
+    metrics["design_iteration"] = objective.get("design_iteration")
+    metrics["num_iterations_completed"] = solver.get("num_iterations_completed")
+    metrics["stopped_by"] = solver.get("stopped_by")
 
     bounds = (result.meta or {}).get("bounds") or {}
     metrics["min_capacity_mw"] = bounds.get("min_capacity_mw")

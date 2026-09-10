@@ -1,0 +1,43 @@
+# Phase-2 campaign, cell 5: STOCHASTIC gradient descent. Identical to cell 4
+# except that each iteration sees 4 of the 52 weeks, drawn at random.
+#
+# `num_workers: 4` because a 4-block batch cannot use more.
+#
+# `design_selection: best_checkpointed`: argmin over 200 four-block loss
+# estimates would select the luckiest batch, not the best design, so the design
+# is the best of full 52-week forward passes taken every 20 iterations (plus the
+# first and last iterate). Each checkpoint costs one cell-4 forward pass, so
+# this adds ~10 % to the budget (Kamran, 2026-09-09).
+#
+# Seed sharing with cell 3: `selection.seed: 42` (inherited) drives both the
+# selector RNG and the batch RNG. They are DIFFERENT draws from the same seed --
+# one draws block starts, the other subproblem indices -- so cell 5's sampled
+# weeks are not cell 3's weeks.
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_gradient.yaml
+  - ../selection/all_weeks.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_c5_sgd_b4
+dataset: {years: [2020], window: {start: 7, stop: 8743}}
+system: {demand_scaling: none, export_mode: drop}
+planning:
+  dispatch_solver: HIGHS
+  dispatch_solver_kwargs: {verbose: false}
+  num_workers: 4
+  timeout_s: 7200
+  warm_start: {enabled: true, num_blocks: 12, solver: HIGHS}
+  optimizer:
+    num_iterations: 200
+    step_size: 0.2
+    clip: 5.0e+3
+    batch_size: 4
+    batch_strategy: random
+    max_seconds: 3600
+    design_selection: best_checkpointed
+    checkpoint_every: 20
+    save_param_history: true
+output: {save_iterations: true}

@@ -1,0 +1,47 @@
+# Phase-2 campaign, cell 4: DETERMINISTIC gradient descent. The pool is all 52
+# weeks and the batch is all of them every iteration, so the sampled objective
+# IS the full objective and `design_selection: best_sampled` selects the true
+# best iterate at no extra cost.
+#
+# Dispatch solver: HIGHS simplex, default options. Decided from
+# experiments/runs/solver_duals_2026-09-09/REPORT.md -- load-bus duals are
+# solver-invariant, HiGHS gradients match one-sided finite differences on the
+# zero-capacity candidate rows (which carry 79-93 % of the gradient norm) while
+# CLARABEL's are 9,353-14,256 $/MW too large on every one of them, and HiGHS IPM
+# is slower with the same duals.
+#
+# Budget: `optimizer.max_seconds` is the SOFT cap (finish the iteration, keep the
+# design and the history); `timeout_s` is the hard backstop and must be larger.
+# How many of the 200 iterations fit in the hour is a result, not a setting.
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_gradient.yaml
+  - ../selection/all_weeks.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_c4_grad_det
+dataset: {years: [2020], window: {start: 7, stop: 8743}}
+system: {demand_scaling: none, export_mode: drop}
+planning:
+  dispatch_solver: HIGHS
+  dispatch_solver_kwargs: {verbose: false}
+  num_workers: 12
+  timeout_s: 7200
+  # 12 of the 52 blocks, `strategy: uniform` (hardcoded in GradientMethod.warm_start),
+  # so cells 4 and 5 provably start from the SAME point. Not cell 3's LP, and not
+  # a lower bound on the gradient loss: `blocks_match` is False, so
+  # `lower_bound_raw` / `optimality_gap` stay empty by design.
+  warm_start: {enabled: true, num_blocks: 12, solver: HIGHS}
+  optimizer:
+    num_iterations: 200
+    step_size: 0.2
+    clip: 5.0e+3
+    batch_size: 0              # 0 -> every subproblem, every iteration
+    batch_strategy: sequential
+    max_seconds: 3600
+    design_selection: best_sampled
+    checkpoint_every: 0        # the sampled loss already is the full objective
+    save_param_history: true
+output: {save_iterations: true}

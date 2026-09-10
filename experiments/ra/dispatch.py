@@ -651,6 +651,10 @@ def solve_block_stub(task, cfg: dict) -> dict[str, Any]:
         "export_revenue": 0.0,
         "unserved_energy_mwh": 0.0,
         "lost_load_hours": 0,
+        # Fabricated like everything else here, but present so the evaluation
+        # tables' `demand_mwh` / `neue` / demand-weighted price path is exercised
+        # by the STUB pipeline (WP-E0).
+        "demand_mwh": 100.0 * hours,
         "co2_tonnes": 10.0 * hours,
         "generation_mwh_by_carrier": '{"stub": %.1f}' % (100.0 * hours),
         "curtailment_mwh": 0.0,

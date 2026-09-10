@@ -14,10 +14,13 @@ spec mandates:
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from copy import deepcopy
 from dataclasses import dataclass
+
+import numpy as np
 
 import zap.planning.trackers as tr
 from zap.planning import GradientDescent, MonolithicPlanningProblem
@@ -25,7 +28,139 @@ from zap.planning import GradientDescent, MonolithicPlanningProblem
 from .. import base, constraints, objectives
 from .single_level import optimality_gap
 
-__all__ = ["GradientMethod", "WarmStart"]
+logger = logging.getLogger(__name__)
+
+__all__ = ["GradientMethod", "WarmStart", "select_iterate"]
+
+#: ``design_selection`` rules that read an iterate back out of the history.
+HISTORY_RULES = {"best_sampled": "loss", "best_rolling": "rolling_loss"}
+
+
+def _finite_argmin(values) -> int | None:
+    """Index of the smallest finite entry, or ``None`` if there is none."""
+    arr = np.asarray([float("nan") if v is None else float(v) for v in values], dtype=float)
+    if arr.size == 0 or not np.any(np.isfinite(arr)):
+        return None
+    return int(np.nanargmin(np.where(np.isfinite(arr), arr, np.inf)))
+
+
+def select_iterate(history: dict, rule: str) -> tuple[dict | None, int | None, str]:
+    """``(parameters, iteration index, rule actually applied)`` for a solve history.
+
+    ``None`` parameters mean "keep what ``solve`` returned" (the final iterate).
+    ``history["param"][i]`` and ``history["loss"][i]`` are the *same* state --
+    the loop steps, evaluates, then records once -- so the argmin index needs no
+    offset.  A rule that cannot be applied (no parameter history, no finite
+    loss) degrades to ``final`` and says so in the third element, rather than
+    guessing.
+    """
+    if rule == "final":
+        return None, None, "final"
+    if rule == "best_checkpointed":
+        # Checkpoints are evaluated during the solve, not read back from the
+        # history; `GradientMethod` handles this rule itself.
+        return None, None, "best_checkpointed"
+    key = HISTORY_RULES.get(rule)
+    if key is None:
+        raise ValueError(f"unknown design_selection rule {rule!r}")
+
+    params = list((history or {}).get("param") or [])
+    if not params:
+        logger.warning(
+            "design_selection %r needs the parameter history "
+            "(planning.optimizer.save_param_history); falling back to the final iterate.",
+            rule,
+        )
+        return None, None, "final"
+
+    index = _finite_argmin(list((history or {}).get(key) or []))
+    if index is None or index >= len(params):
+        logger.warning(
+            "design_selection %r found no usable %s history; "
+            "falling back to the final iterate.",
+            rule,
+            key,
+        )
+        return None, None, "final"
+    return deepcopy(params[index]), index, rule
+
+
+class _Checkpointer:
+    """Full-horizon forward passes at selected iterates, taken *during* a solve.
+
+    With a minibatch, ``history["loss"]`` is a 4-block estimate and its argmin
+    picks the luckiest batch, not the best design.  This hook evaluates the
+    objective over the **whole** block set every ``every`` iterations (plus the
+    first and the last iterate, which are always candidates: the first is the
+    warm start, and a run that never improves on it must be able to say so), and
+    keeps the parameters of each such iterate.
+
+    One checkpoint costs one full forward pass -- a deterministic iteration
+    without its backward pass -- so ``every = 20`` over 200 iterations adds
+    roughly 10 iterations' worth of forward work to a minibatch run.
+
+    ``outer`` distinguishes the outer iterations of dual ascent; only the last
+    outer loop's checkpoints are candidates, because only its parameters are
+    returned.
+    """
+
+    def __init__(self, problem, emissions_objs, *, every: int, price: float):
+        self.problem = problem
+        self.emissions_objs = emissions_objs
+        self.every = int(every or 0)
+        self.price = float(price)
+        self.outer = 0
+        self.records: list[dict] = []
+        self.parameters: dict[tuple[int, int], dict] = {}
+        self.seconds = 0.0
+        self._seen: set[tuple[int, int]] = set()
+
+    def __call__(self, index: int, state: dict, history: dict, final: bool) -> None:
+        key = (self.outer, int(index))
+        if key in self._seen:
+            return
+        if not (final or index == 0 or (self.every > 0 and int(index) % self.every == 0)):
+            return
+        self._seen.add(key)
+
+        t0 = time.perf_counter()
+        emissions = objectives.evaluate_emissions(self.problem, self.emissions_objs, state)
+        capex = float(self.problem.get_inv_cost())
+        opex = float(self.problem.get_op_cost())
+        seconds = time.perf_counter() - t0
+        self.seconds += seconds
+
+        carbon_payment = self.price * float(emissions)
+        opex -= carbon_payment
+        self.records.append(
+            {
+                "outer_iteration": int(self.outer),
+                "iteration": int(index),
+                "objective_raw": capex + opex,
+                "capex_raw": capex,
+                "opex_raw": opex,
+                "emissions_tonnes_raw": float(emissions),
+                "final": bool(final),
+                "seconds": seconds,
+            }
+        )
+        self.parameters[key] = deepcopy(state)
+
+    def best(self) -> tuple[dict | None, int | None, float | None]:
+        """``(parameters, iteration, objective)`` of the best checkpoint."""
+        records = [r for r in self.records if r["outer_iteration"] == self.outer]
+        if not records:
+            return None, None, None
+        index = _finite_argmin([r["objective_raw"] for r in records])
+        if index is None:
+            return None, None, None
+        record = records[index]
+        key = (record["outer_iteration"], record["iteration"])
+        return (
+            deepcopy(self.parameters[key]),
+            int(record["iteration"]),
+            float(record["objective_raw"]),
+        )
 
 
 @dataclass
@@ -157,7 +292,13 @@ class GradientMethod(base.PlanningMethod):
         trackers += [tr.BATCH, tr.GRAD_NORM_L2]
         return algorithm, trackers
 
-    def _solve_kwargs(self) -> dict:
+    def _solve_kwargs(self, iteration_hook=None) -> dict:
+        """The keyword arguments of one ``problem.solve`` call.
+
+        ``max_seconds`` is the soft cap on **one** call, so under
+        ``emissions.mode: dual_ascent`` it is a per-outer-iteration budget, not
+        a budget for the whole ascent.
+        """
         opt = self.options["optimizer"]
         return {
             "num_iterations": int(opt["num_iterations"]),
@@ -167,6 +308,11 @@ class GradientMethod(base.PlanningMethod):
             "init_full_loss": bool(opt["init_full_loss"]),
             "peak_net_load_k": opt["peak_net_load_k"],
             "peak_net_load_rerank_every": int(opt["peak_net_load_rerank_every"]),
+            "time_limit_s": opt["max_seconds"],
+            # The minibatch RNG was a hardcoded 42; seeding it from the run's
+            # own seed is what makes replicates distinguishable.
+            "batch_seed": int(self.selection["seed"]),
+            "iteration_hook": iteration_hook,
         }
 
     # -- solve --------------------------------------------------------------
@@ -185,10 +331,23 @@ class GradientMethod(base.PlanningMethod):
         dual = None
         # The carbon price in force at the parameters this method returns.
         price = float(objectives.emissions_price(self.cfg))
+        opt = opts["optimizer"]
+        rule = str(opt["design_selection"])
+        emissions_objs = objectives.emissions_objectives(ctx.problem)
+        checkpointer = None
+        if int(opt["checkpoint_every"] or 0) > 0 or rule == "best_checkpointed":
+            checkpointer = _Checkpointer(
+                ctx.problem,
+                emissions_objs,
+                every=int(opt["checkpoint_every"] or 0),
+                price=price,
+            )
         t0 = time.perf_counter()
         try:
             if mode == "dual_ascent":
-                params, history, dual = self._dual_ascent(ctx, algorithm, trackers, warm)
+                params, history, dual = self._dual_ascent(
+                    ctx, algorithm, trackers, warm, checkpointer
+                )
                 price = float(dual["applied_lambda"])
             else:
                 params, history = ctx.problem.solve(
@@ -196,17 +355,33 @@ class GradientMethod(base.PlanningMethod):
                     trackers=trackers,
                     initial_state=warm.parameters,
                     lower_bound=warm.solve_bound,
-                    **self._solve_kwargs(),
+                    **self._solve_kwargs(iteration_hook=checkpointer),
                 )
             solve_seconds = time.perf_counter() - t0
+            stop_reason = str(getattr(ctx.problem, "stop_reason", "num_iterations"))
 
-            # One full forward pass at the final parameters.  `history["loss"]`
+            # Which iterate becomes the design.  The full forward pass below then
+            # reports capex / opex / emissions / objective *at the design*, so
+            # selecting an earlier iterate costs no extra dispatch solve.
+            selected, design_iteration, applied_rule = select_iterate(history, rule)
+            if applied_rule == "best_checkpointed":
+                selected, design_iteration, _ = (
+                    checkpointer.best() if checkpointer is not None else (None, None, None)
+                )
+                if selected is None:
+                    logger.warning(
+                        "design_selection 'best_checkpointed' found no usable checkpoint; "
+                        "falling back to the final iterate."
+                    )
+                    applied_rule = "final"
+            if selected is not None:
+                params = selected
+
+            # One full forward pass at the returned parameters.  `history["loss"]`
             # is the loss of the last *minibatch*, which is not the objective of
             # the design whenever `batch_size` is set, so capex, opex, emissions
             # and the objective all come from here instead.
-            emissions = objectives.evaluate_emissions(
-                ctx.problem, objectives.emissions_objectives(ctx.problem), params
-            )
+            emissions = objectives.evaluate_emissions(ctx.problem, emissions_objs, params)
             capex = float(ctx.problem.get_inv_cost())
             opex = float(ctx.problem.get_op_cost())
         finally:
@@ -223,6 +398,22 @@ class GradientMethod(base.PlanningMethod):
         emissions_block = dict(ctx.meta.get("emissions", {}))
         if dual is not None:
             emissions_block["dual_ascent"] = dual
+
+        # All three candidate objectives, always, so the selection is auditable
+        # from the design file alone.  `loss` / `rolling_loss` are in the units
+        # of the whole block set (`_get_batch_weights` rescales a minibatch), so
+        # they are comparable with `raw` -- but they are estimates of it whenever
+        # the batch is a strict subset.
+        losses = [float(x) for x in (history or {}).get("loss") or []]
+        rolling = [float(x) for x in (history or {}).get("rolling_loss") or []]
+        best_sampled = _finite_argmin(losses)
+        best_rolling = _finite_argmin(rolling)
+        af = float(ctx.annualization_factor)
+        checkpoints = [
+            {**record, "objective_annual": record["objective_raw"] * af}
+            for record in (checkpointer.records if checkpointer is not None else [])
+        ]
+        num_completed = max(0, len(losses) - 1)
 
         return base.PlanningResult.from_context(
             ctx,
@@ -241,6 +432,19 @@ class GradientMethod(base.PlanningMethod):
                 # The warm-start LP optimum, in the units of *its* block set.
                 "warm_start_objective_raw": warm.objective_raw,
                 "warm_start_sampled_hours": warm.sampled_hours,
+                "design_selection": applied_rule,
+                "design_selection_requested": rule,
+                "design_iteration": design_iteration,
+                "final_sampled_objective_raw": losses[-1] if losses else None,
+                "best_sampled_objective_raw": (
+                    losses[best_sampled] if best_sampled is not None else None
+                ),
+                "best_sampled_iteration": best_sampled,
+                "best_rolling_objective_raw": (
+                    rolling[best_rolling] if best_rolling is not None else None
+                ),
+                "best_rolling_iteration": best_rolling,
+                "checkpoints": checkpoints,
             },
             emissions=emissions_block,
             solver={
@@ -248,12 +452,25 @@ class GradientMethod(base.PlanningMethod):
                 "status": "converged",
                 "kwargs": dict(opts["dispatch_solver_kwargs"] or {}),
                 "n_subproblems": len(ctx.problem.subproblems),
-                "num_iterations": int(opts["optimizer"]["num_iterations"]),
+                "num_iterations": int(opt["num_iterations"]),
+                "num_iterations_completed": num_completed,
+                # `stop_reason` is zap's word for it; `stopped_by` is the
+                # campaign vocabulary.  There is no convergence test in the
+                # descent loop, so "converged" is never reported by this method.
+                "stop_reason": stop_reason,
+                "stopped_by": {
+                    "wall_clock": "max_seconds",
+                    "num_iterations": "iterations",
+                }.get(stop_reason, stop_reason),
+                "max_seconds": opt["max_seconds"],
+                "checkpoint_every": int(opt["checkpoint_every"] or 0),
+                "batch_seed": int(self.selection["seed"]),
             },
             timing={
                 "build_s": ctx.build_seconds,
                 "warm_start_s": warm.seconds,
                 "solve_s": solve_seconds,
+                "checkpoint_s": (checkpointer.seconds if checkpointer is not None else 0.0),
             },
             compute={"num_workers": num_workers},
             history=history,
@@ -261,7 +478,7 @@ class GradientMethod(base.PlanningMethod):
 
     # -- the dual-ascent outer loop -----------------------------------------
 
-    def _dual_ascent(self, ctx, algorithm, trackers, warm: WarmStart):
+    def _dual_ascent(self, ctx, algorithm, trackers, warm: WarmStart, checkpointer=None):
         """Subgradient ascent on the carbon price until emissions hit the target.
 
         Ported from ``runner.py:1144-1268``.  ``validate_emissions`` has already
@@ -294,13 +511,18 @@ class GradientMethod(base.PlanningMethod):
             # The LP bound is only valid at the initial multiplier.
             bound = warm.solve_bound if outer == 0 else math.nan
             applied_lambda = float(current_lambda)
+            if checkpointer is not None:
+                # Only the last outer loop's checkpoints are candidates, and the
+                # carbon price they net out is the one in force now.
+                checkpointer.outer = outer
+                checkpointer.price = float(current_lambda)
 
             params, history = ctx.problem.solve(
                 algorithm=algorithm,
                 trackers=trackers,
                 initial_state=params,
                 lower_bound=bound,
-                **self._solve_kwargs(),
+                **self._solve_kwargs(iteration_hook=checkpointer),
             )
             outer_histories.append(serialize_history(history))
 

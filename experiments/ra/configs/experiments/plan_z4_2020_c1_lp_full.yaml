@@ -1,0 +1,23 @@
+# Phase-2 campaign, cell 1: single-level LP over the whole 8736 h window
+# (coverage 1, phi = 1). The reference design; every other cell is a temporal or
+# algorithmic approximation of this one. HiGHS on the laptop (decision
+# 2026-09-09); `planning.timeout_s` is the only fallback -- if this does not
+# finish in 4 h the cell is deferred to Sherlock/Gurobi.
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_monolithic.yaml
+  - ../selection/full_horizon.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_c1_lp_full
+dataset: {years: [2020], window: {start: 7, stop: 8743}}   # 8736 h = 52*168 = 364*24, from local (Pacific) midnight
+# Unscaled demand: peak load / peak available is 1.17 on the 2040 retired fleet,
+# so the planner must build. `demand_scaling: none` applies factor 1.0 and
+# ignores peak_capacity_fraction.
+system: {demand_scaling: none, export_mode: drop}
+planning:
+  timeout_s: 14400
+  single_level: {solver: HIGHS, solver_kwargs: {}}
+output: {save_iterations: true}

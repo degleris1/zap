@@ -1,10 +1,12 @@
-"""Command line interface: ``plan``, ``run``, ``aggregate``, ``show``.
+"""Command line interface: ``plan``, ``run``, ``evaluate``, ``aggregate``, ``show``.
 
 Local execution and SLURM execution use the same entry point and differ only in
 which shard of the task list a process claims::
 
     python -m experiments.ra.cli plan      --config CFG [--set k=v ...]
     python -m experiments.ra.cli run       --config CFG [--shard k/n] [--force] [--only method=lp]
+    python -m experiments.ra.cli evaluate  --config CFG --design-run RUN_ID [--design-file PATH]
+                                           [--shard k/n] [--force] [--preflight-only]
     python -m experiments.ra.cli aggregate --run-id ID | --config CFG
     python -m experiments.ra.cli show      --run-id ID
 """
@@ -76,6 +78,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="only run matching tasks, e.g. --only method=lp",
     )
 
+    evaluate = sub.add_parser(
+        "evaluate", help="score one or more designs on weather years x outage draws"
+    )
+    add_config_args(evaluate)
+    evaluate.add_argument(
+        "--design-run",
+        dest="design_runs",
+        action="append",
+        default=[],
+        metavar="RUN_ID",
+        help="a planning run id (or run directory): every designs/*.json in it is scored",
+    )
+    evaluate.add_argument(
+        "--design-file",
+        dest="design_files",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="one design.json to score",
+    )
+    evaluate.add_argument("--shard", default=None, metavar="K/N")
+    evaluate.add_argument("--force", action="store_true", help="re-run this shard's cases")
+    evaluate.add_argument("--max-tasks", type=int, default=None)
+    evaluate.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="FIELD=VALUE",
+        help="only run matching tasks, e.g. --only draw=3",
+    )
+    evaluate.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="run the preflight checks, write preflight.json and stop",
+    )
+
     aggregate = sub.add_parser("aggregate", help="rebuild metrics.csv and CARD.md")
     aggregate.add_argument("--config", default=None)
     aggregate.add_argument("--set", dest="overrides", action="append", default=[])
@@ -143,10 +181,41 @@ def _configure_logging(run_dir: Path | None = None) -> None:
     )
 
 
+def adopt_task_granularity(cfg: dict, run_dir: Path) -> str:
+    """Make ``cfg`` use whatever granularity this run directory already holds.
+
+    ``execution`` is excluded from the run-id hash, so a ``block`` invocation
+    and a ``case`` invocation of the same config share a run directory. Each
+    only resume-skips *its own* file names, so both sets of files would survive
+    side by side and every block would be counted twice in ``metrics.csv``
+    (verifier F1, 2026-09-09). The files already on disk win: a re-entry that
+    asks for the other granularity is coerced back, loudly, so the run stays
+    resumable and its ledger stays one row per block. To score the same config
+    at the other granularity, use a different ``--runs-root`` (or a fresh
+    directory) -- which is exactly what the equivalence test does.
+    """
+    wanted = tasks_mod.task_granularity(cfg)
+    found = tasks_mod.existing_granularity(run_dir)
+    if found is None or found == wanted:
+        return wanted
+    logger.warning(
+        "%s already holds `%s` task files; ignoring execution.task_granularity=%r for this "
+        "invocation and continuing at `%s`. Running both granularities in one run directory "
+        "would double-count every block. Use a separate runs root to compare them.",
+        run_dir,
+        found,
+        wanted,
+        found,
+    )
+    cfg["execution"]["task_granularity"] = found
+    return found
+
+
 def touch_run_dir(cfg: dict, run_dir: Path) -> None:
     """Write ``config.resolved.yaml`` and ``env.json``, or verify the hash on re-entry."""
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "tasks").mkdir(exist_ok=True)
+    granularity = adopt_task_granularity(cfg, run_dir)
 
     resolved = run_dir / "config.resolved.yaml"
     if resolved.exists():
@@ -159,9 +228,14 @@ def touch_run_dir(cfg: dict, run_dir: Path) -> None:
     else:
         # Store the hashed content; execution/output are excluded from the hash,
         # so they are written at their defaults rather than this shard's values.
+        # `task_granularity` is the exception: it decides the *shape* of the
+        # files in `tasks/`, so the resolved config has to say which shape they
+        # are (and `ra aggregate --run-id` reads it back from here).
         base = base_config()
+        execution = dict(base["execution"])
+        execution["task_granularity"] = granularity
         dump_config(
-            deep_merge(cfg, {"execution": base["execution"], "output": base["output"]}), resolved
+            deep_merge(cfg, {"execution": execution, "output": base["output"]}), resolved
         )
 
     env_path = run_dir / "env.json"
@@ -227,8 +301,18 @@ def cmd_run(args) -> int:
     log_selection_keys(cfg)
 
     all_tasks = tasks_mod.enumerate_tasks(cfg)
+    return execute(cfg, run_dir, all_tasks, only=parse_pairs(args.only))
+
+
+def execute(cfg: dict, run_dir: Path, all_tasks, *, only: dict | None = None, designs=None) -> int:
+    """Run this process's shard of ``all_tasks`` and, when unsharded, aggregate.
+
+    Shared by ``ra run`` and ``ra evaluate``: the two differ only in what they
+    enumerate (as-built blocks vs a set of designs' cases) and in the preflight
+    the evaluation runs first.
+    """
     selected = tasks_mod.select_shard(all_tasks, cfg["execution"]["shard"])
-    selected = tasks_mod.filter_tasks(selected, parse_pairs(args.only))
+    selected = tasks_mod.filter_tasks(selected, only)
     if cfg["execution"]["max_tasks"] is not None:
         selected = selected[: int(cfg["execution"]["max_tasks"])]
 
@@ -239,7 +323,9 @@ def cmd_run(args) -> int:
         len(all_tasks),
         cfg["execution"]["shard"] or "all",
     )
-    records = tasks_mod.run_tasks(selected, cfg, run_dir, force=bool(cfg["execution"]["force"]))
+    records = tasks_mod.run_tasks(
+        selected, cfg, run_dir, force=bool(cfg["execution"]["force"]), designs=designs
+    )
 
     # run_task records the provenance from whichever process built the system
     # (the reference solve builds it in a child); this is the in-process fallback.
@@ -261,9 +347,12 @@ def cmd_run(args) -> int:
 
     if cfg["execution"]["shard"] is None:
         frame = metrics_mod.aggregate(run_dir, cfg)
+        # The evaluation tables come *before* the card: the card's ranking
+        # section reads `eval_summary.parquet` off disk (WP-E4), so writing it
+        # afterwards would print the previous invocation's ranking, or none.
+        write_eval_tables(run_dir, frame, cfg)
         runcard.write_card(run_dir, cfg, frame)
         logger.info("wrote %s and %s", run_dir / "metrics.csv", run_dir / "CARD.md")
-        write_eval_tables(run_dir, frame, cfg)
         write_debug_figures(run_dir, cfg)
     else:
         logger.info("shard finished; run `aggregate` once every shard is done")
@@ -276,6 +365,47 @@ def cmd_run(args) -> int:
         )
         return 1
     return 0
+
+
+def cmd_evaluate(args) -> int:
+    """``ra evaluate``: the single-source-of-truth scoring of a set of designs.
+
+    Order matters and is the whole point of the command: resolve the config,
+    read the designs, **preflight** (config gates, outage-store coverage, pool
+    capacity, as-built match) and only then enumerate a single task.  A campaign
+    that discovers a missing outage chunk on task 4,000 of 26,000 has wasted
+    hours; every failure this command can foresee is raised before the first
+    solve (spec 2.1, E9).
+    """
+    from . import evaluate as evaluate_mod
+
+    cfg = resolve_config(args)
+    run_dir = run_directory(cfg)
+    _configure_logging(run_dir)
+
+    sources = evaluate_mod.load_designs(
+        args.design_runs, args.design_files, cfg, runs_root=cfg["output"].get("runs_root")
+    )
+    report = evaluate_mod.preflight(sources, cfg, run_dir=run_dir)
+    if not report["ok"]:
+        failed = [c for c in report["checks"] if not c["ok"]]
+        raise ConfigError(
+            "evaluation preflight failed; refusing to run "
+            f"({run_dir / evaluate_mod.PREFLIGHT_NAME}):\n  "
+            + "\n  ".join(f"{c['name']}: {c['detail']}" for c in failed)
+        )
+    if args.preflight_only:
+        print(f"preflight OK -> {run_dir / evaluate_mod.PREFLIGHT_NAME}")
+        return 0
+
+    touch_run_dir(cfg, run_dir)
+    evaluate_mod.record_splits(run_dir, cfg)
+    evaluate_mod.record_sources(run_dir, sources)
+    log_selection_keys(cfg)
+
+    designs = {s.design_id: s.design for s in sources}
+    all_tasks = tasks_mod.enumerate_tasks(cfg, design_ids=tuple(designs))
+    return execute(cfg, run_dir, all_tasks, only=parse_pairs(args.only), designs=designs)
 
 
 def cmd_aggregate(args) -> int:
@@ -294,10 +424,10 @@ def cmd_aggregate(args) -> int:
         run_dir = run_directory(cfg)
 
     frame = metrics_mod.aggregate(run_dir, cfg)
+    write_eval_tables(run_dir, frame, cfg)  # before the card; see `execute`
     card = runcard.write_card(run_dir, cfg, frame)
     print(f"{len(frame)} task rows -> {run_dir / 'metrics.csv'}")
     print(f"card -> {card}")
-    write_eval_tables(run_dir, frame, cfg)
     write_debug_figures(run_dir, cfg)
     return 0
 
@@ -407,11 +537,12 @@ def cmd_design(args) -> int:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command != "run":
+    if args.command not in ("run", "evaluate"):
         _configure_logging()
     handlers = {
         "plan": cmd_plan,
         "run": cmd_run,
+        "evaluate": cmd_evaluate,
         "aggregate": cmd_aggregate,
         "show": cmd_show,
         "design": cmd_design,

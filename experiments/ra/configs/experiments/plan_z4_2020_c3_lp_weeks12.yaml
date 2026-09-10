@@ -1,0 +1,28 @@
+# Phase-2 campaign, cell 3: the same LP on 12 of the 52 weeks, drawn at random
+# on the ALIGNED week grid (so they are literally 12 of cell 2's blocks), and
+# annualised by phi = 8736 / 2016 = 4.3333. The discriminating case for capex
+# weighting: at coverage 0.2308 the 2026-09-08 block-0-only capex bug would show
+# as capex low by ~12x.
+#
+# `selection` is written out here rather than including ../selection/random_weeks.yaml,
+# which is shared and must keep `align_blocks` at its default.
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_stochastic.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_c3_lp_weeks12
+dataset: {years: [2020], window: {start: 7, stop: 8743}}
+system: {demand_scaling: none, export_mode: drop}
+selection:
+  strategy: random
+  block_size: 168
+  num_blocks: 12
+  seed: 42
+  align_blocks: true
+planning:
+  timeout_s: 14400
+  single_level: {solver: HIGHS, solver_kwargs: {}}
+output: {save_iterations: true}

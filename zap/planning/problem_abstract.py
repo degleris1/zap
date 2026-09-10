@@ -157,7 +157,30 @@ class AbstractPlanningProblem:
         init_full_loss=True,
         peak_net_load_k=None,
         peak_net_load_rerank_every=1,
+        time_limit_s=None,
+        batch_seed=42,
+        iteration_hook=None,
     ):
+        """Run the descent loop.
+
+        ``time_limit_s`` is a *soft* wall-clock cap: the loop finishes the
+        iteration it is in, records it, and then breaks, so the caller gets a
+        complete design and a complete history.  ``self.stop_reason`` says which
+        of ``"num_iterations"`` / ``"wall_clock"`` ended the loop.  (A hard cap
+        -- killing the process -- returns neither.)  Under an outer loop, e.g.
+        ``emissions.mode: dual_ascent``, the budget applies **per call**, i.e.
+        per outer iteration, not to the whole ascent.
+
+        ``batch_seed`` seeds the minibatch RNG (it was a hardcoded 42), so
+        replicates of a stochastic run are reproducible and distinguishable.
+
+        ``iteration_hook(index, state, history, final)`` is called after the
+        history of iteration ``index`` is recorded -- ``index`` indexes the
+        history lists exactly -- and once more after the loop with
+        ``final=True`` (the last index is therefore passed twice; hooks dedupe
+        on ``index``).  It is the seam for evaluating a full-horizon objective
+        at a checkpoint while a minibatch loop is running.
+        """
         if algorithm is None:
             algorithm = GradientDescent()
 
@@ -188,7 +211,10 @@ class AbstractPlanningProblem:
         history = self.initialize_history(trackers)
 
         # RNG for random batch strategy (standalone or as peak_net_load fill)
-        _batch_rng = np.random.default_rng(42)
+        _batch_rng = np.random.default_rng(batch_seed)
+
+        # Why the loop stopped; overwritten below if the soft cap fires.
+        self.stop_reason = "num_iterations"
 
         # Peak net load initialization
         if batch_strategy == "peak_net_load":
@@ -246,6 +272,9 @@ class AbstractPlanningProblem:
             history, trackers, J, grad, state, None, wandb, log_wandb_every
         )
 
+        if iteration_hook is not None:
+            iteration_hook(0, state, history, False)
+
         # Gradient descent loop
         for iteration in range(num_iterations):
             if self.la == torch:
@@ -299,6 +328,20 @@ class AbstractPlanningProblem:
             history = self.update_history(
                 history, trackers, J, grad, state, last_state, wandb, log_wandb_every
             )
+
+            if iteration_hook is not None:
+                iteration_hook(self.iteration, state, history, False)
+
+            # Soft wall-clock cap: the iteration just finished is fully
+            # recorded, so the caller keeps a design and a history.
+            if time_limit_s is not None and (
+                time.time() - self.start_time >= float(time_limit_s)
+            ):
+                self.stop_reason = "wall_clock"
+                break
+
+        if iteration_hook is not None:
+            iteration_hook(self.iteration, state, history, True)
 
         return state, history
 

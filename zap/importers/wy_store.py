@@ -1015,6 +1015,69 @@ def _unit_pool_from_store(root) -> Any:
     )
 
 
+#: One decompressed ``(n_units, n_hours)`` uptime slice, keyed
+#: ``(store path, year, draw, window start, window stop)``.  Size **one**: the
+#: slice is ~344 MB of uint8 for the full ca2040_z4 pool at 8,736 h x 39,225
+#: units, and holding two would double the peak working set of a shard for no
+#: gain -- every caller within one case asks for the same (year, draw)
+#: (WP-E0 / spec E5).  `load_system` reads it twice per build (generators, then
+#: storage) and the evaluation enumerates *design-inner*, so consecutive cases
+#: that differ only in the design reuse it as well.
+_UNIT_SLICE_CACHE: dict[tuple, np.ndarray] = {}
+
+#: Hit / miss counters and the live key, so a test can assert the cache is
+#: actually reused (spec section 5.8) without timing anything.
+_UNIT_SLICE_STATS: dict[str, Any] = {"hits": 0, "misses": 0, "key": None}
+
+
+def clear_unit_slice_cache() -> None:
+    """Drop the cached uptime slice and reset its counters (tests, long runs)."""
+    _UNIT_SLICE_CACHE.clear()
+    _UNIT_SLICE_STATS.update({"hits": 0, "misses": 0, "key": None})
+
+
+def unit_slice_cache_info() -> dict:
+    """``{"hits", "misses", "key", "size"}`` of the unit-slice cache."""
+    return {**_UNIT_SLICE_STATS, "size": len(_UNIT_SLICE_CACHE)}
+
+
+def _unit_slice(
+    path: Path,
+    root,
+    year_index: int,
+    draw_index: int,
+    year: int,
+    draw: int,
+    start: int,
+    stop: int,
+) -> np.ndarray:
+    """The ``(n_units, n_hours)`` uptime matrix of one (year, draw) window.
+
+    Cached (size 1) on ``(path, year, draw, start, stop)``.  The returned array
+    is marked read-only: it is shared with every other caller holding the same
+    key, and a caller that mutated it would corrupt the next design's
+    availability rather than fail.
+    """
+    key = (str(path), int(year), int(draw), int(start), int(stop))
+    cached = _UNIT_SLICE_CACHE.get(key)
+    if cached is not None:
+        _UNIT_SLICE_STATS["hits"] += 1
+        return cached
+
+    up = np.asarray(root["available"][year_index, draw_index, start:stop, :], dtype=np.uint8).T
+    if up.size and up.max() > 1:
+        raise ValueError(
+            f"Outage store {path} holds fill values (>1) for year={year}, draw={draw} "
+            f"in hours [{start}, {stop}); the chunk is incomplete."
+        )
+    up.flags.writeable = False
+    _UNIT_SLICE_CACHE.clear()  # size one: these slices are hundreds of MB
+    _UNIT_SLICE_CACHE[key] = up
+    _UNIT_SLICE_STATS["misses"] += 1
+    _UNIT_SLICE_STATS["key"] = key
+    return up
+
+
 def _outage_availability(
     dataset_dir: Path,
     draw: int,
@@ -1048,14 +1111,11 @@ def _outage_availability(
                 f"Outage chunk (year={year}, draw={draw}) was never generated in {path}; "
                 "run the outage generator for it before loading."
             )
-        up = np.asarray(
-            root["available"][yi, di, window.start : window.stop, :], dtype=np.uint8
-        ).T  # (n_units, n_hours)
-        if up.size and up.max() > 1:
-            raise ValueError(
-                f"Outage store {path} holds fill values (>1) for year={year}, draw={draw} "
-                f"in hours [{window.start}, {window.stop}); the chunk is incomplete."
-            )
+        # (n_units, n_hours), decompressed once per (year, draw, window) and
+        # shared with the next lookup (WP-E0).
+        up = _unit_slice(
+            path, root, yi, di, int(year), int(draw), window.start, window.stop
+        )
         pooled = [r for r in rows if r in known]
         avail = np.ones((len(window), len(rows)), dtype=np.float64)
         if pooled:

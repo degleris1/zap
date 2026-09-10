@@ -1,0 +1,20 @@
+# Phase-2 campaign, cell 2: the same single-level LP, block-separated into all
+# 52 weeks of the window. Coverage is 52*168/8736 = 1, so phi = 1 and cell 2 is
+# directly comparable with cell 1; per-week `cyclic_free` is a RESTRICTION of the
+# continuous solve, so cell 2's objective must be >= cell 1's, by roughly the
+# measured 168 h blocking error (0.011 %).
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_stochastic.yaml
+  - ../selection/all_weeks.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_c2_lp_weeks52
+dataset: {years: [2020], window: {start: 7, stop: 8743}}
+system: {demand_scaling: none, export_mode: drop}
+planning:
+  timeout_s: 14400
+  single_level: {solver: HIGHS, solver_kwargs: {}}
+output: {save_iterations: true}

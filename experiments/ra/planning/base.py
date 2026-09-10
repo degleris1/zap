@@ -69,6 +69,27 @@ PLANNING_DEFAULTS: dict = {
         "batch_strategy": "sequential",
         "init_full_loss": True,
         "save_param_history": True,
+        # Soft wall-clock cap on the *descent loop*, in seconds (null = none).
+        # The loop finishes the iteration it is in and breaks, so the design and
+        # the history survive.  It does not cover the build, the warm-start LP or
+        # the final forward pass, so a task's wall clock exceeds it;
+        # `planning.timeout_s` is the *hard* backstop over the whole task, which
+        # kills the subprocess and keeps nothing, and must be larger.
+        "max_seconds": None,
+        # Which iterate becomes the design:
+        #   final             -- the last one (the pre-2026-09-09 behaviour);
+        #   best_sampled      -- argmin of the sampled loss.  Exact only when
+        #                        the batch is the whole block set;
+        #   best_rolling      -- argmin of the running mean of the last
+        #                        `num_subproblems` losses;
+        #   best_checkpointed -- argmin over full-horizon forward passes taken
+        #                        every `checkpoint_every` iterations (plus the
+        #                        first and last), which is the unbiased rule for
+        #                        a minibatch run.  Costs one full forward pass
+        #                        per checkpoint.
+        "design_selection": "best_sampled",
+        # 0 = no checkpoints.  Required (> 0) by `best_checkpointed`.
+        "checkpoint_every": 0,
         # DEPRECATED and ignored: ``objective.raw`` is always the full forward
         # pass (inv + op), never the last minibatch loss.  The key is kept so
         # the config key space is unchanged; setting it true is a ConfigError.
@@ -113,6 +134,10 @@ SELECTION_DEFAULTS: dict = {
     "num_blocks": None,
     "avoid_year_boundaries": False,
     "seed": 42,
+    # `random` / `stratified` only: draw block starts from the `block_size` grid
+    # (0, B, 2B, ...) instead of from every hour, so a subset selection is a
+    # subset of `strategy: all` and "12 of the 52 weeks" is literally true.
+    "align_blocks": False,
 }
 
 #: ``planning.method`` preset -> the class that implements it (D-W2).

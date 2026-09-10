@@ -20,7 +20,12 @@ from typing import Any
 
 from .paths import zap_root
 
-EXCLUDED_FROM_HASH = ("execution", "output")
+#: ``evaluation`` joins them (WP-E2): ``allow_no_draws`` only gates a refusal
+#: -- the draws themselves are ``heuristics.outage_draws``, which *is* hashed --
+#: and ``splits_path`` only labels rows ``is_holdout`` at report time, with its
+#: contents and sha256 recorded in ``env.json``.  Neither changes a solve, and
+#: keeping them out means adding the block did not renumber every existing run.
+EXCLUDED_FROM_HASH = ("execution", "output", "evaluation")
 
 
 def canonical_json(cfg: dict) -> str:
@@ -113,7 +118,10 @@ def env_info(cfg: dict | None = None) -> dict:
     if cfg is not None:
         info["run_id"] = run_id(cfg)
         info["config_hash"] = config_hash(cfg)
-        # `output` is excluded from the hash, so `config.resolved.yaml` stores it
-        # at its defaults; the *effective* persistence flags are recorded here.
+        # `output`, `execution` and `evaluation` are excluded from the hash, so
+        # `config.resolved.yaml` stores the first two at their defaults; the
+        # *effective* values (persistence flags, task granularity) go here.
         info["output"] = dict(cfg.get("output") or {})
+        info["execution"] = dict(cfg.get("execution") or {})
+        info["evaluation"] = dict(cfg.get("evaluation") or {})
     return info

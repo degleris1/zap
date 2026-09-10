@@ -28,6 +28,7 @@ class SelectionSpec:
     num_blocks: int | None
     seed: int
     avoid_year_boundaries: bool = False
+    align_blocks: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -36,6 +37,7 @@ class SelectionSpec:
             "num_blocks": self.num_blocks,
             "seed": self.seed,
             "avoid_year_boundaries": self.avoid_year_boundaries,
+            "align_blocks": self.align_blocks,
         }
 
 
@@ -67,6 +69,7 @@ class SamplerSelector(PeriodSelector):
             strategy=spec.strategy,
             avoid_year_boundaries=spec.avoid_year_boundaries,
             seed=spec.seed,
+            align=spec.align_blocks,
         )
 
 
@@ -138,6 +141,7 @@ def selection_spec(cfg: dict) -> SelectionSpec:
         num_blocks=num_blocks,
         seed=int(sel["seed"]),
         avoid_year_boundaries=bool(sel["avoid_year_boundaries"]),
+        align_blocks=bool(sel["align_blocks"]),
     )
 
 

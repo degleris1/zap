@@ -5,6 +5,19 @@ pipeline reads it back as an :class:`experiments.ra.system.Design` and applies i
 to a freshly loaded system.  ``capacities`` is keyed by device *class* name so it
 feeds ``Design.capacities`` unchanged, and ``names`` is the source-row order:
 a design built on a different dataset must fail loudly, not silently mis-map.
+
+**``objective.capex_annual`` is required to be scored.** It is
+:math:`\\gamma^\\top(\\eta - \\eta^0)`, the first half of the evaluation
+criterion (FORMULATIONS 3.4), and the evaluator adds it to the mean operational
+cost.  A record without it has an *unknown* capex: ``eval.parquet`` reports
+``total_cost_usd = NaN`` and the design cannot be ranked, rather than being
+scored on opex alone and out-ranking every design that paid for its capacity
+(verifier F3, 2026-09-09).  A design that genuinely spends nothing -- the
+**as-built comparator** of the evaluation spec's section 5.1 regression -- opts
+in by recording ``objective.capex_annual: 0.0`` explicitly; 0.0 is a number, a
+missing key is not.  ``result_to_record`` writes whatever
+``PlanningResult.objective`` holds, so every planning path already satisfies
+this; only hand-written comparator records have to say it.
 """
 
 from __future__ import annotations
@@ -215,12 +228,22 @@ def read_design(path, system=None) -> Design:
     return record_to_design(read_design_record(path), system=system)
 
 
+#: Files in ``designs/`` that are not designs: the history sidecars and the
+#: evaluation run's ``SOURCES.json`` ledger (WP-E2).
+NON_DESIGN_SUFFIXES = (".history.json",)
+NON_DESIGN_NAMES = ("SOURCES.json",)
+
+
 def design_paths(run_dir) -> list[Path]:
-    """``runs/<id>/designs/*.json``, excluding the history sidecars."""
+    """``runs/<id>/designs/*.json``, excluding the sidecars and ``SOURCES.json``."""
     designs = Path(run_dir) / "designs"
     if not designs.is_dir():
         return []
-    return sorted(p for p in designs.glob("*.json") if not p.name.endswith(".history.json"))
+    return sorted(
+        p
+        for p in designs.glob("*.json")
+        if not p.name.endswith(NON_DESIGN_SUFFIXES) and p.name not in NON_DESIGN_NAMES
+    )
 
 
 def read_history(run_dir, design_id: str) -> dict | None:

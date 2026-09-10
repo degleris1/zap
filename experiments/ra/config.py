@@ -81,7 +81,12 @@ VALID_EXPANSION_MODES = ("none", "pypsa")
 VALID_EMISSIONS_MODES = ("none", "price", "cap", "dual_ascent")
 VALID_CAP_BASIS = ("annual", "horizon")
 VALID_BATCH_STRATEGIES = ("sequential", "fixed", "random")
+VALID_DESIGN_SELECTION = ("final", "best_sampled", "best_rolling", "best_checkpointed")
 VALID_MACHINES = ("cpu", "cuda", "mps")
+
+#: ``execution.task_granularity`` values (WP-E3): one task per block solve, or
+#: one per (design, year, draw) case whose blocks are solved in one process.
+VALID_TASK_GRANULARITIES = ("block", "case")
 
 #: ``selection`` keys each mode actually reads (R-W9); logged by ``cli run``.
 DISPATCH_SELECTION_KEYS = ("blocks", "reference", "reference_window")
@@ -253,6 +258,8 @@ def normalize(cfg: dict) -> dict:
 
     _normalize_planning(cfg["planning"])
     _normalize_output(cfg["output"])
+    _normalize_execution(cfg["execution"])
+    _normalize_evaluation(cfg["evaluation"])
 
     for name in METHOD_NAMES:
         method = cfg["methods"][name]
@@ -289,6 +296,23 @@ def _normalize_output(out: dict) -> None:
         raise ConfigError(
             f"output.admm_trace_every must be an integer, got {out['admm_trace_every']!r}"
         ) from exc
+
+
+def _normalize_execution(execution: dict) -> None:
+    """Coerce the ``execution`` block in place (WP-E3)."""
+    execution["task_granularity"] = str(execution["task_granularity"])
+    if execution["task_granularity"] not in VALID_TASK_GRANULARITIES:
+        raise ConfigError(
+            f"execution.task_granularity must be one of {VALID_TASK_GRANULARITIES}, "
+            f"got {execution['task_granularity']!r}"
+        )
+
+
+def _normalize_evaluation(evaluation: dict) -> None:
+    """Coerce the ``evaluation`` block in place (WP-E2)."""
+    evaluation["allow_no_draws"] = bool(evaluation["allow_no_draws"])
+    if evaluation["splits_path"] is not None:
+        evaluation["splits_path"] = str(evaluation["splits_path"])
 
 
 def _validate_output(cfg: dict) -> None:
@@ -367,6 +391,9 @@ def _normalize_planning(plan: dict) -> None:
     opt["batch_strategy"] = str(opt["batch_strategy"])
     for key in ("init_full_loss", "save_param_history", "eval_final_full_loss"):
         opt[key] = bool(opt[key])
+    opt["max_seconds"] = None if opt["max_seconds"] is None else float(opt["max_seconds"])
+    opt["design_selection"] = str(opt["design_selection"])
+    opt["checkpoint_every"] = int(opt["checkpoint_every"])
     opt["peak_net_load_k"] = None if opt["peak_net_load_k"] is None else int(opt["peak_net_load_k"])
     opt["peak_net_load_rerank_every"] = int(opt["peak_net_load_rerank_every"])
 
@@ -437,6 +464,42 @@ def _validate_planning(cfg: dict) -> None:
             f"planning.optimizer.batch_strategy must be one of {VALID_BATCH_STRATEGIES}, "
             f"got {plan['optimizer']['batch_strategy']!r}"
         )
+    opt = plan["optimizer"]
+    if opt["design_selection"] not in VALID_DESIGN_SELECTION:
+        raise ConfigError(
+            f"planning.optimizer.design_selection must be one of {VALID_DESIGN_SELECTION}, "
+            f"got {opt['design_selection']!r}"
+        )
+    if opt["max_seconds"] is not None and opt["max_seconds"] <= 0:
+        raise ConfigError(
+            "planning.optimizer.max_seconds must be null or a positive number of seconds, "
+            f"got {opt['max_seconds']!r}"
+        )
+    if opt["max_seconds"] is not None and opt["max_seconds"] >= float(plan["timeout_s"]):
+        raise ConfigError(
+            f"planning.optimizer.max_seconds ({opt['max_seconds']}) must be smaller than the "
+            f"hard backstop planning.timeout_s ({plan['timeout_s']}): the soft cap breaks the "
+            "loop gracefully and keeps the design, the hard one kills the subprocess and "
+            "keeps nothing."
+        )
+    if opt["checkpoint_every"] < 0:
+        raise ConfigError(
+            "planning.optimizer.checkpoint_every must be >= 0 (0 = no checkpoints), "
+            f"got {opt['checkpoint_every']}"
+        )
+    if opt["design_selection"] == "best_checkpointed" and opt["checkpoint_every"] <= 0:
+        raise ConfigError(
+            "planning.optimizer.design_selection 'best_checkpointed' needs "
+            "planning.optimizer.checkpoint_every > 0: there is nothing to choose between."
+        )
+    if opt["design_selection"] in ("best_sampled", "best_rolling") and not opt[
+        "save_param_history"
+    ]:
+        raise ConfigError(
+            f"planning.optimizer.design_selection {opt['design_selection']!r} needs "
+            "planning.optimizer.save_param_history: true (the chosen iterate is read back "
+            "out of the parameter history)."
+        )
     if plan["emissions"]["mode"] not in VALID_EMISSIONS_MODES:
         raise ConfigError(
             f"planning.emissions.mode must be one of {VALID_EMISSIONS_MODES}, "
@@ -479,6 +542,11 @@ def _validate_planning(cfg: dict) -> None:
         raise ConfigError(f"selection.block_size must be positive or null, got {sel['block_size']}")
     if sel["num_blocks"] is not None and sel["num_blocks"] <= 0:
         raise ConfigError(f"selection.num_blocks must be positive or null, got {sel['num_blocks']}")
+    if sel.get("align_blocks") and sel["strategy"] not in ("random", "stratified"):
+        raise ConfigError(
+            f"selection.align_blocks has no meaning for strategy {sel['strategy']!r}; "
+            "it only constrains the random draws of 'random' / 'stratified'."
+        )
 
     # The selection registry and the D-W5 emissions matrix live with the
     # planning core; import them lazily so `config` stays importable without it.

@@ -44,6 +44,9 @@ selection:
   num_blocks: null
   avoid_year_boundaries: false
   seed: 42
+  # `random` / `stratified` only: draw starts from the block_size grid, so the
+  # selection is a subset of `strategy: all` ("12 of the 52 weeks" literally).
+  align_blocks: false
 planning:                   # `mode: plan` only (WP5 spec 8.1)
   method: monolithic        # monolithic | stochastic | relaxed | gradient | admm
   dispatch_solver: CLARABEL
@@ -85,6 +88,23 @@ planning:                   # `mode: plan` only (WP5 spec 8.1)
     batch_strategy: sequential   # sequential | fixed | random
     init_full_loss: true
     save_param_history: true
+    # SOFT wall-clock cap on the DESCENT LOOP, in seconds (null = none): the
+    # loop finishes the iteration it is in, records it and breaks, so the design
+    # and the history survive. It does NOT cover the system build, the
+    # warm-start LP, the checkpoints' bookkeeping or the final forward pass, so
+    # a cell's wall clock is `timing.warm_start_s + timing.solve_s` and exceeds
+    # this number. `planning.timeout_s` above is the HARD backstop that covers
+    # the whole task (the subprocess is killed and nothing is kept) and must be
+    # larger.
+    max_seconds: null
+    # Which iterate becomes the design:
+    #   final | best_sampled | best_rolling | best_checkpointed
+    # `best_sampled` is exact only when the batch is the whole block set
+    # (batch_size: 0); with a minibatch, argmin over the sampled losses picks
+    # the luckiest batch, so use `best_checkpointed` (full-horizon forward pass
+    # every `checkpoint_every` iterations, plus the first and last iterate).
+    design_selection: best_sampled
+    checkpoint_every: 0     # 0 = none; > 0 required by best_checkpointed
     eval_final_full_loss: false  # DEPRECATED and ignored; setting it true is a ConfigError
     peak_net_load_k: null
     peak_net_load_rerank_every: 1
@@ -157,6 +177,24 @@ execution:
   shard: null               # "k/n"; null = all tasks
   max_tasks: null
   force: false
+  # What one task is (WP-E3, D1). `block` = one block solve per task file, which
+  # every phase-1 dispatch benchmark ran with and which stays the default.
+  # `case` = one (design, year, draw) per task file, whose blocks are solved in a
+  # loop in one process and written as ONE nested record: 500 files instead of
+  # 26,000 for the z4 evaluation. `metrics.read_task_records` flattens the nested
+  # record, so metrics.csv is per block either way (equivalence: spec 5.7).
+  # `execution` is excluded from the run-id hash: this changes the files a run
+  # writes, never its numbers.
+  task_granularity: block   # block | case
+evaluation:                 # `ra evaluate` only (WP-E2)
+  # A draws-free evaluation scores weather variability alone, which is not the
+  # criterion (the design is judged against realised outages). It is allowed only
+  # for the as-built regression of the evaluation spec, section 5.1.
+  allow_no_draws: false
+  # Path to the train / held-out split file; null -> <brain>/data/splits.yaml.
+  # The lists and the file's sha256 are copied into env.json at run time, so a
+  # later edit cannot silently reclassify a finished run (spec E10).
+  splits_path: null
 output:
   # Persistence flags. `output` is excluded from the run-id hash (identity.
   # EXCLUDED_FROM_HASH): what a run writes never changes what it computes.  The

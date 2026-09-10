@@ -46,6 +46,58 @@ STATUS_TIMEOUT = "timeout"
 STATUS_INFEASIBLE = "infeasible"
 
 
+#: Worst-first precedence used to fold a case's block statuses into one status
+#: (WP-E3): a case is ``ok`` only if every one of its blocks is.
+_STATUS_SEVERITY = {
+    STATUS_OK: 0,
+    STATUS_INFEASIBLE: 1,
+    STATUS_TIMEOUT: 2,
+    STATUS_FAILED: 3,
+}
+
+#: ``execution.task_granularity`` values.  ``block`` (the default) is one task
+#: per block solve, which every phase-1 dispatch benchmark ran with; ``case`` is
+#: one task per (design, year, draw), which is the natural unit of an evaluation
+#: row and keeps the file count survivable (spec 2.2 / D1).
+GRANULARITY_BLOCK = "block"
+GRANULARITY_CASE = "case"
+VALID_GRANULARITIES = (GRANULARITY_BLOCK, GRANULARITY_CASE)
+
+
+def task_granularity(cfg: dict) -> str:
+    return str((cfg.get("execution") or {}).get("task_granularity", GRANULARITY_BLOCK))
+
+
+def record_granularity(record: dict) -> str:
+    """``case`` for a nested record, ``block`` for a per-block one."""
+    return GRANULARITY_CASE if isinstance(record.get("blocks"), list) else GRANULARITY_BLOCK
+
+
+def existing_granularity(run_dir: Path) -> str | None:
+    """The granularity of the task files already in ``run_dir``, or ``None``.
+
+    ``execution`` is excluded from the run-id hash (changing how a run is cut
+    into tasks must not renumber it), so one run directory accepts an
+    invocation of either granularity.  Left alone, a ``block`` run followed by a
+    ``case`` run leaves *both* files for the same blocks in ``tasks/`` --
+    resume-skip only ever looks for its own file name -- and
+    ``metrics.read_task_records`` then yields every block twice: doubled sums
+    and ``coverage == 2`` (verifier F1, 2026-09-09).  So the directory, not the
+    config, decides: :func:`experiments.ra.cli.touch_run_dir` adopts what is
+    already there.  Reads one file, not the whole ledger, so this stays O(1) on
+    a 3 M-task campaign.
+    """
+    for path in sorted(tasks_dir(run_dir).glob("*.json")):
+        try:
+            with open(path, "r") as f:
+                record = json.load(f)
+        except (OSError, json.JSONDecodeError):  # pragma: no cover - defensive
+            continue
+        if isinstance(record, dict):
+            return record_granularity(record)
+    return None
+
+
 @dataclass(frozen=True)
 class Task:
     task_id: str
@@ -54,6 +106,37 @@ class Task:
     block_size: int | str
     draw: int | None = None
     design_id: str = "asbuilt"
+
+
+@dataclass(frozen=True)
+class CaseTask:
+    """One (design, year, draw) case: its blocks solved in one process (WP-E3).
+
+    Every number in ``eval.parquet`` is a sum over a case's blocks and every
+    reliability average is over cases, so the case is the natural atom of an
+    evaluation.  It is also one system *build* by construction rather than by
+    cache luck at a shard boundary.  The record it writes nests today's
+    per-block records under ``blocks``, and ``metrics.read_task_records``
+    flattens them, so ``metrics.csv`` stays exactly per block.
+    """
+
+    task_id: str
+    method: str
+    block_size: int | str
+    year: int
+    draw: int | None
+    design_id: str
+    tasks: tuple[Task, ...]
+
+    @property
+    def block(self) -> Block:
+        """The span the case covers, for ``filter_tasks`` and ``cli plan``."""
+        return Block(
+            index=0,
+            year=self.year,
+            start=min(t.block.start for t in self.tasks),
+            stop=max(t.block.stop for t in self.tasks),
+        )
 
 
 def make_task_id(
@@ -66,10 +149,24 @@ def make_task_id(
 
 
 def make_plan_task_id(
-    *, preset: str, strategy: str, block_size, seed: int, draw: int | None
+    *, preset: str, strategy: str, block_size, seed: int, draw: int | None, batch_size: int = 0
 ) -> str:
+    """The task id -- and hence the design id -- of one planning solve.
+
+    ``batch_size`` is part of the id because a deterministic gradient run
+    (``batch_size: 0``) and a stochastic one over the same block pool differ in
+    nothing else, and ``evaluate.evaluate_designs`` requires unique design ids.
+    A zero batch size adds no suffix, so the ids of the single-level presets are
+    unchanged.  Gradient / ADMM configs are **not**: ``methods/plan_gradient.yaml``
+    and ``methods/plan_admm.yaml`` set ``batch_size: 4``, so every config that
+    inherits from them gains a ``-B4`` and its design id (and hence its run id,
+    which hashes the config) changes.  No planning run existed when this landed,
+    so nothing was invalidated.
+    """
     size = FULL_HORIZON if block_size is None else int(block_size)
     task_id = f"plan-{preset}-{strategy}-b{size}-s{int(seed)}"
+    if int(batch_size or 0) > 0:
+        task_id += f"-B{int(batch_size)}"
     if draw is not None:
         task_id += f"-d{draw}"
     return task_id
@@ -93,6 +190,7 @@ def enumerate_plan_tasks(cfg: dict) -> list[Task]:
             block_size=block_size,
             seed=sel["seed"],
             draw=draw,
+            batch_size=(plan.get("optimizer") or {}).get("batch_size", 0),
         )
         tasks.append(
             Task(
@@ -110,10 +208,102 @@ def enumerate_plan_tasks(cfg: dict) -> list[Task]:
     return tasks
 
 
-def enumerate_tasks(cfg: dict, design_ids: Sequence[str] = ("asbuilt",)) -> list[Task]:
-    """All tasks of a run, in a deterministic order."""
+def make_case_task_id(
+    *, design_id: str, method: str, block_size: int | str, year: int, draw: int | None
+) -> str:
+    """The task id of one case, e.g. ``asbuilt-lp-168-y2020-d7`` (spec 2.2).
+
+    No collision with :func:`make_task_id`: a block id always carries a
+    ``-bNNNNN`` segment that a case id never has.
+    """
+    task_id = f"{design_id}-{method}-{block_size}-y{year}"
+    if draw is not None:
+        task_id += f"-d{draw}"
+    return task_id
+
+
+def _block_sizes(cfg: dict) -> list[int | str]:
+    block_sizes: list[int | str] = [int(b) for b in cfg["selection"]["blocks"]]
+    if cfg["selection"]["reference"] != "none":
+        block_sizes.append(REFERENCE)
+    return block_sizes
+
+
+def enumerate_case_tasks(cfg: dict, design_ids: Sequence[str] = ("asbuilt",)) -> list[CaseTask]:
+    """Case tasks in **design-inner** order: year, draw, design, method, size.
+
+    Design-inner is what makes WP-E0's unit-slice cache pay: each (year, draw)
+    zarr slice is decompressed once per process and re-weighted per design,
+    instead of once per (design, draw) (spec 2.2).  Shards are contiguous over
+    this list, so a shard never splits a case, and with ``n_shards`` dividing the
+    number of draws it never splits a (year, draw) group either.
+    """
+    draws = [int(d) for d in cfg["heuristics"]["outage_draws"]] or [None]
+    years = [int(y) for y in cfg["dataset"]["years"]]
+    sizes = _block_sizes(cfg)
+    blocks_by_size = {size: make_blocks(cfg, size) for size in sizes}
+
+    cases: list[CaseTask] = []
+    for year in years:
+        for draw in draws:
+            for design_id in design_ids:
+                for method in METHOD_ORDER:
+                    if not cfg["methods"][method]["enabled"]:
+                        continue
+                    for block_size in sizes:
+                        blocks = [b for b in blocks_by_size[block_size] if b.year == year]
+                        if not blocks:
+                            continue
+                        tasks = tuple(
+                            Task(
+                                task_id=make_task_id(
+                                    design_id=design_id,
+                                    method=method,
+                                    block_size=block_size,
+                                    year=block.year,
+                                    index=block.index,
+                                    draw=draw,
+                                ),
+                                method=method,
+                                block=block,
+                                block_size=block_size,
+                                draw=draw,
+                                design_id=design_id,
+                            )
+                            for block in blocks
+                        )
+                        cases.append(
+                            CaseTask(
+                                task_id=make_case_task_id(
+                                    design_id=design_id,
+                                    method=method,
+                                    block_size=block_size,
+                                    year=year,
+                                    draw=draw,
+                                ),
+                                method=method,
+                                block_size=block_size,
+                                year=year,
+                                draw=draw,
+                                design_id=design_id,
+                                tasks=tasks,
+                            )
+                        )
+    return cases
+
+
+def enumerate_tasks(cfg: dict, design_ids: Sequence[str] = ("asbuilt",)) -> list:
+    """All tasks of a run, in a deterministic order.
+
+    ``execution.task_granularity: case`` returns :class:`CaseTask` objects
+    instead of one :class:`Task` per block; ``execution`` is excluded from the
+    run-id hash, so the granularity changes the *files* a run writes and never
+    its numbers (the equivalence is spec section 5.7).
+    """
     if is_plan_mode(cfg):
         return enumerate_plan_tasks(cfg)
+    if task_granularity(cfg) == GRANULARITY_CASE:
+        return enumerate_case_tasks(cfg, design_ids)
     draws = [int(d) for d in cfg["heuristics"]["outage_draws"]] or [None]
     block_sizes: list[int | str] = [int(b) for b in cfg["selection"]["blocks"]]
     if cfg["selection"]["reference"] != "none":
@@ -328,6 +518,18 @@ def _solve_with_timeout(task: Task, cfg: dict, timeout_s: float, design=None, ru
 
 def run_task(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any]:
     """Run one task and write its result file. Never raises on a solver failure."""
+    record = block_record(task, cfg, run_dir, design=design)
+    write_json_atomic(task_path(run_dir, task), record)
+    return record
+
+
+def block_record(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any]:
+    """Solve one block and return its ledger record, **without writing a file**.
+
+    Split out of :func:`run_task` so a case task (WP-E3) can produce exactly
+    today's per-block records and nest them, which is what keeps ``metrics.csv``
+    byte-for-byte identical across the two granularities.
+    """
     run_dir = Path(run_dir)
     timeout_s = task_timeout_s(task, cfg)
 
@@ -411,9 +613,92 @@ def run_task(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any
         "started_utc": started,
         "finished_utc": _utcnow(),
     }
-    write_json_atomic(task_path(run_dir, task), record)
     _record_system_meta(run_dir, payload.get("system_meta"))
     return record
+
+
+def case_status(block_records: Sequence[dict]) -> str:
+    """The worst block status of a case: ``ok`` only when every block is ``ok``.
+
+    Keeps the existing "never average a failed row" rule intact -- the failing
+    block keeps its own status in the flattened ``metrics.csv`` and the other
+    blocks keep theirs, so one bad block does not throw away 51 good rows.
+    """
+    worst = STATUS_OK
+    for record in block_records:
+        status = str(record.get("status") or STATUS_OK)
+        if _STATUS_SEVERITY.get(status, 3) > _STATUS_SEVERITY.get(worst, 0):
+            worst = status
+    return worst
+
+
+def _prebuild_system(case: CaseTask, cfg: dict, design=None) -> tuple[float, str | None]:
+    """Build the case's system once and time it; ``(seconds, error)``.
+
+    The blocks then hit ``system.build_system``'s process cache, so the case's
+    build cost is measured rather than smeared over 52 block solves (spec 2.2 and
+    the ``build_wall_clock_s`` column of section 4.1).  A failure here is *not*
+    raised: the per-block solves below will fail with the same error and be
+    recorded one by one, exactly as they would under block granularity.
+    """
+    if dispatch.is_stub(cfg, case.method):
+        return 0.0, None
+    from . import system as system_mod
+
+    if not system_mod.WP1_AVAILABLE:  # pragma: no cover - defensive
+        return 0.0, None
+    t0 = time.perf_counter()
+    try:
+        system_mod.build_system(cfg, draw=case.draw, design=design)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning("case %s could not build its system: %s", case.task_id, exc)
+        return time.perf_counter() - t0, f"{type(exc).__name__}: {exc}"
+    return time.perf_counter() - t0, None
+
+
+def run_case_task(case: CaseTask, cfg: dict, run_dir: Path, design=None) -> dict[str, Any]:
+    """Solve every block of one case in this process and write **one** record.
+
+    The record nests the per-block records under ``blocks``;
+    ``metrics.read_task_records`` flattens them, so ``eval.parquet``,
+    ``deviation_vs_reference`` and every plot are unchanged (spec 2.2).
+    """
+    run_dir = Path(run_dir)
+    started = _utcnow()
+    t0 = time.perf_counter()
+
+    build_wall, build_error = _prebuild_system(case, cfg, design=design)
+    records = []
+    for i, task in enumerate(case.tasks):
+        record = block_record(task, cfg, run_dir, design=design)
+        # The build is charged to the case, so only the first block carries it:
+        # `eval.parquet` sums this column over a case's blocks.
+        record["build_wall_clock_s"] = float(build_wall) if i == 0 else 0.0
+        records.append(record)
+
+    status = case_status(records)
+    errors = [r.get("error") for r in records if r.get("error")]
+    payload = {
+        "task_id": case.task_id,
+        "status": status,
+        "method": case.method,
+        "block_size": case.block_size,
+        "year": case.year,
+        "draw": case.draw,
+        "design_id": case.design_id,
+        "n_blocks": len(records),
+        "n_blocks_ok": sum(1 for r in records if r.get("status") == STATUS_OK),
+        "wall_clock_s": time.perf_counter() - t0,
+        "build_wall_clock_s": float(build_wall),
+        "build_error": build_error,
+        "error": errors[0] if errors else None,
+        "n_errors": len(errors),
+        "started_utc": started,
+        "finished_utc": _utcnow(),
+        "blocks": records,
+    }
+    write_json_atomic(task_path(run_dir, case), payload)
+    return payload
 
 
 def _record_system_meta(run_dir: Path, meta: dict | None) -> None:
@@ -438,7 +723,12 @@ def run_tasks(
     force: bool = False,
     designs: dict | None = None,
 ) -> list[dict]:
-    """Run a list of tasks, skipping those already done unless ``force``."""
+    """Run a list of tasks, skipping those already done unless ``force``.
+
+    Accepts :class:`Task` and :class:`CaseTask` entries; resume-skip is at the
+    granularity of whatever was enumerated, so a finished case is skipped whole
+    and an unfinished one re-runs all of its blocks.
+    """
     records = []
     for i, task in enumerate(tasks, start=1):
         if not force and is_done(run_dir, task):
@@ -446,7 +736,10 @@ def run_tasks(
             continue
         logger.info("[%d/%d] running task %s", i, len(tasks), task.task_id)
         design = (designs or {}).get(task.design_id)
-        records.append(run_task(task, cfg, run_dir, design=design))
+        if isinstance(task, CaseTask):
+            records.append(run_case_task(task, cfg, run_dir, design=design))
+        else:
+            records.append(run_task(task, cfg, run_dir, design=design))
     return records
 
 

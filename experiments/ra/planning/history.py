@@ -108,11 +108,7 @@ def iterations_schema() -> pa.Schema:
         pa.field("n_batch", pa.int32()),
         pa.field("batch_hours", pa.int32()),
     ]
-    floats = [
-        c
-        for c in ITERATIONS_COLUMNS
-        if c not in {f.name for f in fields}
-    ]
+    floats = [c for c in ITERATIONS_COLUMNS if c not in {f.name for f in fields}]
     by_name = {f.name: f for f in fields}
     by_name.update({c: pa.field(c, pa.float64()) for c in floats})
     return pa.schema([by_name[c] for c in ITERATIONS_COLUMNS])
@@ -204,7 +200,7 @@ def _lambda_for_outer(result, outer: int) -> float:
 def _device_class_for_param(result, param: str) -> str:
     """``generator_capacity -> Generator`` via the recorded capacity blocks."""
     prefix = param.rsplit("_", 1)[0]
-    for cls_name in (result.capacities or {}):
+    for cls_name in result.capacities or {}:
         if str(cls_name).lower() == prefix:
             return str(cls_name)
     return prefix
@@ -253,11 +249,18 @@ def build_iteration_tables(result, *, task=None) -> dict[str, pd.DataFrame]:
     clip = float(optimizer.get("clip", float("nan")))
     save_params = bool(optimizer.get("save_param_history", True))
     labels = meta.get("carrier_labels") or {}
-    blocks = [
-        (int(a), int(b)) for a, b in ((result.selection or {}).get("blocks") or [])
-    ]
+    blocks = [(int(a), int(b)) for a, b in ((result.selection or {}).get("blocks") or [])]
     annualization = result.annualization or {}
     af = float(annualization.get("annualization_factor") or float("nan"))
+
+    # `design_selection: best_checkpointed` evaluates the objective over the
+    # WHOLE block set at selected iterates; those are the only full-horizon
+    # numbers a minibatch run has, so they land in the column reserved for them.
+    checkpoints = {
+        (int(c.get("outer_iteration") or 0), int(c["iteration"])): c
+        for c in ((getattr(result, "objective", None) or {}).get("checkpoints") or [])
+        if c.get("iteration") is not None
+    }
 
     scalar_rows: list[dict[str, Any]] = []
     block_rows: list[dict[str, Any]] = []
@@ -280,9 +283,7 @@ def build_iteration_tables(result, *, task=None) -> dict[str, pd.DataFrame]:
 
         for i in range(n):
             batch = [int(b) for b in (batches[i] if i < len(batches) else [])]
-            batch_hours = sum(
-                blocks[b][1] - blocks[b][0] for b in batch if 0 <= b < len(blocks)
-            )
+            batch_hours = sum(blocks[b][1] - blocks[b][0] for b in batch if 0 <= b < len(blocks))
             # `StochasticPlanningProblem._get_batch_weights` already rescales a
             # minibatch by `total_weight / total_batch_weight`, so `history["loss"]`
             # is in the units of the WHOLE block set (`sampled_hours`), not of the
@@ -317,8 +318,14 @@ def build_iteration_tables(result, *, task=None) -> dict[str, pd.DataFrame]:
                     "n_batch": len(batch),
                     "batch_hours": int(batch_hours),
                     "sampled_objective_annual": annual,
-                    # Reserved for evaluation-in-the-loop (P4's second series).
-                    "estimated_full_objective_annual": float("nan"),
+                    # A full-block-set forward pass at this iterate, when one
+                    # was taken (`optimizer.checkpoint_every`); NaN otherwise.
+                    # P4's second series.
+                    "estimated_full_objective_annual": float(
+                        checkpoints[(outer, i)].get("objective_annual", float("nan"))
+                    )
+                    if (outer, i) in checkpoints
+                    else float("nan"),
                     "grad_norm_l1": grad_l1[i],
                     "grad_norm_l2": g2,
                     "proj_grad_norm_l1": proj[i],

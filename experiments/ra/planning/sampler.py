@@ -110,11 +110,18 @@ class SystemBlockSampler:
         strategy: str = "all",
         avoid_year_boundaries: bool = False,
         seed: int | None = None,
+        align: bool = False,
     ) -> list[tuple[int, int]]:
         """Sample contiguous time blocks from the combined horizon.
 
         ``block_size=None`` is the monolithic sentinel: one block of
         ``total_hours``.
+
+        ``align`` restricts ``random`` / ``stratified`` starts to the
+        ``block_size`` grid, so the sampled blocks are a *subset* of
+        ``strategy: all`` (and, with ``avoid_year_boundaries``, of each year's
+        own grid).  Off by default: it changes which blocks an existing seed
+        draws.
         """
         if block_size is None:
             return [(0, self.total_hours)]
@@ -129,11 +136,13 @@ class SystemBlockSampler:
         elif strategy == "random":
             if num_blocks is None:
                 raise ValueError("num_blocks required for 'random' strategy")
-            return self._sample_random(block_size, num_blocks, avoid_year_boundaries, rng)
+            return self._sample_random(
+                block_size, num_blocks, avoid_year_boundaries, rng, align=align
+            )
         elif strategy == "stratified":
             if num_blocks is None:
                 raise ValueError("num_blocks required for 'stratified' strategy")
-            return self._sample_stratified(block_size, num_blocks, rng)
+            return self._sample_stratified(block_size, num_blocks, rng, align=align)
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
@@ -168,8 +177,15 @@ class SystemBlockSampler:
         num_blocks: int,
         avoid_boundaries: bool,
         rng: np.random.Generator,
+        align: bool = False,
     ) -> list[tuple[int, int]]:
-        """Sample random non-overlapping blocks."""
+        """Sample random non-overlapping blocks.
+
+        With ``align``, starts step by ``block_size`` from the start of the
+        horizon (or of each year, when boundaries are avoided), so the result is
+        a subset of ``_sample_all(block_size)``.
+        """
+        step = block_size if align else 1
         if avoid_boundaries:
             # Only allow starts that don't cross year boundaries
             valid_starts = []
@@ -178,9 +194,9 @@ class SystemBlockSampler:
                 year_end = self.year_boundaries[y + 1]
                 max_start = year_end - block_size
                 if max_start >= year_start:
-                    valid_starts.extend(range(year_start, max_start + 1))
+                    valid_starts.extend(range(year_start, max_start + 1, step))
         else:
-            valid_starts = list(range(self.total_hours - block_size + 1))
+            valid_starts = list(range(0, self.total_hours - block_size + 1, step))
 
         # Sample non-overlapping blocks
         blocks = []
@@ -206,8 +222,10 @@ class SystemBlockSampler:
         block_size: int,
         num_blocks: int,
         rng: np.random.Generator,
+        align: bool = False,
     ) -> list[tuple[int, int]]:
         """Sample blocks stratified by year (proportional to year length)."""
+        step = block_size if align else 1
         blocks = []
 
         # Distribute blocks proportionally to year length
@@ -239,7 +257,7 @@ class SystemBlockSampler:
                 logger.warning(f"Year {y} too short for block_size {block_size}")
                 continue
 
-            valid_starts = list(range(year_start, max_start + 1))
+            valid_starts = list(range(year_start, max_start + 1, step))
 
             # Sample non-overlapping within this year
             year_blocks = []

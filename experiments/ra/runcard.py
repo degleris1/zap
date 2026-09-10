@@ -248,6 +248,15 @@ def planning_sections(run_dir: Path, cfg: dict, df: pd.DataFrame | None) -> list
     )
     lines.append(f"- **num_blocks:** {sel['num_blocks']}")
     lines.append(f"- **avoid_year_boundaries:** {sel['avoid_year_boundaries']}")
+    lines.append(
+        f"- **align_blocks:** {sel.get('align_blocks', False)}"
+        + (
+            " (random starts are drawn from the block_size grid, so the selection is a "
+            "subset of `strategy: all`)"
+            if sel.get("align_blocks")
+            else ""
+        )
+    )
     lines.append("")
 
     lines.append("## Annualization\n")
@@ -311,6 +320,12 @@ def planning_sections(run_dir: Path, cfg: dict, df: pd.DataFrame | None) -> list
                     "lower_bound_raw": obj.get("lower_bound_raw"),
                     "optimality_gap": obj.get("optimality_gap"),
                     "status": record.get("solver", {}).get("status"),
+                    # Which iterate the design is, and why the loop stopped.
+                    # Empty for the single-level presets, which have neither.
+                    "design_selection": obj.get("design_selection"),
+                    "design_iteration": obj.get("design_iteration"),
+                    "iters_done": record.get("solver", {}).get("num_iterations_completed"),
+                    "stopped_by": record.get("solver", {}).get("stopped_by"),
                 }
             )
         lines.append(_table(pd.DataFrame(rows)))
@@ -363,6 +378,246 @@ def planning_sections(run_dir: Path, cfg: dict, df: pd.DataFrame | None) -> list
             )
     else:
         lines.append("_(none)_")
+    lines.append("")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Evaluation-run sections (WP-E4, evaluation spec 4.5)
+# ---------------------------------------------------------------------------
+
+#: Columns of the `eval_summary` ranking block, in the order the card prints
+#: them, and their headings.
+RANKING_COLUMNS = (
+    ("design_id", "design"),
+    ("rank_score", "rank"),
+    ("score_usd", "score $"),
+    ("score_se_usd", "± SE $"),
+    ("capex_annual_usd", "capex $/yr"),
+    ("opex_mean_usd", "opex $"),
+    ("voll_cost_mean_usd", "VOLL cost $"),
+    ("eue_mwh_mean", "EUE MWh"),
+    ("lolh_mean", "LOLH h"),
+    ("lolp", "LOLP"),
+    ("co2_tonnes_mean", "CO2 t"),
+    ("n_cases", "cases"),
+)
+
+
+def _ranking_table(summary: pd.DataFrame, split: str) -> pd.DataFrame:
+    if summary is None or summary.empty:
+        return pd.DataFrame()
+    rows = summary[summary["split"].astype(str) == split]
+    if rows.empty:
+        return pd.DataFrame()
+    rows = rows.sort_values("score_usd")
+    keep = [c for c, _ in RANKING_COLUMNS if c in rows.columns]
+    out = rows[keep].rename(columns=dict(RANKING_COLUMNS))
+    return out
+
+
+def evaluation_sections(run_dir: Path, cfg: dict, df: pd.DataFrame | None) -> list[str]:
+    """Sections 1-7 of the evaluation card (evaluation spec 4.5).
+
+    Everything here is read back off disk (``eval.parquet``, ``eval_summary``,
+    ``preflight.json``, ``designs/SOURCES.json``), so an aggregate-only
+    invocation after a SLURM array produces the same card as an unsharded run.
+    """
+    from . import evaluate as evaluate_mod
+
+    run_dir = Path(run_dir)
+    lines: list[str] = []
+
+    def _read(name: str) -> pd.DataFrame:
+        path = run_dir / name
+        try:
+            return pd.read_parquet(path) if path.exists() else pd.DataFrame()
+        except Exception:  # noqa: BLE001 - a card must never fail on a bad artefact
+            return pd.DataFrame()
+
+    evaluation = _read("eval.parquet")
+    summary = _read("eval_summary.parquet")
+    sources = {e["design_id"]: e for e in evaluate_mod.read_sources(run_dir)}
+    records = {r.get("design_id"): r for r in read_design_records(run_dir)}
+
+    # 1. Designs scored -----------------------------------------------------
+    lines.append("## Designs scored\n")
+    rows = []
+    for design_id, record in sorted(records.items(), key=lambda kv: str(kv[0])):
+        source = sources.get(design_id, {})
+        objective = record.get("objective") or {}
+        built = sum(
+            float(v)
+            for entry in (record.get("capacities") or {}).values()
+            for k, values in entry.items()
+            if k != "names"
+            for v in values
+        )
+        rows.append(
+            {
+                "design_id": design_id,
+                "source_run": source.get("source_run_id") or record.get("run_id"),
+                "formulation": record.get("preset"),
+                "selection": (record.get("selection") or {}).get("strategy"),
+                "capex_B$": float(
+                    objective["capex_annual"]
+                    if objective.get("capex_annual") is not None
+                    else float("nan")
+                )
+                / 1e9,
+                "built_GW": built / 1e3,
+                "zap_commit": str(source.get("zap_commit") or record.get("zap_commit") or "")[:12],
+                "sha256": str(source.get("design_json_sha256") or "")[:12],
+            }
+        )
+    lines.append(_table(pd.DataFrame(rows)) if rows else "_(no designs recorded)_\n")
+    lines.append("")
+
+    # 2. Evaluation set -----------------------------------------------------
+    splits = evaluate_mod.read_splits(run_dir, cfg)
+    holdout = {int(y) for y in (splits.get("heldout_eval") or [])}
+    years = [int(y) for y in cfg["dataset"]["years"]]
+    draws = [int(d) for d in cfg["heuristics"]["outage_draws"]]
+    lines.append("## Evaluation set\n")
+    lines.append(
+        "- **Years:** "
+        + ", ".join(f"{y}{' (holdout)' if y in holdout else ''}" for y in years)
+    )
+    lines.append(f"- **Draws:** {len(draws)} {draws[:10]}{' ...' if len(draws) > 10 else ''}")
+    lines.append(f"- **Blocks:** {cfg['selection']['blocks']} h, reference `{cfg['selection']['reference']}`")
+    if not evaluation.empty:
+        lines.append(f"- **Cases scored:** {len(evaluation)}")
+        lines.append(
+            f"- **window_hours:** {_fmt(float(evaluation['window_hours'].iloc[0]))} — "
+            f"**coverage:** min {_fmt(float(evaluation['coverage'].min()))}, "
+            f"max {_fmt(float(evaluation['coverage'].max()))}"
+        )
+        partial = int((evaluation["total_cost_usd"].isna()).sum())
+        lines.append(
+            f"- **Cases without a total cost (coverage < 1):** {partial}"
+            + (" — the ranking below is incomplete" if partial else "")
+        )
+    lines.append(
+        f"- **Splits:** `{splits.get('splits_path')}` "
+        f"(sha256 `{str(splits.get('splits_sha256'))[:12]}`), "
+        f"held out {sorted(holdout)}"
+    )
+    lines.append("")
+
+    # 3-4. Ranking, all and held out ---------------------------------------
+    lines.append("## Ranking (split: all)\n")
+    lines.append(
+        "`score_usd` = annualised capex + mean operational cost over cases; the operational "
+        "cost **already contains** VOLL x ENS, which is why `voll_cost` is shown beside it "
+        "and never added again (FORMULATIONS 3.4). `± SE` is the Monte-Carlo standard error "
+        "of the mean over cases: a score difference smaller than the SEs is not a ranking."
+    )
+    lines.append("")
+    lines.append(_table(_ranking_table(summary, "all")))
+    lines.append("")
+
+    lines.append("## Held-out\n")
+    holdout_table = _ranking_table(summary, "holdout")
+    if holdout_table.empty:
+        lines.append("_(no held-out weather year in this evaluation set)_")
+    else:
+        lines.append(_table(holdout_table))
+        train = summary[summary["split"] == "train"].set_index("design_id")
+        held = summary[summary["split"] == "holdout"].set_index("design_id")
+        shared = train.index.intersection(held.index)
+        if len(shared):
+            delta = pd.DataFrame(
+                {
+                    "design_id": shared,
+                    "train_score_usd": train.loc[shared, "score_usd"].to_numpy(),
+                    "holdout_score_usd": held.loc[shared, "score_usd"].to_numpy(),
+                    "train_minus_holdout": (
+                        train.loc[shared, "score_usd"].to_numpy()
+                        - held.loc[shared, "score_usd"].to_numpy()
+                    ),
+                }
+            )
+            lines.append("")
+            lines.append("The out-of-sample penalty, per design:")
+            lines.append("")
+            lines.append(_table(delta))
+    lines.append("")
+
+    # 5. Excluded cases -----------------------------------------------------
+    lines.append("## Excluded cases\n")
+    excluded_path = run_dir / "eval_excluded.csv"
+    excluded = pd.read_csv(excluded_path) if excluded_path.exists() else pd.DataFrame()
+    if excluded.empty:
+        lines.append("_(none: every scored block succeeded)_")
+    else:
+        lines.append(
+            f"**{len(excluded)} block row(s) were excluded from every average.** A headline is "
+            "invalid for any design that lost cases; the designs affected are:"
+        )
+        lines.append("")
+        keys = [c for c in ("design_id", "status") if c in excluded.columns]
+        counts = (
+            excluded.groupby(keys).size().reset_index(name="n_blocks")
+            if keys
+            else pd.DataFrame({"n_blocks": [len(excluded)]})
+        )
+        lines.append(_table(counts))
+    lines.append("")
+
+    # 6. Preflight ----------------------------------------------------------
+    lines.append("## Preflight\n")
+    path = run_dir / evaluate_mod.PREFLIGHT_NAME
+    if not path.exists():
+        lines.append("_(no preflight.json: this run was not started by `ra evaluate`)_")
+    else:
+        try:
+            report = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):  # pragma: no cover - defensive
+            report = {}
+        checks = report.get("checks") or []
+        lines.append(
+            _table(
+                pd.DataFrame(
+                    [
+                        {
+                            "check": c.get("name"),
+                            "result": "PASS" if c.get("ok") else "FAIL",
+                            "detail": str(c.get("detail"))[:300],
+                        }
+                        for c in checks
+                    ]
+                )
+            )
+        )
+    lines.append("")
+
+    # 7. Compute ------------------------------------------------------------
+    lines.append("## Evaluation compute\n")
+    cores, cores_source = cpu_count()
+    if evaluation.empty or df is None or df.empty:
+        lines.append("_(no scored cases)_")
+    else:
+        wall = float(pd.to_numeric(df.get("wall_clock_s"), errors="coerce").sum())
+        build = float(pd.to_numeric(evaluation.get("build_wall_clock_s"), errors="coerce").sum())
+        solve = float(pd.to_numeric(df.get("solve_wall_clock_s"), errors="coerce").sum())
+        n_cases = len(evaluation)
+        n_blocks = int(pd.to_numeric(evaluation.get("n_blocks"), errors="coerce").sum())
+        lines.append(f"- **Cases:** {n_cases} over {n_blocks} block solves")
+        lines.append(
+            f"- **Cases per hour (this process):** "
+            f"{_fmt(n_cases / (wall / 3600.0) if wall > 0 else float('nan'))}"
+        )
+        lines.append(f"- **Mean build s per case:** {_fmt(build / n_cases if n_cases else float('nan'))}")
+        lines.append(
+            f"- **Mean block solve s:** {_fmt(solve / n_blocks if n_blocks else float('nan'))}"
+        )
+        lines.append(f"- **Wall clock (tasks):** {wall:,.1f} s")
+        lines.append(
+            f"- **CPU-seconds (task wall x {cores} cores from `{cores_source}`):** "
+            f"{wall * cores:,.1f}"
+        )
+        nodes = os.environ.get("SLURM_JOB_NUM_NODES", "1")
+        lines.append(f"- **Nodes:** {nodes}")
     lines.append("")
     return lines
 
@@ -635,6 +890,16 @@ def write_card(
 
     if plan_mode:
         lines.extend(planning_sections(run_dir, cfg, df))
+    else:
+        try:
+            from . import evaluate as evaluate_mod
+
+            if evaluate_mod.is_evaluation_run(df, cfg):
+                lines.extend(evaluation_sections(run_dir, cfg, df))
+        except Exception as exc:  # noqa: BLE001 - the card must never fail on a section
+            lines.append("## Evaluation\n")
+            lines.append(f"**Not computed:** {type(exc).__name__}: {exc}")
+            lines.append("")
 
     lines.append("## Metrics by (method, block size)\n")
     lines.append(_table(summary))
