@@ -53,7 +53,17 @@ from zap.tests.test_ra_planning_methods import (
 GRADIENT = {
     "method": "gradient",
     "dispatch_solver": "CLARABEL",
-    "optimizer": {"num_iterations": 4, "batch_size": 0},
+    # A small learning rate and no convergence tests: these tests are about the
+    # harness (the wall-clock cap, the design-selection rule, the task id), not
+    # about the step rule, and a run that stops on a tolerance at iteration 1
+    # exercises none of it.  `step_size` is Adam's, in MW, on a fixture whose
+    # largest row is 700 MW.
+    "optimizer": {
+        "num_iterations": 4,
+        "batch_size": 0,
+        "step_size": 5.0,
+        "stopping": {"tol_rel_objective": None, "tol_stationarity": None},
+    },
 }
 
 
@@ -530,8 +540,12 @@ class TestCampaignConfigSurface(unittest.TestCase):
         self.assertFalse(base["selection"]["align_blocks"])
         opt = base["planning"]["optimizer"]
         self.assertIsNone(opt["max_seconds"])
-        self.assertEqual(opt["design_selection"], "best_sampled")
-        self.assertEqual(opt["checkpoint_every"], 0)
+        # `best_checkpointed` / 20 became the defaults on 2026-09-10 alongside
+        # `rule: adam`: it is the only selection rule that is correct for a
+        # minibatch as well as a full batch, so the two kinds of cell are not
+        # confounded by it.
+        self.assertEqual(opt["design_selection"], "best_checkpointed")
+        self.assertEqual(opt["checkpoint_every"], 20)
 
     def test_max_seconds_must_be_positive(self):
         with self.assertRaises(config.ConfigError):
@@ -554,9 +568,20 @@ class TestCampaignConfigSurface(unittest.TestCase):
             )
 
     def test_best_checkpointed_needs_checkpoints(self):
+        # `checkpoint_every: 0` has to be set explicitly now that the default is
+        # 20; the guard is that the pair is inconsistent, not that it is unset.
         with self.assertRaisesRegex(config.ConfigError, "checkpoint_every"):
             config.load_config(
-                self._cfg({"planning": {"optimizer": {"design_selection": "best_checkpointed"}}})
+                self._cfg(
+                    {
+                        "planning": {
+                            "optimizer": {
+                                "design_selection": "best_checkpointed",
+                                "checkpoint_every": 0,
+                            }
+                        }
+                    }
+                )
             )
         cfg = config.load_config(
             self._cfg(
@@ -573,10 +598,27 @@ class TestCampaignConfigSurface(unittest.TestCase):
         self.assertEqual(cfg["planning"]["optimizer"]["checkpoint_every"], 20)
 
     def test_history_rules_need_the_param_history(self):
+        # `best_sampled` / `best_rolling` read the chosen iterate back out of the
+        # parameter history; the default rule is `best_checkpointed`, which does
+        # not, so the rule has to be named for this guard to apply.
         with self.assertRaisesRegex(config.ConfigError, "save_param_history"):
             config.load_config(
-                self._cfg({"planning": {"optimizer": {"save_param_history": False}}})
+                self._cfg(
+                    {
+                        "planning": {
+                            "optimizer": {
+                                "design_selection": "best_sampled",
+                                "save_param_history": False,
+                            }
+                        }
+                    }
+                )
             )
+        # ... and `best_checkpointed` does not need it.
+        cfg = config.load_config(
+            self._cfg({"planning": {"optimizer": {"save_param_history": False}}})
+        )
+        self.assertFalse(cfg["planning"]["optimizer"]["save_param_history"])
 
     def test_align_blocks_is_rejected_where_it_means_nothing(self):
         with self.assertRaisesRegex(config.ConfigError, "align_blocks"):

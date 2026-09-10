@@ -459,6 +459,15 @@ def _validate_step_rule(plan: dict, opt: dict) -> None:
         raise ConfigError(
             f"planning.optimizer.step_size must be positive, got {opt['step_size']!r}"
         )
+    if rule == "gradient" and float(opt["step_size"]) > 10.0:
+        raise ConfigError(
+            f"planning.optimizer.step_size is {opt['step_size']} with rule 'gradient', where it "
+            f"is a MW^2/$ multiplier and `step_size * clip` (= {opt['step_size'] * opt['clip']:g}) "
+            "is the MW cap of one iteration. The shipped value for that rule is 0.2 "
+            "(0.2 * 5e3 = 1,000 MW). Since 2026-09-10 the default rule is 'adam' and the "
+            "default step_size is a learning rate in MW (200), so a config that switches the "
+            "rule back to 'gradient' must set step_size: 0.2 explicitly."
+        )
     if rule in PER_COORDINATE_RULES and float(opt["step_size"]) > 1.0e5:
         raise ConfigError(
             f"planning.optimizer.step_size is {opt['step_size']} with rule {rule!r}, where it "

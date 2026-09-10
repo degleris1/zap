@@ -24,6 +24,8 @@ planning:
   # `batch_size: 4` makes each iteration's loss a 4-block estimate, so
   # `best_sampled` / `best_rolling` are a ConfigError here (they would pick the
   # luckiest batch); `best_checkpointed` compares full-horizon forward passes.
+  # The step rule is base.yaml's default (Adam, learning rate 200 MW): nothing
+  # about ADMM as the dispatch layer changes which rule the planner should use.
   optimizer:
     num_iterations: 100
     batch_size: 4

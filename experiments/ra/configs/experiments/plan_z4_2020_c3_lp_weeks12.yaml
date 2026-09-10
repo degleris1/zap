@@ -1,3 +1,9 @@
+# ARCHIVED: pre-Adam campaign, 2026-09-09. The harness default step rule became
+# `rule: adam` on 2026-09-10 (Kamran's decision; memory/plans/2026-09-10-step-rule-spec.md),
+# so the `planning.optimizer` block below pins the rule and its settings as this
+# cell ACTUALLY RAN. Do not modernise this file -- the Adam reruns of cells 4 and
+# 5 are plan_z4_2020_c4b_adam.yaml / plan_z4_2020_c5b_adam.yaml.
+#
 # Phase-2 campaign, cell 3: the same LP on 12 of the 52 weeks, drawn at random
 # on the ALIGNED week grid (so they are literally 12 of cell 2's blocks), and
 # annualised by phi = 8736 / 2016 = 4.3333. The discriminating case for capex
@@ -25,4 +31,16 @@ selection:
 planning:
   timeout_s: 14400
   single_level: {solver: HIGHS, solver_kwargs: {}}
+  # Pinned for the archive only: a single-level LP never enters the descent
+  # loop, so none of this was read. It records what the config surface said when
+  # this cell ran, so re-reading the file cannot mislead.
+  optimizer:
+    rule: gradient
+    step_size: 0.2
+    clip: 5.0e+3
+    lr_decay: none
+    design_selection: best_sampled
+    checkpoint_every: 0
+    stopping: {tol_rel_objective: null, tol_stationarity: null}
+    grad_history_every: 0
 output: {save_iterations: true}

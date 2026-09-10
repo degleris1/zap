@@ -390,7 +390,26 @@ class TestIterationTables(PersistenceMixin):
 
         path = self.plan_config(
             "grad",
-            {"planning": {"method": "gradient", "optimizer": {"num_iterations": 3}}},
+            {
+                "planning": {
+                    "method": "gradient",
+                    # `rule: gradient` explicitly: the harness default became
+                    # `adam` on 2026-09-10 and this test is about the columns
+                    # the archived rule produces (`clip_fraction`, and the
+                    # asked-for `step_size * clip` step).  The archived rule
+                    # also needs its own `step_size` -- under Adam that key is a
+                    # learning rate in MW.
+                    "optimizer": {
+                        "num_iterations": 3,
+                        "rule": "gradient",
+                        "step_size": 0.2,
+                        "clip": 5.0e3,
+                        "design_selection": "best_sampled",
+                        "checkpoint_every": 0,
+                        "stopping": {"tol_rel_objective": None, "tol_stationarity": None},
+                    },
+                }
+            },
         )
         run_dir = self.run_cli(path)
 

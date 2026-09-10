@@ -13,15 +13,28 @@
 # and its learning rate is in MW, so no global norm appears anywhere and one
 # iteration moves at most `step_size` MW per row from any starting point.
 #
-# `num_iterations: 800` is a backstop, not a target: `max_seconds: 3600` or a
-# tolerance is expected to bind first (c4 ran ~5.3 s/iteration, so ~660
-# iterations fit in the hour). `stop_reason` on the run card says which fired.
+# `num_iterations: 500` is a backstop, not a target: `max_seconds: 3600` or a
+# tolerance is expected to bind first. It was 800 in the first pass; that run
+# stopped on a tolerance at iteration 29, so 500 changes nothing about the
+# result and is still ~17x the observed need. `stop_reason` on the run card says
+# which of the three fired. NOTE that `num_iterations` is also the cosine decay
+# horizon, so this number is not purely a backstop: at 500 the learning rate is
+# still ~99.7 % of 200 MW at iteration 29.
 #
 # `checkpoint_every: 20` + `design_selection: best_checkpointed` is the same
 # selection rule as cell 5', so the deterministic-vs-stochastic comparison is
 # not confounded by the design-selection rule either. It also puts a
 # full-horizon objective at iteration 200 in the history, which is where the
 # original c4 row stopped -- that is the number to compare against it.
+#
+# Every `planning.optimizer` key below is written out even though most of them
+# now EQUAL the base.yaml defaults (Adam became the harness default on
+# 2026-09-10, with exactly these settings). They stay explicit because this is a
+# campaign cell: reading the file must tell you what the run did without
+# resolving the include chain, and a later change to the defaults must not
+# silently change what c4' / c5' meant. The keys that are genuinely cell-specific
+# are `num_iterations`, `batch_size`, `batch_strategy`, `num_workers` and
+# `grad_history_every`.
 includes:
   - ../base.yaml
   - ../datasets/ca2040_z4.yaml
@@ -51,7 +64,7 @@ planning:
       max_step_mw: 600.0  # 3 * step_size, stated rather than defaulted
     lr_decay: cosine
     lr_decay_final_frac: 0.05
-    num_iterations: 800
+    num_iterations: 500
     batch_size: 0              # 0 -> every subproblem, every iteration
     batch_strategy: sequential
     max_seconds: 3600

@@ -28,6 +28,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -68,11 +69,17 @@ except Exception:  # noqa: BLE001  # pragma: no cover - mirrors test_ra_planning
 
 
 #: The gradient preset the fixture tests start from (CLARABEL, like the rest of
-#: the planning tests; the campaign runs HiGHS).
+#: the planning tests; the campaign runs HiGHS).  Each test names the step rule
+#: and the learning rate it is about; the convergence tolerances are off here so
+#: that a test of something else cannot stop at iteration 1.
 GRADIENT = {
     "method": "gradient",
     "dispatch_solver": "CLARABEL",
-    "optimizer": {"num_iterations": 4, "batch_size": 0},
+    "optimizer": {
+        "num_iterations": 4,
+        "batch_size": 0,
+        "stopping": {"tol_rel_objective": None, "tol_stationarity": None},
+    },
 }
 
 
@@ -499,14 +506,28 @@ class TestStoppingCriteria(PlanningFixtureMixin, unittest.TestCase):
         self.assertEqual(result.solver["stopped_by"], "iterations")
         self.assertEqual(result.solver["num_iterations_completed"], 3)
 
-    def test_defaults_do_not_stop_early(self):
-        """No tolerance set = the pre-2026-09-10 behaviour."""
+    def test_tolerances_switched_off_run_to_the_backstop(self):
+        """`null` tolerances = the pre-2026-09-10 behaviour, still reachable."""
         result = self._plan({"rule": "adam", "step_size": 5.0, "num_iterations": 3})
         self.assertEqual(result.solver["stop_reason"], "num_iterations")
         self.assertIsNone(result.solver["stopping"]["tol_rel_objective"])
         self.assertIsNone(result.solver["stopping"]["tol_stationarity"])
         self.assertEqual(result.solver["stopping"]["tol_window"], 20)
         self.assertEqual(result.solver["stopping"]["checkpoint_window"], 5)
+
+    def test_shipped_defaults_switch_both_tests_on(self):
+        """The harness default is a run that stops on a tolerance, not on a count.
+
+        `GRADIENT` above turns the tolerances off for the other tests, so this
+        one reads them straight off `base_config()`.
+        """
+        from experiments.ra import config as config_mod
+
+        stopping = config_mod.base_config()["planning"]["optimizer"]["stopping"]
+        self.assertEqual(stopping["tol_rel_objective"], 1.0e-4)
+        self.assertEqual(stopping["tol_stationarity"], 0.02)
+        self.assertEqual(stopping["tol_window"], 20)
+        self.assertEqual(stopping["checkpoint_window"], 5)
 
     def test_loose_stationarity_tolerance_stops(self):
         result = self._plan(
@@ -610,16 +631,151 @@ class TestGradientRuleReproducesTheBaseline(PlanningFixtureMixin, unittest.TestC
                     err_msg=f"{param} diverged at iteration {i + 1}",
                 )
 
-    def test_default_config_is_rule_gradient(self):
-        """Nothing changes for a config written before the step-rule spec."""
+    def test_the_archived_rule_must_be_asked_for_by_name(self):
+        """`rule: gradient` is opt-in since 2026-09-10, and needs its own step size.
+
+        The two settings travel together: under Adam `step_size` is a learning
+        rate in MW (200), and handing that number to the `gradient` rule asks for
+        `step_size * clip` = 1e6 MW per iteration.  `config.validate` refuses it
+        rather than running it, which is what stops a config from being switched
+        back to the archived rule by accident.
+        """
+        from experiments.ra import config as config_mod
+
+        cfg = config_mod.base_config()
+        cfg["mode"] = "plan"
+        cfg["planning"]["method"] = "gradient"
+        cfg["planning"]["optimizer"]["rule"] = "gradient"
+        with self.assertRaisesRegex(config_mod.ConfigError, "step_size"):
+            config_mod.validate(cfg)
+
+        cfg["planning"]["optimizer"]["step_size"] = 0.2
+        config_mod.validate(cfg)
+
+
+@unittest.skipUnless(PLANNING_AVAILABLE, TASK_A)
+class TestShippedDefaults(unittest.TestCase):
+    """A config that says nothing about the step rule gets Adam (2026-09-10).
+
+    Kamran's decision: Adam is the default rule, with the settings cells 4' and
+    5' were built with.  The point of pinning them here is that a later edit to
+    `base.yaml` or `PLANNING_DEFAULTS` that silently changes what an unqualified
+    config means has to change this test too.
+    """
+
+    #: Every default of `planning.optimizer` that defines the step rule.
+    EXPECTED: ClassVar[dict] = {
+        "rule": "adam",
+        "step_size": 200.0,
+        "clip": 5.0e3,
+        "adam": {"beta1": 0.9, "beta2": 0.999, "eps": 1.0, "max_step_mw": 600.0},
+        "lr_decay": "cosine",
+        "lr_decay_final_frac": 0.05,
+        "design_selection": "best_checkpointed",
+        "checkpoint_every": 20,
+        "grad_history_every": 0,
+        "stopping": {
+            "tol_rel_objective": 1.0e-4,
+            "tol_window": 20,
+            "checkpoint_window": 5,
+            "tol_stationarity": 0.02,
+        },
+    }
+
+    def test_planning_defaults(self):
         from experiments.ra.planning.base import PLANNING_DEFAULTS
 
         optimizer = PLANNING_DEFAULTS["optimizer"]
-        self.assertEqual(optimizer["rule"], "gradient")
-        self.assertEqual(optimizer["lr_decay"], "none")
-        self.assertEqual(optimizer["grad_history_every"], 0)
-        self.assertIsNone(optimizer["stopping"]["tol_rel_objective"])
-        self.assertIsNone(optimizer["stopping"]["tol_stationarity"])
+        for key, value in self.EXPECTED.items():
+            with self.subTest(key=key):
+                self.assertEqual(optimizer[key], value)
+
+    def test_base_yaml_agrees_with_the_python_defaults(self):
+        """`configs/base.yaml` and `PLANNING_DEFAULTS` are two copies of one thing."""
+        from experiments.ra import config as config_mod
+
+        optimizer = config_mod.base_config()["planning"]["optimizer"]
+        for key, value in self.EXPECTED.items():
+            with self.subTest(key=key):
+                self.assertEqual(optimizer[key], value)
+
+    def test_a_config_with_no_rule_key_resolves_to_adam(self):
+        """Resolved through the real include chain, not just the defaults dict."""
+        from experiments.ra import config as config_mod
+        from experiments.ra.planning.base import make_method
+
+        cfg = config_mod.base_config()
+        cfg["mode"] = "plan"
+        cfg["planning"]["method"] = "gradient"
+        self.assertNotIn("rule", (cfg.get("planning") or {}).get("optimizer_override", {}))
+        config_mod.validate(cfg)
+
+        algorithm, _trackers = make_method(cfg)._algorithm(None)
+        self.assertIsInstance(algorithm, AdamDescent)
+        self.assertEqual(algorithm.step_size, 200.0)
+        self.assertEqual(algorithm.beta1, 0.9)
+        self.assertEqual(algorithm.beta2, 0.999)
+        self.assertEqual(algorithm.eps, 1.0)
+        self.assertEqual(algorithm.max_step, 600.0)
+        self.assertEqual(algorithm.decay, "cosine")
+        self.assertEqual(algorithm.decay_final_frac, 0.05)
+
+    def test_the_shipped_gradient_presets_resolve_to_adam(self):
+        """The presets a new experiment includes, not just `base.yaml`."""
+        from experiments.ra import config as config_mod
+        from experiments.ra import paths
+
+        root = paths.config_root()
+        for preset in ("methods/plan_gradient.yaml", "methods/plan_admm.yaml"):
+            with self.subTest(preset=preset):
+                cfg = config_mod.load_config(root / preset)
+                self.assertEqual(cfg["planning"]["optimizer"]["rule"], "adam")
+                self.assertEqual(cfg["planning"]["optimizer"]["step_size"], 200.0)
+
+    def test_the_archived_campaign_cells_pin_the_old_rule(self):
+        """c1-c5 ran before Adam and must keep saying so."""
+        from experiments.ra import config as config_mod
+        from experiments.ra import paths
+
+        root = paths.config_root() / "experiments"
+        for name in (
+            "plan_z4_2020_c1_lp_full",
+            "plan_z4_2020_c2_lp_weeks52",
+            "plan_z4_2020_c3_lp_weeks12",
+            "plan_z4_2020_c4_grad_det",
+            "plan_z4_2020_c5_sgd_b4",
+        ):
+            with self.subTest(cell=name):
+                path = root / f"{name}.yaml"
+                self.assertIn("ARCHIVED: pre-Adam campaign, 2026-09-09", path.read_text())
+                cfg = config_mod.load_config(path)
+                config_mod.validate(cfg)
+                optimizer = cfg["planning"]["optimizer"]
+                self.assertEqual(optimizer["rule"], "gradient")
+                self.assertEqual(optimizer["step_size"], 0.2)
+                self.assertEqual(optimizer["clip"], 5.0e3)
+                self.assertEqual(optimizer["lr_decay"], "none")
+                self.assertIsNone(optimizer["stopping"]["tol_rel_objective"])
+                self.assertIsNone(optimizer["stopping"]["tol_stationarity"])
+        # ... and the two cells that actually ran the descent loop kept the
+        # selection rules they were run with.
+        c4 = config_mod.load_config(root / "plan_z4_2020_c4_grad_det.yaml")
+        self.assertEqual(c4["planning"]["optimizer"]["design_selection"], "best_sampled")
+        self.assertEqual(c4["planning"]["optimizer"]["checkpoint_every"], 0)
+        c5 = config_mod.load_config(root / "plan_z4_2020_c5_sgd_b4.yaml")
+        self.assertEqual(c5["planning"]["optimizer"]["design_selection"], "best_checkpointed")
+        self.assertEqual(c5["planning"]["optimizer"]["batch_size"], 4)
+
+    def test_every_shipped_experiment_config_validates(self):
+        from experiments.ra import config as config_mod
+        from experiments.ra import paths
+
+        root = paths.config_root() / "experiments"
+        paths_seen = sorted(root.glob("*.yaml"))
+        self.assertGreaterEqual(len(paths_seen), 20)
+        for path in paths_seen:
+            with self.subTest(config=path.name):
+                config_mod.validate(config_mod.load_config(path))
 
 
 @unittest.skipUnless(PLANNING_AVAILABLE, TASK_A)

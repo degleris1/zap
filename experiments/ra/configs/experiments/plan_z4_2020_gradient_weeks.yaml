@@ -1,7 +1,8 @@
 # Gradient-descent decomposition over 52 weekly blocks, warm-started from a
-# single-level LP on 12 of them. Sherlock only. step_size / clip come from
-# methods/plan_gradient.yaml, tuned in MW / $ so one iteration moves
-# step_size * clip = 1,000 MW ~ 0.5 % of the ~209 GW z4-2020 fleet.
+# single-level LP on 12 of them. Sherlock only. The step rule is base.yaml's
+# default (Adam: 200 MW per coordinate per iteration, cosine-decayed, per-row
+# cap 600 MW) and the run stops on the objective-plateau or stationarity
+# tolerance rather than on `num_iterations`.
 #
 # The warm start runs on 12 of the 52 blocks, so its optimum is pro-rated to a
 # different coverage than the gradient loss and is NOT a lower bound on it: the

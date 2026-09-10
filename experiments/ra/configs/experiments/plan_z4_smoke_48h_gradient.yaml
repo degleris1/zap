@@ -5,9 +5,10 @@
 # of the blocks is pro-rated to a different coverage and is not a bound).
 #
 # A few iterations only: this exists to run the whole gradient path end to end
-# on a laptop, not to converge. step_size / clip come from
-# methods/plan_gradient.yaml (step_size * clip = 1,000 MW of movement per
-# iteration; see the comment there).
+# on a laptop, not to converge -- so the convergence tolerances are switched off
+# and the iterate is the last one, otherwise the smoke run can stop at iteration
+# 1 and exercise nothing. The step rule is base.yaml's default (Adam, 200 MW per
+# coordinate per iteration).
 includes:
   - ../base.yaml
   - ../datasets/ca2040_z4.yaml
@@ -25,5 +26,10 @@ planning:
   dispatch_solver: CLARABEL
   num_workers: 1
   warm_start: {enabled: true, num_blocks: null, solver: HIGHS}
-  optimizer: {num_iterations: 5, batch_size: 0}
+  optimizer:
+    num_iterations: 5
+    batch_size: 0
+    design_selection: final
+    checkpoint_every: 0
+    stopping: {tol_rel_objective: null, tol_stationarity: null}
   timeout_s: 1800

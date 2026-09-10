@@ -1,6 +1,9 @@
 # Gradient descent through implicit differentiation of the dispatch KKT system.
 # CLARABEL by default: the KKT solve needs well-conditioned duals, which an
-# interior-point solver gives and a vertex solution does not (R-W2).
+# interior-point solver gives and a vertex solution does not (R-W2). The
+# campaign cells override this with HIGHS -- load-bus duals are solver-invariant
+# and CLARABEL's gradients on zero-capacity candidate rows are 9-14 k$/MW too
+# large (LESSONS 2026-09-09).
 mode: plan
 selection: {strategy: all, block_size: 168}
 planning:
@@ -8,34 +11,25 @@ planning:
   dispatch_solver: CLARABEL
   num_workers: 4
   warm_start: {enabled: true, solver: HIGHS}
+  # The STEP RULE and its settings now come from base.yaml, which defaults to
+  # Adam (rule: adam, step_size 200 MW, eps 1.0 $/MW-yr, cosine decay, per-row
+  # cap 600 MW) with the plateau / stationarity stops on. This preset used to
+  # pin `step_size: 0.2` / `clip: 5.0e+3` for the old `rule: gradient`; both are
+  # gone, because under Adam `step_size` is a learning rate in MW and 0.2 MW per
+  # iteration would make the method a no-op. A config that deliberately wants
+  # the archived rule must say `rule: gradient` AND `step_size: 0.2`.
   optimizer:
+    # Deliberately below base.yaml's 500 backstop: this preset is for the
+    # exploratory Sherlock configs, where a bounded iteration count is the
+    # point. A campaign cell sets its own.
     num_iterations: 200
-    # Tuned for MW / $ units (WP1 pins power_unit = cost_unit = 1.0; the old
-    # experiments/multi_year configs used power_unit = 1000, so anything
-    # inherited from them is off by ~1e3 -- R-W5).
-    #
-    # GradientDescent.step clips the TOTAL gradient norm to `clip` and then
-    # moves `step_size * clip`: that product is a hard cap, in MW, on the L2
-    # capacity movement of one iteration. The measured gradient norm is ~1.3e4
-    # at the as-built point of the 48-hour test fixture (~9e3 thereafter) and
-    # ~1.8e7 on z4-2020, i.e. always above `clip`, so the cap binds every
-    # iteration and the step is exactly `step_size * clip` along the (clipped)
-    # descent direction.
-    #
-    #   0.2 * 5e3 = 1,000 MW/iteration ~ 0.5 % of z4-2020's ~209 GW fleet,
-    #   ~200 GW of cumulative movement over 200 iterations.
-    #
-    # The shipped defaults were 1e-3 * 5e3 = 5 MW/iteration, which on z4 is
-    # 0.0024 % of the fleet: the method was a no-op (WP5 verification).
-    step_size: 0.2
-    clip: 5.0e+3
+    # `batch_size: 4` makes every iteration's loss a 4-block estimate of the
+    # objective, so `best_sampled` / `best_rolling` would select the luckiest
+    # batch (sigma ~ 1 B$ across 4-week batches on z4-2020) and `config.validate`
+    # rejects them here. `best_checkpointed` compares full-horizon forward
+    # passes instead; it is also the base.yaml default, and a preset that sets
+    # `batch_size: 0` may go back to `best_sampled`, which is then exact.
     batch_size: 4
     batch_strategy: random
-    # `batch_size: 4` above makes every iteration's loss a 4-block estimate of
-    # the objective, so `best_sampled` / `best_rolling` would select the
-    # luckiest batch (sigma ~ 1 B$ across 4-week batches on z4-2020) and
-    # `config.validate` rejects them here. `best_checkpointed` compares
-    # full-horizon forward passes instead; a preset that sets `batch_size: 0`
-    # may go back to `best_sampled`, which is then exact.
     design_selection: best_checkpointed
     checkpoint_every: 20

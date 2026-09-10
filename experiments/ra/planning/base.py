@@ -62,24 +62,41 @@ PLANNING_DEFAULTS: dict = {
     # to move the fixture's 700 MW one.  The old (1e-3, 1e3) pair moved at most
     # 1 MW per iteration and made the method a no-op (WP5 verification).
     "optimizer": {
-        "num_iterations": 100,
-        # Which step rule turns the gradient into a capacity move.  `gradient`
-        # is the historical normalised-clipped rule and stays the default so
-        # that every existing config keeps its behaviour bit-for-bit; `adam` is
-        # the phase-2 rule, whose `step_size` is a learning rate in MW.
-        #   gradient      -- eta <- eta - step_size * clip * g / ||g||
+        # A BACKSTOP, not a target: a run is expected to end on
+        # `stopping.tol_rel_objective` / `tol_stationarity` or on `max_seconds`.
+        # 500 because the two Adam campaign cells stopped on a tolerance at
+        # iteration 29 (c4') and 140 (c5'), so 500 leaves headroom of several
+        # times the observed need without being a number a run can hit by
+        # accident.  It also sets the cosine decay horizon: `lr_decay: cosine`
+        # decays over `num_iterations`, so raising this flattens the schedule.
+        "num_iterations": 500,
+        # Which step rule turns the gradient into a capacity move.  **Adam is
+        # the default** (Kamran, 2026-09-10): the historical `gradient` rule
+        # normalises by the gradient norm over *all* parameter rows, of which
+        # 127 of 166 are structurally frozen on ca2040_z4 and carry 98.7 % of
+        # that norm, so it reported a 1,000 MW step while moving the design
+        # 13 MW -- and from a short system it moves 1e5-1e6 MW in one iteration,
+        # because the step is proportional to the gradient in units nobody set.
         #   adam          -- eta <- eta - step_size * mhat / (sqrt(vhat) + eps)
+        #   gradient      -- eta <- eta - step_size * clip * g / ||g||  (archive)
         #   adagrad       -- Adam with no first moment (the fallback)
         #   capex_scaled  -- eta <- eta - step_size * g / gamma (ablation A4)
         #   trust_region  -- steepest descent inside an adaptive radius (A3)
-        "rule": "gradient",
-        # `gradient`: the MW^2/$ step and the norm cap.
-        # `adam` / `adagrad` / `capex_scaled` / `trust_region`: `step_size` is
-        # the learning rate / radius, in MW per coordinate per iteration, and
-        # `clip` is ignored.
-        "step_size": 0.2,
+        "rule": "adam",
+        # MW per coordinate per iteration for `adam` / `adagrad` /
+        # `capex_scaled` (`trust_region` uses its own radius instead).  200 MW
+        # clears the largest c4-to-LP gap (3.7 GW) in ~19 iterations.
+        #
+        # For `rule: gradient` ONLY, `step_size` is a MW^2/$ multiplier and
+        # `clip` caps the gradient norm, so `step_size * clip` is the MW cap of
+        # one iteration: that rule needs `step_size: 0.2` set explicitly, or it
+        # inherits 200 here and asks for 1e6 MW per step (`config.validate`
+        # refuses that).
+        "step_size": 200.0,
         "clip": 5.0e3,
         "adam": {
+            # Averages ~10 gradients, which is the window the measured minibatch
+            # SNR (0.20-0.42 per row) needs to recover the deterministic sign.
             "beta1": 0.9,
             "beta2": 0.999,
             # $/MW-yr, NOT the ML default 1e-8: `eps` is in the units of the
@@ -87,12 +104,16 @@ PLANNING_DEFAULTS: dict = {
             # treated as numerical dust.  At 1e-8 such a row still takes a full
             # `step_size` step.
             "eps": 1.0,
-            # null -> 3 * step_size.  A hard per-row cap in MW, which is what
-            # makes the first iteration un-spikeable from any starting point.
-            "max_step_mw": None,
+            # A hard per-row cap in MW (null -> 3 * step_size, which is what
+            # 600 states explicitly): this is what makes the first iteration
+            # un-spikeable from any starting point, with no invented capacity
+            # bound.
+            "max_step_mw": 600.0,
         },
-        # Learning-rate schedule for the per-coordinate rules (MW).
-        "lr_decay": "none",  # none | cosine | inverse_sqrt
+        # Learning-rate schedule for the per-coordinate rules (MW).  Cosine to
+        # 5 % of `step_size` over `num_iterations`: the tail is what converges a
+        # run whose backstop is wall clock rather than iterations.
+        "lr_decay": "cosine",  # none | cosine | inverse_sqrt
         "lr_decay_final_frac": 0.05,
         "capex_scaled": {"floor": 1.0},
         "trust_region": {
@@ -104,15 +125,17 @@ PLANNING_DEFAULTS: dict = {
             "expand": 2.0,
             "shrink": 0.5,
         },
-        # Convergence tests; all null = off, i.e. `num_iterations` /
-        # `max_seconds` are the only stops (the pre-2026-09-10 behaviour).
+        # Convergence tests.  `num_iterations` is a backstop, not a target:
+        # a run is expected to end on a tolerance or on `max_seconds`.  Set a
+        # tolerance to null to switch that test off.
         "stopping": {
             # Relative decrease of the objective over a `tol_window` window,
             # below which the loop stops.  Deterministic cells measure it on
             # the sampled loss (which IS the full loss); a minibatch cell
             # measures it on the checkpoint series instead, so it needs
-            # `checkpoint_every > 0`.
-            "tol_rel_objective": None,
+            # `checkpoint_every > 0`.  1e-4 against c4's measured 20-iteration
+            # decrease of ~9.4e-4, i.e. it does not fire on a run still moving.
+            "tol_rel_objective": 1.0e-4,
             # Window of the plateau test, in ITERATIONS, for a full-batch cell
             # whose per-iteration loss is the full-horizon objective.  The test
             # does not fire before the window is full.
@@ -123,12 +146,15 @@ PLANNING_DEFAULTS: dict = {
             # here would be 20 checkpoints = 400 iterations.
             "checkpoint_window": 5,
             # max_j |mhat_j| / gamma_j over interior rows, gamma = annualised
-            # capex: "every interior row is within this fraction of its own
-            # break-even".
-            "tol_stationarity": None,
+            # capex: "every interior row's marginal value is within 2 % of its
+            # own break-even".  Economically interpretable and noise-robust (it
+            # reads the EMA, not the raw minibatch gradient).
+            "tol_stationarity": 0.02,
         },
-        # 0 = off.  Period, in iterations, of the per-row gradient table
-        # `iterations/<task>.iteration_gradient.parquet`.
+        # 0 = off, and off is the default: this is an output-volume knob, not
+        # part of the step rule, and a 6,000-iteration run would put ~100 MB of
+        # per-row floats in `designs/<id>.history.json`.  The campaign cells set
+        # 10.
         "grad_history_every": 0,
         "batch_size": 0,
         "batch_strategy": "sequential",
@@ -152,9 +178,13 @@ PLANNING_DEFAULTS: dict = {
         #                        first and last), which is the unbiased rule for
         #                        a minibatch run.  Costs one full forward pass
         #                        per checkpoint.
-        "design_selection": "best_sampled",
-        # 0 = no checkpoints.  Required (> 0) by `best_checkpointed`.
-        "checkpoint_every": 0,
+        # `best_checkpointed` is the default because it is the only rule that is
+        # correct for a minibatch as well as for a full batch, so deterministic
+        # and stochastic cells are not confounded by their selection rule.
+        "design_selection": "best_checkpointed",
+        # 0 = no checkpoints.  Required (> 0) by `best_checkpointed`.  At 20 a
+        # 200-iteration run pays ~10 extra forward passes, ~5 % of its budget.
+        "checkpoint_every": 20,
         # DEPRECATED and ignored: ``objective.raw`` is always the full forward
         # pass (inv + op), never the last minibatch loss.  The key is kept so
         # the config key space is unchanged; setting it true is a ConfigError.

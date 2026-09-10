@@ -43,5 +43,11 @@ planning:
     design_selection: best_checkpointed
     checkpoint_every: 20
     save_param_history: true
+    # Pinned null, not left to the defaults: an ablation compares rules at a
+    # FIXED iteration count, so nothing may stop early. These were implicitly
+    # null when a1-a4 were launched (2026-09-10, before Adam became the default
+    # and switched both tolerances on); pinning them keeps the comparison
+    # meaningful under the new defaults.
+    stopping: {tol_rel_objective: null, tol_stationarity: null}
     grad_history_every: 10
 output: {save_iterations: true}

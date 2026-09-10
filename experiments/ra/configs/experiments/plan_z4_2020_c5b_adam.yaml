@@ -10,15 +10,28 @@
 # Adam self-scales under minibatch noise without being told to: with per-row
 # gradient SNR s, sqrt(vhat) ~ sigma, so the step is about `step_size * s`.
 # c5's measured SNR is 0.20-0.42, so this cell automatically takes ~0.3x cell
-# 4's step at 1/7 of the per-iteration cost -- hence `num_iterations: 6000`
-# against cell 4's 800. Wall clock (`max_seconds: 3600`) is the binding budget
-# in both.
+# 4's step at 1/7 of the per-iteration cost, which is why it was first given
+# `num_iterations: 6000` against cell 4's 800. Neither number mattered: this run
+# stopped on a tolerance at iteration 140, so both cells now carry the harness
+# default backstop of 500 and the result is unaffected. Wall clock
+# (`max_seconds: 3600`) remains the budget. NOTE that `num_iterations` is also
+# the cosine decay horizon, so 6000 -> 500 does change the schedule: at 500 the
+# learning rate is ~93 % of 200 MW at iteration 140, where at 6000 it was ~99.9 %.
 #
 # `checkpoint_every: 20`: the per-iteration loss is a 4-block estimate with
 # sigma ~ 1 B$ against a true per-iteration decrease of ~0.3 M$ (SNR 3e-4), so
 # both the design selection and the objective-plateau stop must run on the
 # checkpoint series. If the checkpoints exceed ~20 % of wall clock, raise this
 # to 100 and say so on the run card.
+#
+# Every `planning.optimizer` key below is written out even though most of them
+# now EQUAL the base.yaml defaults (Adam became the harness default on
+# 2026-09-10, with exactly these settings). They stay explicit because this is a
+# campaign cell: reading the file must tell you what the run did without
+# resolving the include chain, and a later change to the defaults must not
+# silently change what c4' / c5' meant. The keys that are genuinely cell-specific
+# are `num_iterations`, `batch_size`, `batch_strategy`, `num_workers` and
+# `grad_history_every`.
 includes:
   - ../base.yaml
   - ../datasets/ca2040_z4.yaml
@@ -46,7 +59,7 @@ planning:
       max_step_mw: 600.0
     lr_decay: cosine
     lr_decay_final_frac: 0.05
-    num_iterations: 6000
+    num_iterations: 500
     batch_size: 4
     batch_strategy: random
     max_seconds: 3600
