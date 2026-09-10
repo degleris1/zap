@@ -82,6 +82,14 @@ CARRIER_COLORS: dict[str, str] = {
     "AC": "#70af1d",
     "DC": "#8a1caf",
     "AC_exp": "#4f7d14",
+    # --- device-class rows ---
+    # `iterations/*.iteration_capacity.parquet` reports a *device class* rather
+    # than a carrier for the parameters that are not per-generator (every
+    # storage row is one `StorageUnit` series, every line one `DirectedLine`),
+    # so P3 sees these two names where it sees carriers elsewhere.  They are
+    # display categories with their own colours, not carriers.
+    "StorageUnit": "#7fb3d5",
+    "DirectedLine": "#70af1d",
     # --- pseudo-carriers ---
     "load": "#111111",
     "net_load": "#d2691e",
@@ -120,6 +128,8 @@ DATASET_CARRIERS: tuple[str, ...] = (
     "AC",
     "DC",
     "AC_exp",
+    "StorageUnit",
+    "DirectedLine",
     "load",
     "net_load",
     "unserved",
@@ -170,6 +180,14 @@ CARRIER_STACK_ORDER: tuple[str, ...] = (
     # --- trade ---
     "imports",
     "unspecified_imports",
+    "exports",
+    # --- network (P1/P2 carry line rows; no dispatch stack ever does) ---
+    "AC",
+    "AC_exp",
+    "DC",
+    # --- device-class rows (see CARRIER_COLORS) ---
+    "StorageUnit",
+    "DirectedLine",
 )
 
 #: Carriers whose available capacity is weather-driven (O2's VRE series).  Kept
@@ -321,6 +339,18 @@ def apply_rc() -> None:
             "legend.frameon": False,
         }
     )
+
+
+def outside_legend(ax, **kwargs) -> None:
+    """A legend in the right margin, so it cannot cover the data or a callout.
+
+    :func:`save` writes with ``bbox_inches="tight"``, so the margin costs figure
+    width, never plot area.
+    """
+    options = {"fontsize": 7, "loc": "upper left", "bbox_to_anchor": (1.005, 1.0),
+               "borderaxespad": 0.0, "ncol": 1}
+    options.update(kwargs)
+    ax.legend(**options)
 
 
 def finish(fig, suptitle: str | None = None, *, reserve_inches: float = SUPTITLE_INCHES):

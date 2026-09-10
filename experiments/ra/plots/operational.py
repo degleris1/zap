@@ -345,15 +345,8 @@ def _facet_title(label: str, method, block_size) -> str:
 
 
 def _outside_legend(ax, **kwargs) -> None:
-    """A legend in the right margin, so it cannot cover the data or a callout.
-
-    ``save`` writes with ``bbox_inches="tight"``, so the margin costs figure
-    width, never plot area.
-    """
-    options = {"fontsize": 7, "loc": "upper left", "bbox_to_anchor": (1.005, 1.0),
-               "borderaxespad": 0.0, "ncol": 1}
-    options.update(kwargs)
-    ax.legend(**options)
+    """:func:`style.outside_legend` -- the module-local spelling every plot uses."""
+    style.outside_legend(ax, **kwargs)
 
 
 def _annotate_point(ax, x, y, text: str, *, xs=None, ys=None) -> None:

@@ -41,7 +41,7 @@ CATALOGUE_IDS = (
 
 PHASE_A_IDS = (
     "O1", "O2", "O3", "O4", "O4b", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "O12", "O13",
-    "P1", "P2", "P6",
+    "P1", "P2", "P3", "P4", "P5", "P6", "P9",
 )
 
 #: A second, independent copy of every phase-A CSV header (D9 / T14).  A change
@@ -85,7 +85,17 @@ GOLDEN_COLUMNS = {
            "designed", "delta"],
     "P2": ["run_id", "label", "design_id", "formulation", "heuristic", "selection_strategy",
            "emissions_mode", "carrier", "unit", "designed", "delta"],
+    "P3": ["run_id", "label", "design_id", "outer_iteration", "iteration", "carrier",
+           "capacity_gw"],
+    "P4": ["run_id", "label", "design_id", "outer_iteration", "iteration",
+           "sampled_objective_annual_bn_usd", "rolling_objective_annual_bn_usd",
+           "estimated_full_objective_annual_bn_usd", "suboptimality"],
+    "P5": ["run_id", "label", "design_id", "outer_iteration", "iteration", "grad_norm_l1",
+           "grad_norm_l2", "proj_grad_norm_l1", "clip_fraction", "step_norm_mw"],
     "P6": ["run_id", "label", "design_id", "source", "component", "value_bn_usd"],
+    "P9": ["run_id", "label", "design_id", "subproblem_id", "block_start", "block_stop",
+           "year", "day_of_year", "week_of_year", "hours", "n_times_sampled",
+           "share_of_iterations", "weight", "peak_net_load_gw"],
 }
 
 EXTENDABLE_GENERATORS = {"z1 solar": 500.0, "z2 onwind": 400.0}
@@ -193,6 +203,15 @@ class PlotFixture(unittest.TestCase):
             "run_plain", {"selection": {"blocks": [24], "reference": "none"}}
         )
         cls.run_plan = cls._plan_run()
+        # A *single-level* planning run: it solves once, so it has designs and a
+        # recorded block selection but no iteration history -- the other half of
+        # P4 (reference lines) and P9 (selection.blocks).
+        cls.run_plan_lp = cls._plan_run(
+            name="run_plan_lp",
+            planning={"method": "stochastic", "single_level": {"kind": "primal",
+                                                                "solver": "HIGHS"}},
+            selection={"strategy": "all", "block_size": 24},
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -243,29 +262,32 @@ class PlotFixture(unittest.TestCase):
         return identity.run_id(config.load_config(path))
 
     @classmethod
-    def _plan_run(cls) -> str:
+    def _plan_run(cls, name: str = "run_plan", planning=None, selection=None) -> str:
         cfg = {
             "includes": [str(paths.config_root() / "base.yaml")],
-            "name": "run_plan",
+            "name": name,
             "mode": "plan",
             "dataset": {
                 "dir": str(cls.dataset),
                 "years": [2020],
                 "window": {"start": 0, "stop": 48},
             },
-            "selection": {"strategy": "all", "block_size": 24},
-            "planning": {
-                "method": "gradient",
-                "dispatch_solver": "HIGHS",
-                "single_level": {"kind": "primal", "solver": "HIGHS"},
-                "optimizer": {"num_iterations": 3},
-                "timeout_s": 900,
-            },
+            "selection": selection or {"strategy": "all", "block_size": 24},
+            "planning": config.deep_merge(
+                {
+                    "method": "gradient",
+                    "dispatch_solver": "HIGHS",
+                    "single_level": {"kind": "primal", "solver": "HIGHS"},
+                    "optimizer": {"num_iterations": 3},
+                    "timeout_s": 900,
+                },
+                planning or {},
+            ),
         }
-        path = cls._write_config("run_plan", cfg)
+        path = cls._write_config(name, cfg)
         code = cli.main(["run", "--config", str(path), "--runs-root", str(cls.runs_root)])
         if code != 0:  # pragma: no cover - a broken fixture
-            raise RuntimeError(f"fixture plan run exited {code}")
+            raise RuntimeError(f"fixture plan run {name} exited {code}")
         return identity.run_id(config.load_config(path))
 
     # -- helpers ----------------------------------------------------------
@@ -277,7 +299,7 @@ class PlotFixture(unittest.TestCase):
             return self.handles(self.run_admm)
         if plot_id in ("O12", "O13"):
             return self.handles(self.run_price)
-        if plot_id in ("P1", "P2", "P6"):
+        if plot_id in ("P1", "P2", "P3", "P4", "P5", "P6", "P9"):
             return self.handles(self.run_plan)
         if plot_id == "O5":
             return self.handles(self.run_a, self.run_b)
@@ -968,6 +990,165 @@ class TestStackedPlots(PlotFixture):
         self.assertEqual(list(out["hour_of_day"]), [0, 1, 23, 0, 16])
         # Hours 7, 8 and 30 are all 1-2 Jan; hour 24*31+7 is 1 Feb; 8759 is 31 Dec.
         self.assertEqual(list(out["month"]), [1, 1, 1, 2, 12])
+
+
+class TestPlanningTrajectories(PlotFixture):
+    """P3 / P4 / P5 / P9: what the gradient planner did, iteration by iteration."""
+
+    def test_p3_drops_carriers_that_never_move(self):
+        runs = self.handles(self.run_plan)
+        fig, table = plots_mod.plot("P3", runs)
+        self.assertGreater(len(set(table["iteration"])), 1)
+        # The table keeps every carrier...
+        self.assertIn("CCGT", set(table["carrier"]))
+        # ...and the batteries arrive merged.
+        self.assertNotIn("battery", set(table["carrier"]))
+        moving = {
+            carrier
+            for carrier, group in table.groupby("carrier")
+            if float(group["capacity_gw"].max() - group["capacity_gw"].min()) > 1e-6
+        }
+        drawn = {line.get_label().split(" - ")[0] for line in fig.axes[0].get_lines()}
+        plt.close(fig)
+
+        fig, _table = plots_mod.plot("P3", runs, moving_only=False)
+        drawn_all = {line.get_label().split(" - ")[0] for line in fig.axes[0].get_lines()}
+        plt.close(fig)
+
+        if moving:
+            self.assertEqual(drawn, moving)
+            self.assertLess(len(drawn), len(drawn_all))
+        else:
+            # Documented fallback: nothing moved (three iterations on a 48 h
+            # fixture), so the figure draws every carrier rather than an empty
+            # axes. The filter itself is checked on a table that does move.
+            self.assertEqual(drawn, drawn_all)
+
+    def test_p3_moving_only_filters_a_table_that_moves(self):
+        from experiments.ra.plots import planning as planning_mod
+
+        table = pd.DataFrame(
+            {
+                "carrier": ["solar", "solar", "CCGT", "CCGT"],
+                "capacity_gw": [1.0, 4.0, 7.0, 7.0],
+                "iteration": [0, 1, 0, 1],
+            }
+        )
+        moving = table.groupby("carrier")["capacity_gw"].agg(
+            lambda s: float(s.max() - s.min())
+        )
+        order = style_mod.stack_order(table["carrier"].unique())
+        drawn = [c for c in order if moving.get(c, 0.0) > 1e-6]
+        self.assertEqual(drawn, ["solar"])
+        self.assertIn("moving_only", planning_mod.p3_capacity_trajectory.__doc__)
+
+    def test_p4_draws_reference_lines_for_runs_that_do_not_iterate(self):
+        """A single-level LP solves once: it is a horizontal line, not a series."""
+        runs = self.handles(self.run_plan, self.run_plan_lp)
+        fig, table = plots_mod.plot("P4", runs)
+        # Only the gradient run has an iteration history.
+        self.assertEqual(set(table["run_id"]), {self.run_plan})
+        lines = [line.get_label() for line in fig.axes[0].get_lines()]
+        self.assertTrue(any("sampled" in label for label in lines))
+        self.assertTrue(any("rolling" in label for label in lines))
+        # ...and the LP that solved once is a horizontal reference line.
+        reference = [line for line in fig.axes[0].get_lines()
+                     if "solved once" in line.get_label()]
+        self.assertEqual(len(reference), 1)
+        plt.close(fig)
+
+    def test_p4_is_in_billions_of_dollars(self):
+        runs = self.handles(self.run_plan)
+        _fig, table = plots_mod.plot("P4", runs)
+        plt.close("all")
+        raw = loader_mod.resolve_run_dir(self.run_plan, runs_root=self.runs_root)
+        history = pd.read_parquet(
+            min((raw / "iterations").glob("*.iterations.parquet"))
+        )
+        expected = float(history["sampled_objective_annual"].iloc[0]) / 1e9
+        self.assertAlmostEqual(
+            float(table["sampled_objective_annual_bn_usd"].iloc[0]), expected, places=9
+        )
+
+    def test_p5_panels_are_separate_axes_not_a_twin(self):
+        fig, table = plots_mod.plot("P5", self.handles(self.run_plan))
+        self.assertEqual(len(fig.axes), 3)
+        boxes = [tuple(round(v, 6) for v in ax.get_position().bounds) for ax in fig.axes]
+        self.assertEqual(len(set(boxes)), 3)
+        self.assertEqual(fig.axes[0].get_yscale(), "log")
+        for column in ("grad_norm_l2", "step_norm_mw", "clip_fraction"):
+            self.assertIn(column, table.columns)
+        plt.close(fig)
+
+    def test_p5_and_p3_need_a_run_that_iterates(self):
+        with self.assertRaises(loader_mod.MissingDataError) as ctx:
+            plots_mod.plot("P5", self.handles(self.run_a))
+        self.assertIn("iterations", str(ctx.exception))
+
+    def test_p9_counts_sampled_weeks_and_reads_a_single_level_selection(self):
+        """A gradient run samples per iteration; an LP records its blocks once."""
+        runs = self.handles(self.run_plan)
+        fig, table = plots_mod.plot("P9", runs)
+        self.assertFalse(table.empty)
+        self.assertTrue((table["n_times_sampled"] >= 1).all())
+        self.assertTrue((table["share_of_iterations"] <= 1.0).all())
+        # The fixture window is 48 h, so every block sits in week 0.
+        self.assertEqual(set(table["week_of_year"]), {0})
+        plt.close(fig)
+
+        # An LP planning run has no iteration_blocks; its design's
+        # selection.blocks are the one sample it drew.
+        fig, lp_table = plots_mod.plot("P9", self.handles(self.run_plan_lp))
+        self.assertFalse(lp_table.empty)
+        self.assertTrue((lp_table["n_times_sampled"] == 1).all())
+        self.assertTrue((lp_table["share_of_iterations"] == 1.0).all())
+        plt.close(fig)
+
+    def test_p9_overlays_a_weekly_peak_net_load_curve(self):
+        """The overlay is supplied, never recomputed: planning writes no hourly data."""
+        overlay = self.out / "net_load.csv"
+        pd.DataFrame(
+            {"hour": range(48), "net_load_gw": [10.0 + (h % 24) for h in range(48)]}
+        ).to_csv(overlay, index=False)
+        _fig, table = plots_mod.plot(
+            "P9", self.handles(self.run_plan), peak_net_load=str(overlay), window_start=0
+        )
+        plt.close("all")
+        self.assertTrue(table["peak_net_load_gw"].notna().all())
+        self.assertAlmostEqual(float(table["peak_net_load_gw"].iloc[0]), 33.0, places=6)
+
+    def test_p6_redispatch_panel_splits_gross_from_the_credit(self):
+        split = {
+            self.run_plan: {
+                "blocked_gross_opex": 2.4e9,
+                "blocked_wind_credit": -2.3e9,
+                "blocked_net_opex": 0.1e9,
+                "blocked_ens_mwh": 0.0,
+            }
+        }
+        fig, table = plots_mod.plot("P6", self.handles(self.run_plan), opex_split=split)
+        self.assertEqual(len(fig.axes), 2)
+        rows = table[table["source"] == "redispatch"].set_index("component")
+        self.assertAlmostEqual(float(rows.loc["opex_gross", "value_bn_usd"]), 2.4)
+        self.assertAlmostEqual(float(rows.loc["wind_credit", "value_bn_usd"]), -2.3)
+        self.assertAlmostEqual(float(rows.loc["opex_net_redispatch", "value_bn_usd"]), 0.1)
+        self.assertAlmostEqual(float(rows.loc["voll_ens_redispatch", "value_bn_usd"]), 0.0)
+        labels = [t.get_text() for t in fig.axes[1].get_legend().get_texts()]
+        self.assertTrue(any("zero everywhere" in label for label in labels))
+        plt.close(fig)
+
+        # Without the split there is one panel and no redispatch rows.
+        fig, table = plots_mod.plot("P6", self.handles(self.run_plan))
+        self.assertEqual(len(fig.axes), 1)
+        self.assertNotIn("redispatch", set(table["source"]))
+        plt.close(fig)
+
+    def test_p7_and_p8_still_declare_themselves_unimplemented(self):
+        """Both need artefacts no run has produced; the catalogue says so."""
+        for plot_id in ("P7", "P8"):
+            self.assertEqual(plots_mod.PLOTS[plot_id].phase, "B")
+            with self.assertRaises(NotImplementedError):
+                plots_mod.PLOTS[plot_id].fn(self.handles(self.run_plan))
 
 
 class TestPlotCli(PlotFixture):
