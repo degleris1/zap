@@ -571,6 +571,9 @@ def p4_objective_trajectory(runs, **_):
         "proj_grad_norm_l1",
         "clip_fraction",
         "step_norm_mw",
+        "free_grad_norm_l2",
+        "step_norm_free_mw",
+        "stationarity_max",
     ),
 )
 def p5_gradient_diagnostics(runs, **_):
@@ -580,6 +583,16 @@ def p5_gradient_diagnostics(runs, **_):
     gradient L2 norm in $/MW on a log axis, the realised step in MW, and the
     fraction of parameters at the clip.  A step norm pinned at the clip bound for
     every iteration says the step rule, not convergence, is what stopped the run.
+
+    Runs made after the step-rule change (zap ``ba5f6e6``) also carry the
+    *honest* columns: ``free_grad_norm_l2`` (the gradient over rows strictly
+    inside their bounds -- on ``ca2040_z4`` 160 of 166 rows are frozen or on a
+    floor and carry ~99 % of ``grad_norm_l2``), ``step_norm_free_mw`` (the
+    realised post-projection step on those free rows; ``step_norm_mw`` was the
+    pre-projection step under the clipped rule) and ``stationarity_max``
+    (``max_j |m_hat_j| / gamma_j`` over interior rows, the quantity the
+    ``tol_stationarity`` test reads).  They are drawn on the same panels as
+    dashed/thin lines and are NaN for older runs.
     """
     frames = []
     for run in _iteration_runs(runs, "iterations"):
@@ -599,24 +612,45 @@ def p5_gradient_diagnostics(runs, **_):
                     ),
                     "clip_fraction": pd.to_numeric(frame.get("clip_fraction"), errors="coerce"),
                     "step_norm_mw": pd.to_numeric(frame.get("step_norm_mw"), errors="coerce"),
+                    "free_grad_norm_l2": pd.to_numeric(
+                        frame.get("free_grad_norm_l2"), errors="coerce"
+                    ),
+                    "step_norm_free_mw": pd.to_numeric(
+                        frame.get("step_norm_free_mw"), errors="coerce"
+                    ),
+                    "stationarity_max": pd.to_numeric(
+                        frame.get("stationarity_max"), errors="coerce"
+                    ),
                 }
             )
         )
     table = pd.concat(frames, ignore_index=True)[list(_columns("P5"))]
     table = table.sort_values(["run_id", "iteration"]).reset_index(drop=True)
 
+    # Each panel draws one primary column per run and, where a run recorded
+    # it, one "honest" companion column as a thinner dotted line: the free-row
+    # gradient next to the whole-vector norm, the realised free-row step next
+    # to the step the rule proposed, and the stationarity measure (dimensionless,
+    # its own scale) next to the clip fraction.
     panels = (
-        ("grad_norm_l2", "gradient L2 norm [$/MW]", True),
-        ("step_norm_mw", "step norm [MW]", False),
-        ("clip_fraction", "clip fraction", False),
+        ("grad_norm_l2", "free_grad_norm_l2", "gradient L2 norm [$/MW]\n(dotted: free rows only)", True),
+        ("step_norm_mw", "step_norm_free_mw", "step norm [MW]\n(dotted: free rows, post-projection)", False),
+        ("clip_fraction", "stationarity_max", "clip fraction\n(dotted: max |m_hat|/gamma, interior rows)", False),
     )
     fig, axes = plt.subplots(len(panels), 1, figsize=(9.5, 2.6 * len(panels)), sharex=True)
-    for ax, (column, ylabel, log) in zip(axes, panels):
+    for ax, (column, companion, ylabel, log) in zip(axes, panels):
         for i, (_run_id, group) in enumerate(table.groupby("run_id", sort=True)):
             st = style.run_style(i)
             group = group.sort_values("iteration")
+            label = group["label"].iloc[0]
             ax.plot(group["iteration"], group[column], color=st["color"],
-                    linestyle=st["linestyle"], linewidth=1.3, label=group["label"].iloc[0])
+                    linestyle=st["linestyle"], linewidth=1.3, label=label)
+            extra = group[companion]
+            if extra.notna().any() and not np.allclose(
+                extra.fillna(0.0), group[column].fillna(0.0)
+            ):
+                ax.plot(group["iteration"], extra, color=st["color"], linestyle=":",
+                        linewidth=1.0, alpha=0.9, label=f"{label} ({companion})")
         if log:
             ax.set_yscale("log")
         ax.set_ylabel(ylabel, fontsize=8)
