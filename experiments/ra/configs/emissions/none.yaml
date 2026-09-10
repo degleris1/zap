@@ -1,3 +1,0 @@
-# No emissions price, no cap: the unconstrained reference design.
-planning:
-  emissions: {mode: none, price: 0.0, cap: null}

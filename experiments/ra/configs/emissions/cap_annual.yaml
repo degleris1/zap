@@ -1,7 +1,0 @@
-# A hard annual emissions cap, in tonnes CO2 over the full loaded horizon.
-# `cap_basis: annual` divides the cap by the annualization factor before it
-# reaches the solver, so the same YAML means the same physical target at any
-# block coverage (D-W5). Valid only for single_level + kind: primal.
-planning:
-  emissions: {mode: cap, cap: 20.0e+6, cap_basis: annual}
-  single_level: {kind: primal}

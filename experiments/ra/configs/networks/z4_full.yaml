@@ -1,9 +1,0 @@
-# The full 4-zone network with the phase-1 system options.
-includes: [../datasets/ca2040_z4.yaml]
-system:
-  voll: 10000.0
-  demand_scaling: peak_fraction
-  peak_capacity_fraction: 0.85
-  clip_scale_to_one: true
-  link_losses: true
-  export_mode: sink

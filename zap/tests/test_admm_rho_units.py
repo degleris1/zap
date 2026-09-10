@@ -20,6 +20,7 @@ import unittest
 
 import cvxpy as cp
 import numpy as np
+import pytest
 import torch
 
 import zap
@@ -278,23 +279,25 @@ class TestAbsoluteToleranceSplit(unittest.TestCase):
 class TestConfigMirrorsAgree(unittest.TestCase):
     """`rho_power` is written down in three places and they must not drift.
 
-    `experiments/ra/configs/base.yaml` is the declared key space,
-    `experiments/ra/planning/base.py`'s `PLANNING_DEFAULTS` is the in-code mirror
+    `ch3/ra/configs/base.yaml` is the declared key space,
+    `ch3/ra/planning/base.py`'s `PLANNING_DEFAULTS` is the in-code mirror
     the harness validates against, and
-    `experiments/ra/configs/methods/plan_admm.yaml` merges over both.  The retune
+    `ch3/ra/configs/methods/plan_admm.yaml` merges over both.  The retune
     to rho = 0.1 (review 7.5 R1) has to reach all three, or an ADMM planning run
     silently solves at the wrong penalty.
     """
 
     def test_planning_defaults_mirror_base_yaml_rho(self):
-        from experiments.ra import config as ra_config
-        from experiments.ra.planning import PLANNING_DEFAULTS
+        pytest.importorskip("ch3.ra")
+
+        from ch3.ra import config as ra_config
+        from ch3.ra.planning import PLANNING_DEFAULTS
 
         base = ra_config.base_config()
         self.assertEqual(
             PLANNING_DEFAULTS["admm"]["solver_kwargs"]["rho_power"],
             base["planning"]["admm"]["solver_kwargs"]["rho_power"],
-            "experiments/ra/planning/base.py:89 still sets rho_power: 1.0; base.yaml "
+            "ch3/ra/planning/base.py:89 still sets rho_power: 1.0; base.yaml "
             "is at 0.1 (rho has units of $/(MWh*MW) -- see ADMMSolver)",
         )
 
@@ -304,7 +307,9 @@ class TestConfigMirrorsAgree(unittest.TestCase):
 
         import yaml
 
-        from experiments.ra.paths import config_root
+        pytest.importorskip("ch3.ra")
+
+        from ch3.ra.paths import config_root
 
         path = pathlib.Path(config_root()) / "methods" / "plan_admm.yaml"
         cfg = yaml.safe_load(path.read_text())

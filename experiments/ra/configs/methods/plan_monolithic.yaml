@@ -1,7 +1,0 @@
-# One single-level LP over the whole loaded horizon (WP5 spec 8.2).
-mode: plan
-selection: {strategy: all, block_size: null}
-planning:
-  method: monolithic
-  single_level: {kind: primal, solver: HIGHS}
-  optimizer: {num_iterations: 0}

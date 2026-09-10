@@ -1,2 +1,0 @@
-# The monolithic sentinel: one block covering the whole loaded horizon.
-selection: {strategy: all, block_size: null}

@@ -11,6 +11,7 @@ import unittest
 
 import cvxpy as cp
 import numpy as np
+import pytest
 import torch
 
 import zap
@@ -393,7 +394,7 @@ class TestWindowedProxFeasibilityGate(unittest.TestCase):
         return net, devices, T, state
 
     def _gate(self, devices, T, state):
-        """What `experiments/ra/dispatch.admm_max_storage_residual_mwh` does."""
+        """What `ch3/ra/dispatch.admm_max_storage_residual_mwh` does."""
         outcome = state.as_outcome()
         battery = devices[3]
         power = [np.asarray(x) for x in outcome.power[3]]
@@ -486,7 +487,9 @@ class TestHarnessWiring(unittest.TestCase):
     """The config key, the importer option and the run-card record."""
 
     def test_config_validates_the_enum(self):
-        from experiments.ra import config as ra_config
+        pytest.importorskip("ch3.ra")
+
+        from ch3.ra import config as ra_config
 
         cfg = ra_config.base_config()
         cfg["system"]["storage_soc_mode"] = "cyclic_free"
@@ -498,8 +501,10 @@ class TestHarnessWiring(unittest.TestCase):
         self.assertIn("storage_soc_mode", str(ctx.exception))
 
     def test_load_options_default_and_forwarding(self):
-        from experiments.ra import config as ra_config
-        from experiments.ra import system as ra_system
+        pytest.importorskip("ch3.ra")
+
+        from ch3.ra import config as ra_config
+        from ch3.ra import system as ra_system
         from zap.importers.wy_store import LoadOptions
 
         self.assertEqual(LoadOptions().storage_soc_mode, "cyclic_free")
@@ -512,8 +517,10 @@ class TestHarnessWiring(unittest.TestCase):
         self.assertEqual(ra_system.load_options(cfg).storage_soc_mode, "fixed")
 
     def test_the_mode_is_part_of_the_system_cache_key(self):
-        from experiments.ra import config as ra_config
-        from experiments.ra import system as ra_system
+        pytest.importorskip("ch3.ra")
+
+        from ch3.ra import config as ra_config
+        from ch3.ra import system as ra_system
 
         cfg = ra_config.validate(ra_config.base_config())
         default_key = ra_system.system_key(cfg, None)

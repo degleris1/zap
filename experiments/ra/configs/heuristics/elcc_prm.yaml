@@ -1,7 +1,0 @@
-# PHASE 2, and deliberately unloadable: `heuristics.name: elcc_prm` is rejected
-# by config validation (D-W4). ELCCs must be generated from the evaluation
-# pipeline first; see memory/PROJECT.md 2.2.
-heuristics:
-  name: elcc_prm
-  ucap_derate: false
-  outage_draws: []

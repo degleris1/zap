@@ -1,8 +1,0 @@
-# One single-level LP over many weekly blocks. Byte-identical code to
-# plan_monolithic; only `selection.block_size` differs (D-W2, spec 9.2).
-mode: plan
-selection: {strategy: all, block_size: 168}
-planning:
-  method: stochastic
-  single_level: {kind: primal, solver: HIGHS}
-  optimizer: {num_iterations: 0}

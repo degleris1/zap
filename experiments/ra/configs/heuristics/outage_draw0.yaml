@@ -1,5 +1,0 @@
-# Weather plus one thermal outage draw. Exclusive with ucap_derate.
-heuristics:
-  name: none
-  ucap_derate: false
-  outage_draws: [0]

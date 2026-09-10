@@ -1,2 +1,0 @@
-# Every 168 h block of the loaded horizon.
-selection: {strategy: all, block_size: 168}

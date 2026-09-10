@@ -1,6 +1,0 @@
-# Solve every 24 h and 168 h block of the window, plus the reference window.
-selection:
-  blocks: [24, 168]
-  reference: window
-  # Aligned to both block sizes: 5040 = 30*168 = 210*24, 672 = 4*168 = 28*24.
-  reference_window: {start: 5040, hours: 672}

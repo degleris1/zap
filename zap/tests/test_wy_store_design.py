@@ -583,7 +583,7 @@ def test_line_capacity_can_be_designed(dataset):
 
 
 # ---------------------------------------------------------------------------
-# The ``experiments/ra`` seam: design.json -> design_capacity -> build_system
+# The ``ch3/ra`` seam: design.json -> design_capacity -> build_system
 # ---------------------------------------------------------------------------
 
 
@@ -634,7 +634,9 @@ def _write_design_json(path: Path, system, **overrides) -> Path:
 
 
 def test_read_design_capacity_round_trip(dataset, tmp_path):
-    from experiments.ra import system as system_mod
+    pytest.importorskip("ch3.ra")
+
+    from ch3.ra import system as system_mod
 
     base = _load(dataset, outage_draw=0)
     path = _write_design_json(tmp_path / "expand.json", base, z2_old_CCGT=1000.0)
@@ -649,7 +651,9 @@ def test_read_design_capacity_round_trip(dataset, tmp_path):
 
 
 def test_read_design_capacity_rejects_a_foreign_dataset(dataset, tmp_path):
-    from experiments.ra import system as system_mod
+    pytest.importorskip("ch3.ra")
+
+    from ch3.ra import system as system_mod
 
     base = _load(dataset)
     path = tmp_path / "foreign.json"
@@ -662,7 +666,9 @@ def test_read_design_capacity_rejects_a_foreign_dataset(dataset, tmp_path):
 
 
 def test_build_system_is_design_aware(dataset):
-    from experiments.ra import system as system_mod
+    pytest.importorskip("ch3.ra")
+
+    from ch3.ra import system as system_mod
 
     system_mod.clear_system_cache()
     cfg = _cfg(dataset)
@@ -689,7 +695,9 @@ def test_build_system_is_design_aware(dataset):
 
 
 def test_design_apply_still_works_for_the_planning_path(dataset):
-    from experiments.ra import system as system_mod
+    pytest.importorskip("ch3.ra")
+
+    from ch3.ra import system as system_mod
 
     base = _load(dataset)
     row = _row(base, "Generator", "z1 CCGT")
@@ -703,7 +711,9 @@ def test_design_apply_still_works_for_the_planning_path(dataset):
 
 
 def test_design_capacity_map_rejects_an_underivable_class(dataset):
-    from experiments.ra import system as system_mod
+    pytest.importorskip("ch3.ra")
+
+    from ch3.ra import system as system_mod
 
     design = system_mod.Design(design_id="d", capacities={"ExportSink": [1.0]})
     with pytest.raises(ValueError, match="cannot impose"):

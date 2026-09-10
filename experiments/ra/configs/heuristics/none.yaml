@@ -1,5 +1,0 @@
-# No reliability heuristic: weather-driven availability only.
-heuristics:
-  name: none
-  ucap_derate: false
-  outage_draws: []
