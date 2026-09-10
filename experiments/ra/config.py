@@ -274,7 +274,14 @@ def _normalize_output(out: dict) -> None:
         out["hourly_quantities"] = str(quantities)
     elif isinstance(quantities, (list, tuple)):
         out["hourly_quantities"] = [str(q) for q in quantities]
-    for key in ("combine_hourly", "save_ens_profile", "save_iterations", "figures"):
+    for key in (
+        "combine_hourly",
+        "save_ens_profile",
+        "save_iterations",
+        "figures",
+        "price_all_buses",
+        "save_price_error",
+    ):
         out[key] = bool(out[key])
     try:
         out["admm_trace_every"] = int(out["admm_trace_every"])
@@ -565,6 +572,9 @@ def validate(cfg: dict) -> dict:
     if not plan_mode and not any(cfg["methods"][m]["enabled"] for m in METHOD_NAMES):
         raise ConfigError("no method is enabled")
 
+    if not plan_mode:
+        _validate_dispatch_admm(cfg)
+
     _validate_output(cfg)
 
     shard = cfg["execution"]["shard"]
@@ -572,6 +582,32 @@ def validate(cfg: dict) -> dict:
         parse_shard(shard)  # raises on a malformed value
 
     return cfg
+
+
+def _validate_dispatch_admm(cfg: dict) -> None:
+    """Reject model-changing ADMM knobs on a blocked-dispatch run.
+
+    ``battery_window`` makes each window its own SoC problem
+    (``StorageUnit._windowed_equality_constraints``): a different *model*, not a
+    solver setting, so it must never appear on a dispatch-benchmark row or in a
+    blocking-error comparison. Caught here rather than only at solve time, where
+    ``run_task`` turns the exception into a per-task ``failed`` record and the run
+    grinds through every LP task before failing every ADMM one.
+
+    ``mode: plan`` is untouched: ``planning.admm.solver_kwargs.battery_window`` is
+    a legitimate setting for the planning path and the legacy ``experiments/plan``
+    configs use it.
+    """
+    admm = (cfg.get("methods") or {}).get("admm")
+    if not admm:
+        return
+    if (admm.get("solver_kwargs") or {}).get("battery_window"):  # 0 / None are "off"
+        raise ConfigError(
+            "methods.admm.solver_kwargs.battery_window makes each window its own SoC "
+            "problem: that is a different model, not a solver setting, and must not "
+            "appear on a dispatch-benchmark or blocking-error row. Remove the key (or "
+            "set it to 0) for `mode: dispatch`."
+        )
 
 
 def parse_shard(shard: str) -> tuple[int, int]:

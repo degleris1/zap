@@ -322,6 +322,15 @@ class ADMMSolver:
     battery_inner_weight: float = 1.0
     battery_inner_over_relaxation: float = 1.8
     battery_inner_iterations: int = 200
+    #: The inner-prox post-mortem (:meth:`warn_inner_prox`).  A device with an
+    #: inner solver reports its own primal residual; it only *matters* when it is
+    #: large next to the outer nodal imbalance the solve actually stopped on, so
+    #: the warning fires when the inner residual exceeds
+    #: ``max(inner_prox_warn_floor, inner_prox_warn_factor * rms_imbalance)``.
+    inner_prox_warn_factor: float = 10.0
+    #: Absolute silence floor, in MW / MWh: below this an inner residual is never
+    #: worth a line in the log, whatever the imbalance.
+    inner_prox_warn_floor: float = 1e-3
     minimum_iterations: int = 10
     relative_rho_angle: bool = False
     adaptive_rho: bool = True
@@ -355,6 +364,17 @@ class ADMMSolver:
         # reported a non-finite value). `experiments/ra/dispatch.py` records it
         # on ADMM task records as `admm_max_inner_prox_residual_mw`.
         self.max_inner_prox_residual = 0.0
+        # The same quantity over the *last* outer iteration only. This is the one
+        # that describes the iterate the solver returns: `max_inner_prox_residual`
+        # is a maximum over every outer iteration and is dominated by the first
+        # few, when the prox input `z` is still far from its fixed point (measured
+        # on ca2040_z4 block 200: 2.8 MWh worst over the solve, 0.01 MWh on the
+        # final iteration, whose SoC residual passes the harness gate).
+        self.last_inner_prox_residual = 0.0
+        # Set per solve (it needs the network and the horizon); defined here so a
+        # caller that inspects the solver before solving does not see an
+        # AttributeError.
+        self.num_node_hours = 0
 
         if self.scale_dual_residuals is not None:
             warnings.warn(
@@ -430,6 +450,56 @@ class ADMMSolver:
 
         return suggestion
 
+    def warn_inner_prox(self, history) -> Optional[str]:
+        """One-line reason if the inner prox is the binding error, else None.
+
+        A device with an inner solver (``StorageUnit``) reports
+        ``||x - y||_inf`` in MW / MWh, which the solver keeps as
+        :attr:`last_inner_prox_residual` (the final outer iteration, i.e. the
+        iterate actually returned -- the quantity judged here) and
+        :attr:`max_inner_prox_residual` (the worst over the whole solve, reported
+        for context).  The device cannot judge it: the same
+        0.01 MWh is noise next to a 5 MW nodal imbalance and is the binding error
+        next to a 1e-4 MW one.  ``history.power[-1]`` is the L2 norm of the
+        ``(num_nodes, time_horizon)`` nodal-imbalance array, so the comparable
+        elementwise quantity is ``history.power[-1] / sqrt(num_nodes * T)`` -- an
+        RMS nodal imbalance over **node-hours**, not over device terminals.
+
+        Logs at WARNING at most once (this is called once, after the iteration
+        loop) and never raises: a slow prox is a quality problem, not a crash.
+        """
+        worst = getattr(self, "max_inner_prox_residual", None)
+        resid = getattr(self, "last_inner_prox_residual", None)
+        if resid is None:
+            resid = worst
+        if resid is None:
+            return None
+        resid = float(resid)
+        worst = resid if worst is None else float(worst)
+        if not (resid > 0.0) and not math.isnan(resid):
+            return None  # 0.0 means no device reported an inner residual
+
+        powers = getattr(history, "power", None) or []
+        n = max(int(getattr(self, "num_node_hours", 0) or 0), 1)
+        rms_imbalance = float(powers[-1]) / math.sqrt(n) if powers else float("nan")
+        threshold = self.inner_prox_warn_floor
+        if math.isfinite(rms_imbalance):
+            threshold = max(threshold, self.inner_prox_warn_factor * rms_imbalance)
+
+        if math.isnan(resid) or resid > threshold:
+            message = (
+                f"inner prox is the binding error: ||x - y||_inf = {resid:.3g} "
+                f"(MW/MWh) on the final outer iteration ({worst:.3g} worst over the "
+                f"solve) after {self.battery_inner_iterations} inner iterations, vs "
+                f"an RMS nodal imbalance of {rms_imbalance:.3g} MW over {n} "
+                f"node-hours (threshold {threshold:.3g}). The returned "
+                "charge/discharge is box-feasible but its SoC recursion is off by up "
+                "to this much; raise `battery_inner_iterations`."
+            )
+            logger.warning("StorageUnit %s", message)
+            return message
+        return None
+
     def get_rho(self):
         rho_power = self.rho_power
         rho_angle = self.rho_angle
@@ -481,6 +551,11 @@ class ADMMSolver:
             d.num_devices * d.num_terminals_per_device for d in devices if d.is_ac
         )
         self.total_terminals = self.num_dc_terminals + self.num_ac_terminals
+        # Elements of the nodal-imbalance array `history.power` is the L2 norm of:
+        # `unsqueeze_terminals_times_x(num_terminals, avg_power)` is (num_nodes, T),
+        # NOT one entry per device terminal. Kept so `warn_inner_prox` can turn that
+        # norm into a per-node-hour RMS.
+        self.num_node_hours = int(getattr(net, "num_nodes", 0) or 0) * int(time_horizon)
         history = self.initialize_history()
         layout = ADMMLayout.of(
             net,
@@ -500,6 +575,7 @@ class ADMMSolver:
         self.warm_start_reason = None
         self.warm_start_rho_rescaled = False
         self.max_inner_prox_residual = 0.0
+        self.last_inner_prox_residual = 0.0
 
         if initial_state is None:
             st = self.initialize_solver(
@@ -581,6 +657,10 @@ class ADMMSolver:
         if not self._rho_suggested:
             self.suggest_rho(st)
 
+        # Cheap post-mortem on the inner prox: warns only when its residual is
+        # large next to the outer imbalance the solve stopped on.
+        self.warn_inner_prox(history)
+
         # Stamp the state with the rho its scaled duals are relative to. `adjust_rho`
         # only writes these fields on the iterations where rho actually moves, so
         # read the current value here rather than trusting the state.
@@ -648,6 +728,7 @@ class ADMMSolver:
         contingency_device,
         contingency_mask,
     ):
+        inner_this_iteration = None
         for i, dev in enumerate(devices):
             rho_power, rho_angle = self.get_rho()
 
@@ -700,6 +781,12 @@ class ADMMSolver:
                     # A NaN/inf inner iterate must never read as "converged".
                     resid = float("inf")
                 self.max_inner_prox_residual = max(self.max_inner_prox_residual, resid)
+                inner_this_iteration = (
+                    resid if inner_this_iteration is None else max(inner_this_iteration, resid)
+                )
+
+        if inner_this_iteration is not None:
+            self.last_inner_prox_residual = inner_this_iteration
 
         return st
 

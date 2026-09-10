@@ -1,4 +1,4 @@
-"""Operational plots O1-O11 (phase A).
+"""Operational plots O1-O13 (phase A).
 
 Every function takes ``runs: list[RunHandle]`` and returns ``(fig, table)``;
 the table's columns are pinned by the registration decorator.
@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from . import register, style
+from .loader import MissingDataError
 
 logger = logging.getLogger(__name__)
 
@@ -1103,6 +1104,201 @@ def o11_solve_time(runs, **_):
     fig.suptitle("O11 - solve time")
     fig.tight_layout()
     return fig, table
+
+
+# ---------------------------------------------------------------------------
+# O12 / O13 -- ADMM dual error vs the reference LP, per (bus, hour)
+# ---------------------------------------------------------------------------
+
+
+def _price_error(runs, *, block_size=None, load_buses_only=True) -> pd.DataFrame:
+    """`price_error.parquet` of every run, concatenated and filtered."""
+    frames = []
+    for run in runs:
+        frame = run.price_error()
+        frames.append(frame.assign(run_id=run.run_id, label=run.label))
+    table = pd.concat(frames, ignore_index=True)
+    if load_buses_only and "is_load_bus" in table.columns:
+        table = table[table["is_load_bus"].astype(bool)]
+    if block_size is not None:
+        table = table[table["block_size"].astype(str) == str(block_size)]
+    return table
+
+
+@register(
+    "O12",
+    title="ADMM dual error heat map (bus x hour)",
+    tier="debug",
+    needs=("price_error",),
+    columns=(
+        "run_id",
+        "label",
+        "block_size",
+        "block_start_hour",
+        "bus",
+        "hour",
+        "delta_price",
+        "delta_price_vs_block_lp",
+    ),
+)
+def o12_price_error_heatmap(runs, *, block_size=None, **_):
+    """ADMM minus the **same-block** LP price, per (bus, hour). Load buses only.
+
+    One panel per block, every block size unless `block_size=168` (or 24) narrows
+    it. The 168 h blocks are the interesting ones: on `ca2040_z4` at `rho 0.1` the
+    load-bus dual error plateaus at ~3 $/MWh while the power residuals keep
+    falling, so the question is *where* it sits -- which buses, and which hours of
+    the block.
+
+    The colour is `delta_price_vs_block_lp` (the pure solver error), not
+    `delta_price` (the distance to the reference solve): the blocked *LP* is just
+    as far from the reference as ADMM is, because that distance is a blocking
+    error. Both columns are in the CSV. Non-load buses are excluded because the
+    import and export buses price degenerately (a flat 56-61 $/MWh at every
+    iteration) and would set the colour scale.
+    """
+    table = _price_error(runs, block_size=block_size)
+    table = table[list(_columns("O12"))].sort_values(
+        ["run_id", "block_start_hour", "bus", "hour"]
+    )
+    table = table.reset_index(drop=True)
+    quantity = (
+        "delta_price_vs_block_lp"
+        if table["delta_price_vs_block_lp"].notna().any()
+        else "delta_price"
+    )
+
+    groups = list(table.groupby(["run_id", "label", "block_start_hour"], sort=True))
+    if not groups:
+        raise MissingDataError(
+            runs[0].run_id,
+            "price_error",
+            f"no load-bus price-error rows for block_size {block_size!r}",
+        )
+    limit = float(np.nanmax(np.abs(table[quantity].to_numpy(dtype=float)))) or 1.0
+    fig, axes = _facet_axes(len(groups), height=2.6, sharex=False)
+    for ax, ((_run_id, label, start), group) in zip(axes, groups):
+        pivot = group.pivot_table(
+            index="bus", columns="hour", values=quantity, aggfunc="mean", observed=True
+        )
+        image = ax.pcolormesh(
+            pivot.columns.to_numpy(dtype=float),
+            np.arange(pivot.shape[0], dtype=float),
+            pivot.to_numpy(),
+            cmap="RdBu_r",
+            vmin=-limit,
+            vmax=limit,
+            shading="nearest",
+        )
+        ax.set_yticks(np.arange(pivot.shape[0]))
+        ax.set_yticklabels(list(pivot.index), fontsize=7)
+        ax.set_title(f"{label} - block at hour {start} ({block_size} h)")
+        fig.colorbar(image, ax=ax, label="$/MWh")
+    axes[-1].set_xlabel("absolute hour of the weather year")
+    reference = "same-block LP" if quantity == "delta_price_vs_block_lp" else "reference LP"
+    fig.suptitle(f"O12 - ADMM minus {reference} price, load buses")
+    fig.tight_layout()
+    return fig, table
+
+
+@register(
+    "O13",
+    title="ADMM dual error per hour, by block size",
+    tier="report",
+    needs=("price_error",),
+    columns=(
+        "run_id",
+        "label",
+        "block_size",
+        "hour",
+        "hour_of_day",
+        "hours_into_block",
+        "max_abs_delta_price",
+        "mean_abs_delta_price",
+        "max_abs_delta_price_vs_block_lp",
+        "n_buses",
+    ),
+)
+def o13_price_error_per_hour(runs, **_):
+    """Max |ADMM - same-block LP| over load buses, per hour, one series per block size.
+
+    Two panels: against the absolute hour (does the error sit at particular hours
+    of the record?) and against the hour *into the block* (is it a boundary effect
+    of the block's own cyclic storage condition?). 24 h against 168 h on the same
+    hours is the comparison that separates the solver from the block length.
+
+    Plotted against the **same-block** LP. `max_abs_delta_price` (the distance to
+    the reference solve) is kept in the CSV, but it is a blocking error: a blocked
+    LP shows the same number.
+    """
+    table = _price_error(runs)
+    rows = []
+    for keys, group in table.groupby(["run_id", "label", "block_size", "hour"], sort=True):
+        run_id, label, size, hour = keys
+        delta = pd.to_numeric(group["delta_price"], errors="coerce").abs()
+        block_delta = pd.to_numeric(
+            group.get("delta_price_vs_block_lp", pd.Series(dtype=float)), errors="coerce"
+        ).abs()
+        start = int(group["block_start_hour"].iloc[0])
+        rows.append(
+            {
+                "run_id": run_id,
+                "label": label,
+                "block_size": size,
+                "hour": int(hour),
+                # The exports are UTC hours; the shipped window starts at hour 7 so
+                # blocks begin at Pacific midnight (see persist.ENS_PROFILE_COLUMNS).
+                "hour_of_day": int(hour) % 24,
+                "hours_into_block": int(hour) - start,
+                "max_abs_delta_price": float(delta.max()),
+                "mean_abs_delta_price": float(delta.mean()),
+                "max_abs_delta_price_vs_block_lp": float(block_delta.max())
+                if block_delta.notna().any()
+                else float("nan"),
+                "n_buses": len(group),
+            }
+        )
+    out = pd.DataFrame(rows, columns=list(_columns("O13")))
+    if out.empty:
+        raise MissingDataError(runs[0].run_id, "price_error", "no load-bus price-error rows")
+
+    quantity = (
+        "max_abs_delta_price_vs_block_lp"
+        if out["max_abs_delta_price_vs_block_lp"].notna().any()
+        else "max_abs_delta_price"
+    )
+    fig, (ax_abs, ax_into) = plt.subplots(1, 2, figsize=(11.5, 3.6))
+    for i, ((_run_id, label, size), group) in enumerate(
+        out.groupby(["run_id", "label", "block_size"], sort=True)
+    ):
+        st = style.run_style(i)
+        ax_abs.plot(
+            group["hour"],
+            group[quantity],
+            color=st["color"],
+            linestyle=st["linestyle"],
+            linewidth=1.0,
+            label=f"{label} {size} h",
+        )
+        into = group.groupby("hours_into_block")[quantity].max()
+        ax_into.plot(
+            into.index,
+            into.to_numpy(),
+            color=st["color"],
+            linestyle=st["linestyle"],
+            linewidth=1.0,
+            label=f"{label} {size} h",
+        )
+    reference = "same-block LP" if quantity.endswith("block_lp") else "reference LP"
+    ax_abs.set_xlabel("absolute hour of the weather year")
+    ax_abs.set_ylabel(f"max |ADMM - {reference}| [$/MWh]")
+    ax_abs.legend(fontsize=7)
+    ax_into.set_xlabel("hours into the block")
+    ax_into.set_ylabel(f"max |ADMM - {reference}| [$/MWh]")
+    ax_into.legend(fontsize=7)
+    fig.suptitle(f"O13 - ADMM dual error per hour vs the {reference}, load buses")
+    fig.tight_layout()
+    return fig, out
 
 
 def _columns(plot_id: str) -> tuple[str, ...]:

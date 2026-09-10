@@ -30,13 +30,14 @@ from experiments.ra.plots import loader as loader_mod
 from experiments.ra.plots import style as style_mod
 
 CATALOGUE_IDS = (
-    tuple(f"O{i}" for i in range(1, 12))
+    tuple(f"O{i}" for i in range(1, 14))
     + tuple(f"P{i}" for i in range(1, 10))
     + tuple(f"R{i}" for i in range(1, 8))
 )
 
 PHASE_A_IDS = (
-    "O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "P1", "P2", "P6",
+    "O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "O12", "O13",
+    "P1", "P2", "P6",
 )
 
 #: A second, independent copy of every phase-A CSV header (D9 / T14).  A change
@@ -68,6 +69,11 @@ GOLDEN_COLUMNS = {
     "O11": ["run_id", "label", "method", "block_size", "hours_per_block", "n_blocks",
             "total_hours", "solve_s_total", "solve_s_mean", "solve_s_p95", "wall_s_total",
             "cores", "cpu_seconds", "n_variables_mean", "n_constraints_mean"],
+    "O12": ["run_id", "label", "block_size", "block_start_hour", "bus", "hour",
+            "delta_price", "delta_price_vs_block_lp"],
+    "O13": ["run_id", "label", "block_size", "hour", "hour_of_day", "hours_into_block",
+            "max_abs_delta_price", "mean_abs_delta_price",
+            "max_abs_delta_price_vs_block_lp", "n_buses"],
     "P1": ["run_id", "label", "design_id", "device_class", "carrier", "unit", "as_built",
            "designed", "delta"],
     "P2": ["run_id", "label", "design_id", "formulation", "heuristic", "selection_strategy",
@@ -143,6 +149,38 @@ class PlotFixture(unittest.TestCase):
                 },
             },
             expect_zero=False,
+        )
+        # ADMM *and* LP on the same blocks, with a reference solve and every bus's
+        # price persisted: the input `price_error.parquet` (and O12 / O13) needs.
+        # The gates are wide open on purpose -- 30 ADMM iterations on the tiny
+        # fixture is nowhere near a dispatch, and the point here is the pipeline.
+        cls.run_price = cls._dispatch_run(
+            "run_price",
+            {
+                "selection": {
+                    "blocks": [24],
+                    "reference": "window",
+                    "reference_window": {"start": 0, "hours": 48},
+                },
+                "output": {"save_hourly": "carrier_bus", "price_all_buses": True},
+                "methods": {
+                    "lp": {"enabled": True, "solver": "HIGHS", "timeout_s": 600},
+                    "admm": {
+                        "enabled": True,
+                        "required": False,
+                        "timeout_s": 900,
+                        "max_imbalance_mw": 1.0e9,
+                        "max_soc_residual_mwh": 1.0e9,
+                        "solver_kwargs": {
+                            "num_iterations": 30,
+                            "rho_power": 1.0,
+                            "minimum_iterations": 10,
+                            "atol": 1e-8,
+                            "rtol": 1e-8,
+                        },
+                    },
+                },
+            },
         )
         cls.run_plain = cls._dispatch_run(
             "run_plain", {"selection": {"blocks": [24], "reference": "none"}}
@@ -230,6 +268,8 @@ class PlotFixture(unittest.TestCase):
     def runs_for(self, plot_id):
         if plot_id == "O10":
             return self.handles(self.run_admm)
+        if plot_id in ("O12", "O13"):
+            return self.handles(self.run_price)
         if plot_id in ("P1", "P2", "P6"):
             return self.handles(self.run_plan)
         if plot_id == "O5":
@@ -249,7 +289,7 @@ class TestCatalogue(PlotFixture):
     def test_catalogue_is_complete(self):
         """T12."""
         self.assertEqual(set(plots_mod.PLOTS), set(CATALOGUE_IDS))
-        self.assertEqual(len(plots_mod.PLOTS), 27)
+        self.assertEqual(len(plots_mod.PLOTS), 29)
         for plot_id, spec in plots_mod.PLOTS.items():
             self.assertTrue(spec.title.strip(), plot_id)
             self.assertIn(spec.tier, ("debug", "report"), plot_id)
@@ -302,6 +342,60 @@ class TestPhaseAPlots(PlotFixture):
             with self.subTest(plot=plot_id):
                 _png, csv = plots_mod.render(plot_id, self.runs_for(plot_id), self.out)
                 self.assertEqual(list(pd.read_csv(csv, nrows=0).columns), expected)
+
+    def test_o12_and_o13_read_the_price_error_decomposition(self):
+        """The per-(bus, hour) table reaches both plots, load buses only."""
+        runs = self.handles(self.run_price)
+        table = runs[0].price_error()
+        self.assertFalse(table.empty)
+        for column in (
+            "task_id", "method", "block_size", "block_start_hour", "bus", "hour",
+            "is_load_bus", "lp_price", "admm_price", "delta_price", "block_lp_price",
+            "delta_price_vs_block_lp",
+        ):
+            self.assertIn(column, table.columns)
+        # Only ADMM blocks are compared, never the reference row against itself.
+        self.assertEqual(set(table["method"]), {"admm"})
+        self.assertNotIn("reference", set(table["block_size"]))
+        # `price_all_buses` is on, so non-load buses are recorded and flagged.
+        self.assertIn(False, set(table["is_load_bus"]))
+        self.assertTrue((table["delta_price"] - (table["admm_price"] - table["lp_price"]))
+                        .abs().max() < 1e-9)
+        # The same-block LP is the control that separates the ADMM dual error from
+        # the blocking error; this fixture solves both methods on every block.
+        self.assertTrue(table["block_lp_price"].notna().all())
+        self.assertTrue(
+            (table["delta_price_vs_block_lp"]
+             - (table["admm_price"] - table["block_lp_price"])).abs().max() < 1e-9
+        )
+
+        _fig, o12 = plots_mod.plot("O12", runs, block_size=24)
+        self.assertTrue(set(o12["block_size"]) == {"24"})
+        self.assertFalse(o12.empty)
+        _fig, o13 = plots_mod.plot("O13", runs)
+        self.assertFalse(o13.empty)
+        self.assertTrue((o13["hours_into_block"] >= 0).all())
+        # Load buses only in both: the flagged non-load rows are dropped.
+        merged = table[table["is_load_bus"]]
+        self.assertEqual(len(o12), len(merged[merged["block_size"] == "24"]))
+
+    def test_price_error_summary_columns_reach_metrics_csv(self):
+        run_dir = loader_mod.resolve_run_dir(self.run_price, runs_root=self.runs_root)
+        frame = pd.read_csv(run_dir / "metrics.csv")
+        for column in (
+            "price_error_load_max_usd_per_mwh",
+            "price_error_load_rms_usd_per_mwh",
+            "price_error_all_bus_max_usd_per_mwh",
+            "price_error_n_bus_hours",
+            "price_error_load_max_vs_block_lp_usd_per_mwh",
+            "price_error_load_rms_vs_block_lp_usd_per_mwh",
+        ):
+            self.assertIn(column, frame.columns)
+        admm = frame[(frame["method"] == "admm") & (frame["block_size"].astype(str) == "24")]
+        self.assertTrue(admm["price_error_load_max_usd_per_mwh"].notna().any())
+        text = (run_dir / "CARD.md").read_text()
+        self.assertIn("## ADMM dual accuracy vs the reference LP", text)
+        self.assertIn("price_error.parquet", text)
 
     def test_o8_load_buses_only(self):
         """T16 (D5)."""

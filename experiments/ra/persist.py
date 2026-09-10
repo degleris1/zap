@@ -81,6 +81,46 @@ QUANTITY_UNITS = {
     "price_usd_per_mwh": "$/MWh",
 }
 
+#: ``carrier`` marker on a ``price_usd_per_mwh`` row when ``output.price_all_buses``
+#: is on.  With the flag off (the default) prices are written for load buses only
+#: (D5) and the carrier stays empty, exactly as before; with it on every bus is
+#: written and every consumer that wants the D5 restriction filters on
+#: ``carrier != NON_LOAD_BUS_CARRIER``.  On ``ca2040_z4`` the extra buses are the
+#: import bus and the export buses, whose duals are degenerate (a flat
+#: 56-61 $/MWh) and are not system prices -- which is exactly why they must never
+#: be pooled into a price statistic, and exactly why they are worth recording
+#: separately when diagnosing ADMM duals.
+LOAD_BUS_CARRIER = "load_bus"
+NON_LOAD_BUS_CARRIER = "other_bus"
+
+#: Columns of ``price_error.parquet``: the per-(bus, hour) decomposition of an
+#: ADMM block's dual error, written by ``ra aggregate``.
+#:
+#: **Two references, and they answer different questions.** ``lp_price`` is the
+#: *reference* solve's price (the whole window as one LP) and ``delta_price`` is
+#: the distance to it -- but that distance is dominated by *blocking* error, not
+#: by the solver: the blocked **LP** is just as far from the reference as ADMM is
+#: (measured 2026-09-09 on ca2040_z4: 8.36 vs 8.30 $/MWh max on 24 h blocks).
+#: ``block_lp_price`` is the LP solved on the *same block*, so
+#: ``delta_price_vs_block_lp`` is the pure ADMM dual error -- the quantity a
+#: price-based convergence criterion has to drive down, and the one the gradient
+#: planner's duals live or die by. It is NaN when the run has no LP row for that
+#: block.
+PRICE_ERROR_COLUMNS = (
+    "task_id",
+    "method",
+    "block_size",
+    "block_start_hour",
+    "bus",
+    "hour",
+    "is_load_bus",
+    "lp_price",
+    "admm_price",
+    "delta_price",
+    "block_lp_price",
+    "delta_price_vs_block_lp",
+)
+
 #: Quantities whose all-zero rows are dropped.  Never drop a zero row of
 #: ``dispatch_mw`` or ``available_capacity_mw``: a carrier that is off for a
 #: whole week must still stack as zero.
@@ -130,6 +170,42 @@ ADMM_TRACE_COLUMNS = (
     "power_unit",
     "cost_unit",
 )
+
+def price_error_schema() -> pa.Schema:
+    """The explicit arrow schema of ``price_error.parquet``."""
+    return pa.schema(
+        [
+            pa.field("task_id", _STR),
+            pa.field("method", _STR),
+            pa.field("block_size", _STR),
+            pa.field("block_start_hour", pa.int32()),
+            pa.field("bus", _STR),
+            pa.field("hour", pa.int32()),
+            pa.field("is_load_bus", pa.bool_()),
+            pa.field("lp_price", pa.float64()),
+            pa.field("admm_price", pa.float64()),
+            pa.field("delta_price", pa.float64()),
+            pa.field("block_lp_price", pa.float64(), nullable=True),
+            pa.field("delta_price_vs_block_lp", pa.float64(), nullable=True),
+        ]
+    )
+
+
+def write_price_error(run_dir, frame: pd.DataFrame) -> Path | None:
+    """Write ``price_error.parquet``; ``None`` for an empty frame."""
+    if run_dir is None or frame is None or frame.empty:
+        return None
+    frame = frame.reindex(columns=list(PRICE_ERROR_COLUMNS))
+    frame["block_start_hour"] = frame["block_start_hour"].astype("int32")
+    frame["hour"] = frame["hour"].astype("int32")
+    frame["is_load_bus"] = frame["is_load_bus"].astype(bool)
+    for col in ("lp_price", "admm_price", "delta_price", "block_lp_price",
+                "delta_price_vs_block_lp"):
+        frame[col] = frame[col].astype("float64")
+    for col in ("task_id", "method", "block_size", "bus"):
+        frame[col] = frame[col].astype(str)
+    return write_parquet_atomic(frame, Path(run_dir) / "price_error.parquet", price_error_schema())
+
 
 #: Sub-directories that hold one parquet per task and are concatenated into a
 #: single sibling file by ``ra aggregate`` (D3).
@@ -210,6 +286,11 @@ def admm_trace_schema() -> pa.Schema:
 
 def output_options(cfg: dict | None) -> dict:
     return dict((cfg or {}).get("output") or {})
+
+
+def price_all_buses(cfg: dict | None) -> bool:
+    """``output.price_all_buses``: write prices at every bus, not only load buses."""
+    return bool(output_options(cfg).get("price_all_buses", False))
 
 
 def hourly_mode(cfg: dict | None) -> str:
@@ -376,6 +457,7 @@ def build_hourly_frame(
     *,
     task,
     quantities: Sequence[str] = HOURLY_QUANTITIES,
+    all_buses: bool = False,
 ) -> pd.DataFrame:
     """The long-format hourly table of one solved block, in physical units.
 
@@ -516,12 +598,23 @@ def build_hourly_frame(
                 row_names = _row_names(index, cls_name, device, n_rows)
                 emit(flow, list(zip(carriers, buses)), "line_flow_mw", names=row_names)
 
-    # --- Prices (load buses only; D5) -------------------------------------
+    # --- Prices (load buses only unless `output.price_all_buses`; D5) ------
     if "price_usd_per_mwh" in wanted and prices is not None and prices.size:
-        nodes = sorted(load_bus_nodes(shortfalls))
+        load_nodes = load_bus_nodes(shortfalls)
+        if all_buses:
+            # Every bus, each row labelled by whether it carries load, so the D5
+            # restriction is a filter rather than a lost distinction.
+            nodes = list(range(int(np.asarray(prices).shape[0])))
+            carriers = [
+                LOAD_BUS_CARRIER if node in load_nodes else NON_LOAD_BUS_CARRIER
+                for node in nodes
+            ]
+        else:
+            nodes = sorted(load_nodes)
+            carriers = ["" for _ in nodes]
         if nodes:
             values = np.asarray(prices, dtype=np.float64)[nodes, : int(block.hours)]
-            keys = [("", str(bus_names[node])) for node in nodes]
+            keys = [(carrier, str(bus_names[node])) for carrier, node in zip(carriers, nodes)]
             emit(values, keys, "price_usd_per_mwh", names=[""] * len(nodes), scale=cost_unit)
 
     if not chunks:
@@ -610,7 +703,13 @@ def write_hourly(run_dir, task, cfg: dict, loaded, devices, outcome, block) -> P
     if not quantities:
         return None
     frame = build_hourly_frame(
-        loaded, devices, outcome, block, task=task, quantities=quantities
+        loaded,
+        devices,
+        outcome,
+        block,
+        task=task,
+        quantities=quantities,
+        all_buses=price_all_buses(cfg),
     )
     path = Path(run_dir) / "hourly" / f"{task.task_id}.parquet"
     return write_parquet_atomic(frame, path, hourly_schema())

@@ -133,10 +133,26 @@ methods:
     solver_kwargs: {num_iterations: 5000, rho_power: 0.1, atol: 1.0e-4, rtol: 1.0e-4}
     dtype: float64
     timeout_s: 3600
-    # Gate on the iterate's worst nodal power-balance violation, in MW. Above it
-    # the task is recorded `infeasible` and left out of the run card's headline.
-    max_imbalance_mw: 1.0
-    max_soc_residual_mwh: 1.0   # storage SoC-recursion residual gate (projected prox iterate)
+    # Gates on the iterate. Above either one the task is recorded `infeasible` and
+    # left out of the run card's headline. Each gate resolves as: the absolute key
+    # if it is set, else the relative key times the block's own scale -- so a 24 h
+    # and a 168 h block are held to the same *standard* rather than the same number.
+    #
+    # NOT FINALISED (Kamran, 2026-09-09). The absolute keys are deliberately still
+    # set, so this file's behaviour is unchanged and the relative gate is opt-in:
+    # set `max_imbalance_mw: null` in a config delta to switch it on. Two things
+    # are open before the relative form becomes the default: (a) the threshold
+    # itself -- 2.5e-5 is back-derived from the interim 2 MW gate at ca2040_z4's
+    # ~81.9 GW peak load, not measured, and must be set from the measured
+    # distribution of `admm_imbalance_rel` on converged blocks and recorded in
+    # `memory/numbers.yaml`; (b) the denominator -- block peak load (a system
+    # quantity) vs per-bus throughput (which would gate the worst bus against its
+    # own scale). `dispatch.resolve_gate` takes the scale as an argument, so (b) is
+    # a change of what `solve_block_admm` passes in, not of the mechanism.
+    max_imbalance_mw: 1.0         # absolute gate, MW; null => use max_imbalance_rel
+    max_imbalance_rel: 2.5e-5     # x block peak load (inert while the absolute is set)
+    max_soc_residual_mwh: 1.0     # absolute gate, MWh; null => use max_soc_residual_rel
+    max_soc_residual_rel: 2.5e-5  # x block storage energy capacity (likewise inert)
 execution:
   shard: null               # "k/n"; null = all tasks
   max_tasks: null
@@ -151,6 +167,18 @@ output:
   hourly_quantities: all    # "all", or a list drawn from persist.HOURLY_QUANTITIES
   combine_hourly: true      # aggregate concatenates hourly/*.parquet -> hourly.parquet
   save_ens_profile: true    # per-hour ENS, only for the hours with a shortfall
+  # Prices at EVERY bus in `hourly`, not only load buses (D5). Off by default:
+  # on ca2040_z4 the extra buses are the import bus and the export buses, whose
+  # duals are degenerate (a flat 56-61 $/MWh) and are not system prices, so they
+  # must never be pooled into a price statistic -- but they are worth recording
+  # when diagnosing ADMM duals, which is what `price_error.parquet` does. When
+  # this is on, every price row carries `carrier = load_bus | other_bus`.
+  price_all_buses: false
+  # Write `price_error.parquet`: the per-(bus, hour) decomposition of every ADMM
+  # block's dual error against the reference LP, plus its three summary columns
+  # on metrics.csv. Costs nothing unless the run has both ADMM blocks and a
+  # reference solve with persisted prices.
+  save_price_error: true
   admm_trace_every: 0       # 0 = off; k > 0 keeps every k-th ADMM iteration
   save_iterations: true     # planning: the three iteration tables
   figures: false            # write the debug figures at aggregate time

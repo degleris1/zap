@@ -401,6 +401,11 @@ def run_task(task: Task, cfg: dict, run_dir: Path, design=None) -> dict[str, Any
         "admm_iterations": payload.get("admm_iterations"),
         "admm_primal_residual": payload.get("admm_primal_residual"),
         "admm_dual_residual": payload.get("admm_dual_residual"),
+        # Inner-prox and dual-accuracy diagnostics (A3). The metrics dict already
+        # flattens into `metrics.csv` via `records_to_frame`; these top-level
+        # mirrors are for the ledger, which is read without the metrics block.
+        "admm_max_inner_prox_residual_mw": payload.get("admm_max_inner_prox_residual_mw"),
+        "admm_price_error_max_usd_per_mwh": payload.get("admm_price_error_max_usd_per_mwh"),
         "error": error,
         "traceback": tb,
         "started_utc": started,

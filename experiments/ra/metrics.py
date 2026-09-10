@@ -374,13 +374,33 @@ _ENERGY_METRICS = (
     "imports_mwh",
     "exports_mwh",
     "available_mwh_total",
+    # Set in `dispatch.solve_block_admm`, *after* `block_metrics` has already run
+    # `_to_physical_units`, and scaled by `power_unit` there by hand. Listed here
+    # so their unit is declared in one place; they cannot be double-scaled.
+    "storage_energy_capacity_mwh",
+    "admm_soc_residual_gate_mwh",
+    "admm_sum_abs_imbalance_mwh",
+    "admm_sum_abs_soc_residual_mwh",
 )
 #: Metrics denominated in power alone (MW), scaled by ``power_unit``.
-_POWER_METRICS = ("available_mw_min",)
+#: `block_peak_load_mw` / `admm_imbalance_gate_mw` are likewise set (and scaled)
+#: in `dispatch.solve_block_admm`; see the note in `_ENERGY_METRICS`.
+_POWER_METRICS = ("available_mw_min", "block_peak_load_mw", "admm_imbalance_gate_mw")
 #: Emission rates are divided by `cost_unit` too (`AbstractInjector.scale_costs`
 #: scales them with costs so prices stay in $/MWh), so emissions carry both units.
 _EMISSION_METRICS = ("co2_tonnes",)
-_PRICE_METRICS = ("mean_price", "max_price", "max_price_all_buses")
+#: Metrics denominated in price ($/MWh), scaled by ``cost_unit``.
+#: The two ``admm_price_*`` names are produced in `dispatch.solve_block_admm`,
+#: *after* `block_metrics` has run `_to_physical_units`, and are scaled by
+#: `cost_unit` there by hand; they are listed here so their unit is declared in
+#: one place and cannot be double-scaled.
+_PRICE_METRICS = (
+    "mean_price",
+    "max_price",
+    "max_price_all_buses",
+    "admm_price_error_max_usd_per_mwh",
+    "admm_price_movement_usd_per_mwh",
+)
 
 
 def _to_physical_units(metrics: dict[str, Any], meta: dict) -> dict[str, Any]:
@@ -461,17 +481,48 @@ def aggregate(run_dir: Path, cfg: dict | None = None) -> pd.DataFrame:
 
     When ``cfg`` is given and ``output.combine_hourly`` is true, the per-task
     parquet directories (``hourly/``, ``ens_profile/``, ``admm_trace/``) are
-    also concatenated into their sibling single files (D3).
+    also concatenated into their sibling single files (D3) *first*, because the
+    price-error decomposition below reads the combined hourly table; and when
+    ``output.save_price_error`` is true, ``price_error.parquet`` is written and
+    its per-block summary columns are merged onto ``metrics.csv``.
     """
     run_dir = Path(run_dir)
     frame = records_to_frame(read_task_records(run_dir))
-    frame.to_csv(run_dir / "metrics.csv", index=False)
     if cfg is not None:
         try:
             for path in persist.combine_outputs(run_dir, cfg):
                 logger.info("combined %s", path)
         except Exception as exc:  # noqa: BLE001 - combination must not fail a run
             logger.warning("could not combine per-task parquet files: %s", exc)
+        frame = _attach_price_error(run_dir, frame, cfg)
+    frame.to_csv(run_dir / "metrics.csv", index=False)
+    return frame
+
+
+def _attach_price_error(run_dir: Path, frame: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Write ``price_error.parquet`` and merge its summary columns onto ``frame``.
+
+    Never raises: a diagnostic must not lose a run's ``metrics.csv``.
+    """
+    if not bool((cfg.get("output") or {}).get("save_price_error", True)):
+        return frame
+    try:
+        rows = price_error_rows(run_dir, frame)
+        if rows is None or rows.empty:
+            logger.info(
+                "no price_error.parquet: %s", (rows.attrs.get("skip_reason") if rows is not None
+                                               else "no rows")
+            )
+            return frame
+        path = persist.write_price_error(run_dir, rows)
+        logger.info("wrote %s (%d bus-hours)", path, len(rows))
+        summary = price_error_block_summary(rows)
+        if summary.empty or "task_id" not in frame.columns:
+            return frame
+        keep = ["task_id"] + list(PRICE_ERROR_SUMMARY_COLUMNS)
+        frame = frame.merge(summary[keep], on="task_id", how="left")
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning("could not write the price-error decomposition: %s", exc, exc_info=True)
     return frame
 
 
@@ -562,6 +613,361 @@ def deviation_vs_reference(
     if not out:
         return empty
     return pd.DataFrame(out)
+
+
+PRICE_ERROR_COLUMNS = (
+    "method",
+    "block_size",
+    "year",
+    "draw",
+    "design_id",
+    "block_index",
+    "n_hours",
+    "max_abs_price_error",
+    "mean_abs_price_error",
+    "reference_mean_price",
+    "skip_reason",
+)
+
+#: The `hourly` quantity the dual-accuracy comparison reads.  `persist` writes it
+#: for load buses only (D5), which is exactly the restriction `block_metrics`
+#: applies to its price statistics: `ca2040_z4` prices the import bus and the
+#: export buses degenerately and they are not system prices.
+PRICE_QUANTITY = "price_usd_per_mwh"
+
+
+def _empty_price_error(reason: str, columns=PRICE_ERROR_COLUMNS) -> pd.DataFrame:
+    """A zero-row frame carrying ``reason``.
+
+    The reason lives in ``frame.attrs["skip_reason"]`` -- a zero-row frame cannot
+    carry a value *in* a column -- and the column is kept in the schema so a
+    caller can concatenate skipped and non-skipped runs.  ``runcard`` prints the
+    reason: silence in the dual-accuracy section has been mistaken for "no error"
+    before.
+    """
+    frame = pd.DataFrame(columns=list(columns))
+    frame.attrs["skip_reason"] = reason
+    return frame
+
+
+#: Per-block summary columns merged onto ``metrics.csv`` from the per-(bus, hour)
+#: price-error decomposition. Load-bus max and RMS are the reportable numbers
+#: (D5); the all-bus max is kept because it is a *constant* on ``ca2040_z4``
+#: (a flat 56-61 $/MWh of degenerate import/export duals), which is the fact that
+#: makes `history.price_error` useless as a stopping test in its current form.
+PRICE_ERROR_SUMMARY_COLUMNS = (
+    "price_error_load_max_usd_per_mwh",
+    "price_error_load_rms_usd_per_mwh",
+    "price_error_all_bus_max_usd_per_mwh",
+    "price_error_n_bus_hours",
+    # Against the LP on the SAME block: the pure ADMM dual error, with the
+    # blocking effect divided out. These are the dual-accuracy numbers; the three
+    # above are distances to the reference solve and are dominated by blocking.
+    "price_error_load_max_vs_block_lp_usd_per_mwh",
+    "price_error_load_rms_vs_block_lp_usd_per_mwh",
+)
+
+
+#: Sentinel for a null ``draw`` in a join key: pandas will not match NaN to NaN
+#: in a merge, and an as-built run writes ``draw = None`` on every row.
+_NO_DRAW = "__none__"
+
+
+def _with_draw_key(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add ``_draw``: ``draw`` as a string, nulls collapsed to a sentinel.
+
+    A merge never matches null to null, and an as-built run writes ``draw = None``
+    on every row, so the key has to be a string. ``hourly.parquet`` types the
+    column as a **nullable** ``Int32`` (``pa.int32(), nullable=True``), which
+    refuses a string sentinel in place: cast to ``object`` before filling.
+    """
+    frame = frame.copy()
+    if "draw" in frame.columns:
+        draw = frame["draw"]
+        frame["_draw"] = draw.astype("object").where(draw.notna(), _NO_DRAW).astype(str)
+    else:
+        frame["_draw"] = _NO_DRAW
+    return frame
+
+
+def _price_join_keys(blocks: pd.DataFrame, reference: pd.DataFrame) -> tuple[list, list]:
+    """``(reference_key, same_block_key)`` for the price joins.
+
+    ``hour`` is the hour **within a weather year**, so (bus, hour) alone collides
+    across years and across outage draws: a two-year run would compare every
+    year's block against the first year's reference. Both keys therefore carry
+    ``year`` and, when the column is present, ``design_id``.
+
+    ``draw`` is on the same-block key always (both sides are block rows of the
+    same run), but on the reference key only when the reference side actually
+    carries draws: a run may solve one draw-independent reference for a
+    multi-draw sweep, and keying on ``draw`` there would join nothing.
+    """
+    ref_key = ["year", "bus", "hour"]
+    block_key = ["block_size", "year", "bus", "hour"]
+    if "design_id" in blocks.columns and "design_id" in reference.columns:
+        ref_key.append("design_id")
+        block_key.append("design_id")
+    if "draw" in reference.columns and reference["draw"].notna().any():
+        ref_key.append("_draw")
+    block_key.append("_draw")
+    return ref_key, block_key
+
+
+def _price_rows(run_dir, df, reference_bounds=None):
+    """``(block_prices, reference_prices, skip_reason, reference_key)``.
+
+    ``reference_prices`` is one row per key of the ``block_size == "reference"``
+    solve; ``block_prices`` is every non-reference block's price row. The frames
+    are ``None`` when the comparison cannot be made, with the reason as the third
+    element -- this never raises.
+    """
+    run_dir = Path(run_dir)
+    try:
+        if not persist.has_artefact(run_dir, "hourly"):
+            return None, None, (
+                "no hourly artefact: set `output.save_hourly: carrier_bus` to record prices"
+            ), None
+        hourly = persist.read_combined(run_dir, "hourly")
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail a run
+        logger.warning("could not read the hourly artefact for the price error: %s", exc)
+        return None, None, f"could not read the hourly artefact: {exc}", None
+
+    if hourly is None or hourly.empty or "quantity" not in hourly.columns:
+        return None, None, "the hourly artefact has no `quantity` column", None
+    prices = hourly[hourly["quantity"].astype(str) == PRICE_QUANTITY].copy()
+    if prices.empty:
+        return None, None, (
+            f"no `{PRICE_QUANTITY}` rows in the hourly artefact: add it to "
+            "`output.hourly_quantities`"
+        ), None
+
+    for column in ("block_size", "method", "bus", "carrier", "task_id", "design_id"):
+        if column in prices.columns:
+            prices[column] = prices[column].astype(str)
+    prices = _with_draw_key(prices)
+    # `carrier` marks the load buses only when `output.price_all_buses` is on;
+    # with the flag off every persisted price row *is* a load bus (D5).
+    prices["is_load_bus"] = prices.get(
+        "carrier", pd.Series("", index=prices.index)
+    ).ne(persist.NON_LOAD_BUS_CARRIER)
+
+    reference = prices[prices["block_size"] == "reference"]
+    if reference.empty:
+        return None, None, (
+            "no `block_size == reference` rows: the run has no reference solve to "
+            "compare prices against (`selection.reference: none`)"
+        ), None
+    # A run may hold a reference row for more than one method; the LP is the
+    # reference by construction, so prefer it.
+    if "method" in reference.columns and reference["method"].nunique() > 1:
+        lp = reference[reference["method"] == "lp"]
+        if not lp.empty:
+            reference = lp
+
+    blocks = prices[prices["block_size"] != "reference"]
+    ref_key, _ = _price_join_keys(blocks, reference)
+    reference = reference.drop_duplicates(subset=ref_key)[
+        ref_key + ["value", "is_load_bus"]
+    ].rename(columns={"value": "reference_price"})
+
+    if reference_bounds is not None:
+        lo, hi = reference_bounds
+        reference = reference[(reference["hour"] >= lo) & (reference["hour"] < hi)]
+        prices = prices[(prices["hour"] >= lo) & (prices["hour"] < hi)]
+        blocks = prices[prices["block_size"] != "reference"]
+
+    # Only tasks that succeeded: an `infeasible` ADMM row has no usable duals and
+    # must not be averaged into a dual-accuracy table.
+    if df is not None and not df.empty and {"task_id", "status"} <= set(df.columns):
+        ok = set(df.loc[df["status"].astype(str) == "ok", "task_id"].astype(str))
+        if "task_id" in blocks.columns:
+            blocks = blocks[blocks["task_id"].isin(ok)]
+
+    if blocks.empty:
+        return None, None, "no non-reference block prices to compare", None
+    return blocks, reference, None, ref_key
+
+
+def price_error_rows(run_dir, df, reference_bounds=None) -> pd.DataFrame:
+    """The per-(bus, hour) dual-error decomposition of every ADMM block.
+
+    Columns: ``task_id, method, block_size, block_start_hour, bus, hour,
+    is_load_bus, lp_price, admm_price, delta_price`` -- one row per bus and hour
+    of every ADMM block that shares (bus, hour) with the reference LP.  Written
+    to ``price_error.parquet`` by :func:`aggregate`; the block-level summary the
+    run card shows is :func:`price_error_block_summary` of this frame.
+
+    ADMM blocks only: the column names say ``lp_price`` / ``admm_price``, and the
+    blocked-*LP* comparison against the reference is a blocking error, not a dual
+    error (``deviation_vs_reference`` owns that).  Returns an empty frame -- never
+    raises -- with the reason in ``attrs["skip_reason"]``.
+    """
+    blocks, reference, reason, ref_key = _price_rows(run_dir, df, reference_bounds)
+    if blocks is None:
+        return _empty_price_error(reason, columns=persist.PRICE_ERROR_COLUMNS)
+    _, block_key = _price_join_keys(blocks, reference)
+
+    admm = blocks[blocks["method"] == "admm"] if "method" in blocks.columns else blocks
+    # The LP solved on the *same* block, if the run has one: the control that
+    # separates the ADMM dual error from the blocking error. Keyed on the block's
+    # full identity (block size, year, draw, design) -- `hour` alone repeats every
+    # weather year and every outage draw.
+    block_lp = (
+        blocks[blocks["method"] == "lp"] if "method" in blocks.columns else blocks.iloc[:0]
+    )
+    block_lp = block_lp.drop_duplicates(subset=block_key)[
+        block_key + ["value"]
+    ].rename(columns={"value": "block_lp_price"})
+    if admm.empty:
+        return _empty_price_error(
+            "no ADMM block prices: `price_error.parquet` compares ADMM duals against "
+            "the reference LP",
+            columns=persist.PRICE_ERROR_COLUMNS,
+        )
+
+    joined = admm.merge(reference.drop(columns=["is_load_bus"]), on=ref_key, how="inner")
+    joined = joined.merge(block_lp, on=block_key, how="left")
+    if joined.empty:
+        return _empty_price_error(
+            "no (bus, hour) pair is shared between the reference solve and any ADMM block",
+            columns=persist.PRICE_ERROR_COLUMNS,
+        )
+
+    out = pd.DataFrame(
+        {
+            "task_id": joined["task_id"].astype(str),
+            "method": joined["method"].astype(str),
+            "block_size": joined["block_size"].astype(str),
+            # The block's first hour, so a heat map can be cut per block without
+            # joining back to metrics.csv.
+            "block_start_hour": joined.groupby("task_id")["hour"].transform("min").astype(int),
+            "bus": joined["bus"].astype(str),
+            "hour": joined["hour"].astype(int),
+            "is_load_bus": joined["is_load_bus"].astype(bool),
+            "lp_price": pd.to_numeric(joined["reference_price"], errors="coerce"),
+            "admm_price": pd.to_numeric(joined["value"], errors="coerce"),
+            "block_lp_price": pd.to_numeric(joined["block_lp_price"], errors="coerce"),
+        }
+    )
+    out["delta_price"] = out["admm_price"] - out["lp_price"]
+    out["delta_price_vs_block_lp"] = out["admm_price"] - out["block_lp_price"]
+    out = out.reindex(columns=list(persist.PRICE_ERROR_COLUMNS))
+    return out.sort_values(["block_size", "block_start_hour", "bus", "hour"]).reset_index(
+        drop=True
+    )
+
+
+def price_error_block_summary(rows: pd.DataFrame) -> pd.DataFrame:
+    """Per-task summary of :func:`price_error_rows`: load-bus max / RMS, all-bus max.
+
+    One row per ``task_id``, so it merges straight onto ``metrics.csv``.
+    """
+    columns = ["task_id", "method", "block_size", "block_start_hour"] + list(
+        PRICE_ERROR_SUMMARY_COLUMNS
+    )
+    if rows is None or rows.empty:
+        return pd.DataFrame(columns=columns)
+
+    out = []
+    for task_id, group in rows.groupby("task_id", sort=True):
+        load = group[group["is_load_bus"]]
+        delta = pd.to_numeric(load["delta_price"], errors="coerce").abs()
+        all_bus = pd.to_numeric(group["delta_price"], errors="coerce").abs()
+        block = pd.to_numeric(
+            load.get("delta_price_vs_block_lp", pd.Series(dtype=float)), errors="coerce"
+        ).abs().dropna()
+        out.append(
+            {
+                "task_id": str(task_id),
+                "method": str(group["method"].iloc[0]),
+                "block_size": str(group["block_size"].iloc[0]),
+                "block_start_hour": int(group["block_start_hour"].iloc[0]),
+                "price_error_load_max_usd_per_mwh": float(delta.max())
+                if not delta.empty
+                else float("nan"),
+                "price_error_load_rms_usd_per_mwh": float(np.sqrt((delta**2).mean()))
+                if not delta.empty
+                else float("nan"),
+                "price_error_all_bus_max_usd_per_mwh": float(all_bus.max())
+                if not all_bus.empty
+                else float("nan"),
+                "price_error_n_bus_hours": len(group),
+                "price_error_load_max_vs_block_lp_usd_per_mwh": float(block.max())
+                if not block.empty
+                else float("nan"),
+                "price_error_load_rms_vs_block_lp_usd_per_mwh": float(
+                    np.sqrt((block**2).mean())
+                )
+                if not block.empty
+                else float("nan"),
+            }
+        )
+    return pd.DataFrame(out, columns=columns)
+
+
+def price_error_vs_reference(run_dir, df, reference_bounds=None) -> pd.DataFrame:
+    """Per (method, block_size, year, draw, block) max/mean |price - reference price|.
+
+    Joins each block's ``price_usd_per_mwh`` rows from the combined ``hourly``
+    parquet against the ``block_size == "reference"`` row's rows on
+    (year, draw, bus, hour) -- ``hour`` is the hour *within a weather year*, so
+    (bus, hour) alone collides across years and draws -- restricted to load buses
+    (which is all ``persist`` writes, D5).  Returns an
+    empty frame -- never raises -- when the reference row, the hourly artefact or
+    the price quantity is absent, with the reason in ``attrs["skip_reason"]``.
+
+    Computed here, at aggregate time from persisted hourly prices, rather than
+    inside the solve: the reference block and the blocked solves are separate
+    SLURM array tasks in an arbitrary order, so no solve can see the reference.
+    """
+    blocks, reference, reason, ref_key = _price_rows(run_dir, df, reference_bounds)
+    if blocks is None:
+        return _empty_price_error(reason)
+    reference = reference.drop(columns=["is_load_bus"])
+    # Load buses only, matching every other reported price statistic (D5).
+    blocks = blocks[blocks["is_load_bus"]]
+    if blocks.empty:
+        return _empty_price_error("no load-bus block prices to compare")
+
+    # One block per row: `block_index` repeats across weather years and outage
+    # draws, so the grouping carries both -- exactly like the join key.
+    key = [
+        c
+        for c in ("method", "block_size", "year", "draw", "design_id", "block_index")
+        if c in blocks.columns
+    ]
+    rows = []
+    # `observed=True`: the parquet's string columns are dictionary-encoded, so they
+    # arrive as pandas Categoricals and the default would emit a row per unobserved
+    # (method, block_size, ...) combination. `dropna=False` keeps `draw = None`.
+    for values, group in blocks.groupby(key, sort=True, observed=True, dropna=False):
+        joined = group.merge(reference, on=ref_key, how="inner")
+        if joined.empty:
+            continue
+        error = (
+            pd.to_numeric(joined["value"], errors="coerce")
+            - pd.to_numeric(joined["reference_price"], errors="coerce")
+        ).abs()
+        row = dict(zip(key, values if isinstance(values, tuple) else (values,)))
+        row.update(
+            {
+                "n_hours": int(joined["hour"].nunique()),
+                "max_abs_price_error": float(error.max()),
+                "mean_abs_price_error": float(error.mean()),
+                "reference_mean_price": float(
+                    pd.to_numeric(joined["reference_price"], errors="coerce").mean()
+                ),
+                "skip_reason": None,
+            }
+        )
+        rows.append(row)
+    if not rows:
+        return _empty_price_error(
+            "no (bus, hour) pair is shared between the reference solve and any block"
+        )
+    frame = pd.DataFrame(rows)
+    return frame.reindex(columns=[c for c in PRICE_ERROR_COLUMNS if c in frame.columns])
 
 
 # ---------------------------------------------------------------------------

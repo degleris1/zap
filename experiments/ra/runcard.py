@@ -12,7 +12,13 @@ import pandas as pd
 from .blocks import reference_bounds
 from .config import is_plan_mode
 from .identity import run_id, zap_commit, zap_dirty
-from .metrics import ADDITIVE_METRICS, PLANNING_METRICS, deviation_vs_reference
+from .metrics import (
+    ADDITIVE_METRICS,
+    PLANNING_METRICS,
+    PRICE_ERROR_SUMMARY_COLUMNS,
+    deviation_vs_reference,
+    price_error_vs_reference,
+)
 
 #: Modelling choices that phase 1 deliberately does not exercise, stated on the
 #: card so the chapter cannot accidentally claim them.
@@ -32,7 +38,26 @@ SUMMARY_METRICS = (
         "mean_price",
         "max_price",
         "admm_max_imbalance_mw",
+        "admm_max_soc_residual_mwh",
+        # Integrals of the violation over every bus / unit and hour. Deliberately
+        # NOT in ADDITIVE_METRICS -- that tuple drives `deviation_vs_reference`, and
+        # a solver residual is not a blocking error -- so `summarize` reports them
+        # as a per-block mean; `admm_gap_vs_lp` reports their sum over the blocks
+        # it compares.
+        "admm_sum_abs_imbalance_mwh",
+        "admm_sum_abs_soc_residual_mwh",
+        # Named `..._mw` because it is a MW/MWh quantity in physical units; it is
+        # the worst inner-prox residual of the storage prox over the solve.
+        "admm_max_inner_prox_residual_mw",
+        # The scale-free residuals: these are what make a 24 h row comparable to a
+        # 168 h one, and they are the quantities the relative gates are set from.
+        "admm_imbalance_rel",
+        "admm_soc_residual_rel",
+        "admm_price_movement_usd_per_mwh",
     )
+    # Load-bus max / RMS and all-bus max dual error against the reference LP,
+    # merged onto metrics.csv from `price_error.parquet` at aggregate time.
+    + PRICE_ERROR_SUMMARY_COLUMNS
     + PLANNING_METRICS
 )
 
@@ -342,6 +367,13 @@ def planning_sections(run_dir: Path, cfg: dict, df: pd.DataFrame | None) -> list
     return lines
 
 
+def _sum_over(frame: pd.DataFrame, index, column: str) -> float:
+    """Sum ``column`` over ``index``; ``nan`` when the column is absent."""
+    if column not in frame.columns:
+        return float("nan")
+    return float(pd.to_numeric(frame.loc[index, column], errors="coerce").sum())
+
+
 def admm_gap_vs_lp(df: pd.DataFrame) -> pd.DataFrame:
     """Per-block-size ADMM cost gap against the LP solved on the *same* blocks.
 
@@ -358,6 +390,9 @@ def admm_gap_vs_lp(df: pd.DataFrame) -> pd.DataFrame:
             "gap_rel",
             "worst_block_gap_rel",
             "max_imbalance_mw",
+            "sum_abs_imbalance_mwh",
+            "sum_abs_soc_residual_mwh",
+            "max_price_error_usd_per_mwh",
             "admm_solve_s_per_block",
             "lp_solve_s_per_block",
         ]
@@ -404,6 +439,22 @@ def admm_gap_vs_lp(df: pd.DataFrame) -> pd.DataFrame:
                 )
                 if "admm_max_imbalance_mw" in admm.columns
                 else float("nan"),
+                # Diagnostics, not gates: the total absolute imbalance (and SoC
+                # residual) energy over the compared blocks. Summed, not maxed --
+                # both are additive over blocks, unlike `max_imbalance_mw`.
+                "sum_abs_imbalance_mwh": _sum_over(admm, shared, "admm_sum_abs_imbalance_mwh"),
+                "sum_abs_soc_residual_mwh": _sum_over(
+                    admm, shared, "admm_sum_abs_soc_residual_mwh"
+                ),
+                # Worst same-block dual error over the shared blocks; `nan` unless
+                # `methods.admm.price_reference: same_block_lp` recorded it.
+                "max_price_error_usd_per_mwh": float(
+                    pd.to_numeric(
+                        admm.loc[shared].get("admm_price_error_max_usd_per_mwh"), errors="coerce"
+                    ).max()
+                )
+                if "admm_price_error_max_usd_per_mwh" in admm.columns
+                else float("nan"),
                 "admm_solve_s_per_block": float(
                     pd.to_numeric(admm.loc[shared, "solve_wall_clock_s"], errors="coerce").mean()
                 ),
@@ -413,6 +464,51 @@ def admm_gap_vs_lp(df: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows) if rows else empty
+
+
+def admm_dual_accuracy_section(run_dir, df, bounds) -> list[str]:
+    """The `## ADMM dual accuracy vs the reference LP` section.
+
+    Always emitted, and always says something: when the comparison cannot be made
+    it prints the reason. Silence here has been mistaken for "no error" before.
+    """
+    lines = ["## ADMM dual accuracy vs the reference LP\n"]
+    lines.append(
+        "The **gradient planning methods consume these duals** "
+        "(`as_outcome().prices = -rho_power * dual_power`), so a block whose prices "
+        "are inaccurate is unusable for planning even when its cost row passes the "
+        "imbalance and SoC gates: cost can be within 0.01 % of the LP while "
+        "individual load-bus prices are tens of $/MWh from their fixed point. "
+        "Errors below are |price - reference price| over the (bus, hour) pairs the "
+        "block shares with the reference solve, load buses only (D5)."
+    )
+    lines.append("")
+    lines.append(
+        "**Read this table with the `lp` rows next to the `admm` rows.** The "
+        "distance to the *reference* solve is dominated by **blocking** error, not "
+        "by the solver: a blocked LP is about as far from the reference as ADMM is "
+        "(ca2040_z4, 2026-09-09: 8.36 vs 8.30 $/MWh max on 24 h blocks). The pure "
+        "ADMM dual error is the distance to the LP on the **same block**, which is "
+        "`price_error_load_max_vs_block_lp_usd_per_mwh` / `..._rms_...` in "
+        "`metrics.csv` and `delta_price_vs_block_lp` per (bus, hour) in "
+        "`price_error.parquet`; plots O12 / O13 draw that column."
+    )
+    lines.append("")
+    try:
+        table = price_error_vs_reference(run_dir, df, bounds)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail a card
+        lines.append(f"**Not computed:** {type(exc).__name__}: {exc}")
+        lines.append("")
+        return lines
+    if table is None or table.empty:
+        reason = "no reason recorded"
+        if table is not None:
+            reason = table.attrs.get("skip_reason") or reason
+        lines.append(f"**Not computed:** {reason}")
+    else:
+        lines.append(_table(table.drop(columns=["skip_reason"], errors="ignore")))
+    lines.append("")
+    return lines
 
 
 def write_card(
@@ -566,6 +662,8 @@ def write_card(
         lines.append("")
         lines.append(_table(admm_gap))
         lines.append("")
+
+    lines.extend(admm_dual_accuracy_section(run_dir, df, bounds))
 
     lines.append("## Blocking error vs the reference solve\n")
     lines.append(

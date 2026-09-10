@@ -792,6 +792,8 @@ class TestADMMGapVsLP(unittest.TestCase):
                     "operational_cost": admm_cost,
                     "solve_wall_clock_s": 100.0,
                     "admm_max_imbalance_mw": 0.2,
+                    "admm_sum_abs_imbalance_mwh": 3.0,
+                    "admm_sum_abs_soc_residual_mwh": 0.5,
                 }
             )
         return pd.DataFrame(rows)
@@ -804,6 +806,10 @@ class TestADMMGapVsLP(unittest.TestCase):
         self.assertAlmostEqual(row["gap_rel"], 311.0 / 300.0 - 1.0)
         self.assertAlmostEqual(row["worst_block_gap_rel"], 0.05)
         self.assertAlmostEqual(row["max_imbalance_mw"], 0.2)
+        # Additive over the shared blocks, unlike the max.
+        self.assertAlmostEqual(row["sum_abs_imbalance_mwh"], 6.0)
+        self.assertAlmostEqual(row["sum_abs_soc_residual_mwh"], 1.0)
+        self.assertTrue(pd.isna(row["max_price_error_usd_per_mwh"]))
 
     def test_infeasible_admm_rows_are_excluded(self):
         frame = self._frame()
@@ -1229,6 +1235,784 @@ class TestADMMDispatchRecord(TempRunMixin):
         self.assertIn("113 MW", record["error"])
         # The metrics survive so the row can still be inspected.
         self.assertIn("operational_cost", record["metrics"])
+
+
+class TestADMMRelativeGates(TempRunMixin):
+    """A2: the gates scale with the block's own size, absolutes still override.
+
+    An absolute 2 MW gate holds a 24 h block and a 168 h block to different
+    effective standards -- a converged 168 h ca2040_z4 solve sits at ~1.0-1.1 on
+    both quantities while a 24 h solve sits far below -- so the gate is a fraction
+    of the block's own scale unless an absolute key is given.
+    """
+
+    def _devices(self, load_scale=1.0, storage=False):
+        gen = Generator(
+            num_nodes=2,
+            name=np.array(["cheap", "peaker"]),
+            terminal=np.array([0, 1]),
+            nominal_capacity=np.array([80.0, 60.0]),
+            dynamic_capacity=np.ones((2, 4)),
+            linear_cost=np.array([[10.0], [90.0]]),
+            emission_rates=np.array([[0.4], [0.6]]),
+        )
+        load = Load(
+            num_nodes=2,
+            name=np.array(["l1"]),
+            terminal=np.array([1]),
+            load=load_scale * np.array([[60.0, 80.0, 100.0, 70.0]]),
+            linear_cost=np.array([[1000.0]]),
+        )
+        devices = [gen, load]
+        if storage:
+            devices.append(
+                StorageUnit(
+                    num_nodes=2,
+                    name=np.array(["bat"]),
+                    terminal=np.array([1]),
+                    power_capacity=np.array([40.0]),
+                    duration=np.array([2.0]),
+                    linear_cost=np.array([0.0]),
+                    charge_efficiency=np.array([0.9]),
+                    discharge_efficiency=np.array([0.9]),
+                )
+            )
+        return devices
+
+    def test_block_peak_load_is_the_summed_hourly_demand(self):
+        devices = self._devices()
+        self.assertAlmostEqual(dispatch.block_peak_load_mw(devices), 100.0)
+        self.assertAlmostEqual(dispatch.block_peak_load_mw(self._devices(load_scale=2.0)), 200.0)
+        # No Load at all: no scale, which the caller must not read as a zero gate.
+        self.assertEqual(dispatch.block_peak_load_mw([devices[0]]), 0.0)
+
+    def test_block_storage_energy_is_power_times_duration(self):
+        self.assertAlmostEqual(dispatch.block_storage_energy_mwh(self._devices(storage=True)), 80.0)
+        self.assertEqual(dispatch.block_storage_energy_mwh(self._devices()), 0.0)
+
+    def test_relative_imbalance_gate_scales_with_block_peak_load(self):
+        cfg = {"max_imbalance_rel": 1e-3}
+        single, mode = dispatch.resolve_gate(
+            cfg,
+            "max_imbalance_mw",
+            "max_imbalance_rel",
+            dispatch.block_peak_load_mw(self._devices()),
+            dispatch.DEFAULT_MAX_IMBALANCE_MW,
+            dispatch.DEFAULT_MAX_IMBALANCE_REL,
+        )
+        doubled, _ = dispatch.resolve_gate(
+            cfg,
+            "max_imbalance_mw",
+            "max_imbalance_rel",
+            dispatch.block_peak_load_mw(self._devices(load_scale=2.0)),
+            dispatch.DEFAULT_MAX_IMBALANCE_MW,
+            dispatch.DEFAULT_MAX_IMBALANCE_REL,
+        )
+        self.assertEqual(mode, "relative")
+        self.assertAlmostEqual(single, 0.1)
+        self.assertAlmostEqual(doubled, 2.0 * single)
+
+    def test_relative_gate_uses_the_default_when_no_key_is_set(self):
+        gate, mode = dispatch.resolve_gate(
+            {},
+            "max_imbalance_mw",
+            "max_imbalance_rel",
+            80000.0,
+            dispatch.DEFAULT_MAX_IMBALANCE_MW,
+            dispatch.DEFAULT_MAX_IMBALANCE_REL,
+        )
+        self.assertEqual(mode, "relative")
+        self.assertAlmostEqual(gate, dispatch.DEFAULT_MAX_IMBALANCE_REL * 80000.0)
+
+    def test_absolute_gate_overrides_the_relative_one(self):
+        gate, mode = dispatch.resolve_gate(
+            {"max_imbalance_mw": 5.0, "max_imbalance_rel": 1e-9},
+            "max_imbalance_mw",
+            "max_imbalance_rel",
+            100.0,
+            dispatch.DEFAULT_MAX_IMBALANCE_MW,
+            dispatch.DEFAULT_MAX_IMBALANCE_REL,
+        )
+        self.assertEqual(gate, 5.0)
+        self.assertEqual(mode, "absolute")
+
+    def test_zero_absolute_gate_is_still_an_override(self):
+        """An explicit 0.0 is a choice, not an unset key (the old `_gate_value` rule)."""
+        gate, mode = dispatch.resolve_gate(
+            {"max_imbalance_mw": 0.0},
+            "max_imbalance_mw",
+            "max_imbalance_rel",
+            100.0,
+            dispatch.DEFAULT_MAX_IMBALANCE_MW,
+            dispatch.DEFAULT_MAX_IMBALANCE_REL,
+        )
+        self.assertEqual(gate, 0.0)
+        self.assertEqual(mode, "absolute")
+
+    def test_relative_gate_falls_back_when_there_is_no_load(self):
+        """A system with no load (or no storage) must not get a zero gate."""
+        for scale in (0.0, -1.0):
+            gate, mode = dispatch.resolve_gate(
+                {"max_imbalance_rel": 1e-3},
+                "max_imbalance_mw",
+                "max_imbalance_rel",
+                scale,
+                dispatch.DEFAULT_MAX_IMBALANCE_MW,
+                dispatch.DEFAULT_MAX_IMBALANCE_REL,
+            )
+            self.assertEqual(gate, dispatch.DEFAULT_MAX_IMBALANCE_MW)
+            self.assertEqual(mode, "absolute")
+
+    def test_soc_residual_gate_is_relative_to_storage_energy(self):
+        gate, mode = dispatch.resolve_gate(
+            {"max_soc_residual_rel": 2.5e-5},
+            "max_soc_residual_mwh",
+            "max_soc_residual_rel",
+            dispatch.block_storage_energy_mwh(self._devices(storage=True)),
+            dispatch.DEFAULT_MAX_SOC_RESIDUAL_MWH,
+            dispatch.DEFAULT_MAX_SOC_RESIDUAL_REL,
+        )
+        self.assertEqual(mode, "relative")
+        self.assertAlmostEqual(gate, 2.5e-5 * 80.0)
+        # ... and falls back to the absolute default without storage.
+        gate, mode = dispatch.resolve_gate(
+            {"max_soc_residual_rel": 2.5e-5},
+            "max_soc_residual_mwh",
+            "max_soc_residual_rel",
+            dispatch.block_storage_energy_mwh(self._devices()),
+            dispatch.DEFAULT_MAX_SOC_RESIDUAL_MWH,
+            dispatch.DEFAULT_MAX_SOC_RESIDUAL_REL,
+        )
+        self.assertEqual(gate, dispatch.DEFAULT_MAX_SOC_RESIDUAL_MWH)
+        self.assertEqual(mode, "absolute")
+
+    # --- end to end through `solve_block_admm` -------------------------------
+
+    def _loaded(self, devices, power_unit=1.0):
+        net = PowerNetwork(num_nodes=2)
+        index = SimpleNamespace(
+            carrier={"Generator": np.array(["CCGT", "OCGT"])},
+            vre_mask=np.array([False, False]),
+        )
+        meta = {} if power_unit == 1.0 else {"power_unit": power_unit}
+        return SimpleNamespace(network=net, index=index, meta=meta), devices
+
+    def _cfg(self, **admm):
+        method = {
+            "enabled": True,
+            "required": False,
+            "solver": "ADMM",
+            "dtype": "float64",
+            "timeout_s": 60,
+            "solver_kwargs": {
+                "num_iterations": 500,
+                "rho_power": 1.0,
+                "adaptive_rho": False,
+                "atol": 1.0e-8,
+                "rtol": 1.0e-8,
+            },
+        }
+        method.update(admm)
+        return {"methods": {"admm": method}}
+
+    def _task(self):
+        block = blocks_mod.Block(index=0, year=2020, start=0, stop=4)
+        return tasks_mod.Task(task_id="t", method="admm", block=block, block_size=4)
+
+    def test_gate_metrics_are_recorded_and_self_consistent(self):
+        loaded, devices = self._loaded(self._devices(storage=True))
+        payload = dispatch.solve_block_admm(loaded, devices, self._task(), self._cfg())
+        m = payload["metrics"]
+
+        self.assertAlmostEqual(m["block_peak_load_mw"], 100.0)
+        self.assertAlmostEqual(m["storage_energy_capacity_mwh"], 80.0)
+        self.assertEqual(m["admm_gate_mode"], "relative")
+        self.assertEqual(m["admm_soc_residual_gate_mode"], "relative")
+        self.assertAlmostEqual(
+            m["admm_imbalance_gate_mw"], dispatch.DEFAULT_MAX_IMBALANCE_REL * 100.0
+        )
+        self.assertAlmostEqual(
+            m["admm_soc_residual_gate_mwh"], dispatch.DEFAULT_MAX_SOC_RESIDUAL_REL * 80.0
+        )
+        # The `_rel` columns are exactly the scale-free residuals: this identity is
+        # what makes a 24 h row comparable with a 168 h one.
+        self.assertAlmostEqual(
+            m["admm_imbalance_rel"] * m["block_peak_load_mw"], m["admm_max_imbalance_mw"]
+        )
+        self.assertAlmostEqual(
+            m["admm_soc_residual_rel"] * m["storage_energy_capacity_mwh"],
+            m["admm_max_soc_residual_mwh"],
+        )
+
+    def test_gate_scale_doubles_with_the_load(self):
+        """Twice the load, twice the gate; `admm_imbalance_rel` stays the ratio.
+
+        The *residual* is not asserted invariant: rho is a MW-to-dollar factor and
+        is not rescaled with the system here, so the iterate is not scale-free.
+        """
+        single = dispatch.solve_block_admm(
+            *self._loaded(self._devices()), self._task(), self._cfg()
+        )["metrics"]
+        doubled = dispatch.solve_block_admm(
+            *self._loaded(self._devices(load_scale=2.0)), self._task(), self._cfg()
+        )["metrics"]
+        self.assertAlmostEqual(doubled["block_peak_load_mw"], 2.0 * single["block_peak_load_mw"])
+        self.assertAlmostEqual(
+            doubled["admm_imbalance_gate_mw"], 2.0 * single["admm_imbalance_gate_mw"]
+        )
+
+    def test_gate_scales_are_in_physical_units(self):
+        """`power_unit` scaling must not change the physical gate."""
+        devices = self._devices(storage=True)
+        loaded, _ = self._loaded(devices, power_unit=1000.0)
+        payload = dispatch.solve_block_admm(loaded, devices, self._task(), self._cfg())
+        m = payload["metrics"]
+        self.assertAlmostEqual(m["block_peak_load_mw"], 100.0 * 1000.0)
+        self.assertAlmostEqual(m["storage_energy_capacity_mwh"], 80.0 * 1000.0)
+
+    def test_absolute_gate_still_gates_the_row(self):
+        loaded, devices = self._loaded(self._devices())
+        cfg = self._cfg(
+            max_imbalance_mw=1.0,
+            solver_kwargs={
+                "num_iterations": 2,
+                "minimum_iterations": 1,
+                "rho_power": 1.0,
+                "adaptive_rho": False,
+            },
+        )
+        payload = dispatch.solve_block_admm(loaded, devices, self._task(), cfg)
+        self.assertEqual(payload["metrics"]["admm_gate_mode"], "absolute")
+        self.assertEqual(payload["status"], "infeasible")
+        self.assertIn("power balance", payload["error"])
+
+    def test_battery_window_is_rejected_at_config_time(self):
+        """A load-time ConfigError, not 33 failed ADMM tasks.
+
+        Raised only inside `solve_block_admm`, the rejection reaches the user as
+        one `failed` task record per ADMM block, *after* every LP task has run.
+        """
+        path = tiny_config(
+            self.tmp,
+            name="battery_window",
+            extra={
+                "methods": {
+                    "admm": {"enabled": True, "solver_kwargs": {"battery_window": 24}}
+                }
+            },
+        )
+        with self.assertRaises(config.ConfigError) as caught:
+            config.load_config(path)
+        self.assertIn("methods.admm.solver_kwargs.battery_window", str(caught.exception))
+
+        # 0 / None are the "off" values and stay legal.
+        for off in (0, None):
+            ok = tiny_config(
+                self.tmp,
+                name=f"battery_window_off_{off}",
+                extra={
+                    "methods": {
+                        "admm": {"enabled": True, "solver_kwargs": {"battery_window": off}}
+                    }
+                },
+            )
+            config.load_config(ok)
+
+    def test_planning_configs_may_still_set_battery_window(self):
+        """`planning.admm.solver_kwargs.battery_window` is the planning path's own
+        setting and is not what the dispatch check governs."""
+        path = tiny_config(
+            self.tmp,
+            name="plan_battery_window",
+            extra={
+                "mode": "plan",
+                "selection": {"strategy": "all", "block_size": 24},
+                "planning": {
+                    "method": "admm",
+                    "admm": {"solver_kwargs": {"battery_window": 24}},
+                },
+            },
+        )
+        cfg = config.load_config(path)
+        self.assertEqual(
+            cfg["planning"]["admm"]["solver_kwargs"]["battery_window"], 24
+        )
+
+    def test_battery_window_is_rejected_for_blocked_dispatch(self):
+        loaded, devices = self._loaded(self._devices(storage=True))
+        cfg = self._cfg(solver_kwargs={"num_iterations": 10, "rho_power": 1.0, "battery_window": 2})
+        with self.assertRaises(ValueError) as caught:
+            dispatch.solve_block_admm(loaded, devices, self._task(), cfg)
+        self.assertIn("different model", str(caught.exception))
+
+        # 0 / None are the "off" values and must stay legal.
+        for off in (0, None):
+            cfg = self._cfg(
+                solver_kwargs={
+                    "num_iterations": 10,
+                    "rho_power": 1.0,
+                    "adaptive_rho": False,
+                    "battery_window": off,
+                }
+            )
+            loaded, devices = self._loaded(self._devices(storage=True))
+            dispatch.solve_block_admm(loaded, devices, self._task(), cfg)
+
+    def test_shipped_configs_still_use_the_interim_absolute_gates(self):
+        """The relative mechanism is opt-in until its threshold and denominator are
+        settled (Kamran, 2026-09-09), so the shipped gates must not have moved."""
+        base = config.base_config()["methods"]["admm"]
+        self.assertEqual(base["max_imbalance_mw"], 1.0)
+        self.assertEqual(base["max_soc_residual_mwh"], 1.0)
+        self.assertEqual(base["max_imbalance_rel"], 2.5e-5)
+        self.assertEqual(base["max_soc_residual_rel"], 2.5e-5)
+
+        path = paths.config_root() / "methods" / "admm_cpu.yaml"
+        admm_cpu = yaml.safe_load(path.read_text())["methods"]["admm"]
+        self.assertEqual(admm_cpu["max_imbalance_mw"], 2.0)
+        self.assertEqual(admm_cpu["max_soc_residual_mwh"], 2.0)
+
+        # ... and a config that opts in gets the relative gate.
+        loaded, devices = self._loaded(self._devices(storage=True))
+        cfg = self._cfg(max_imbalance_mw=None, max_soc_residual_mwh=None)
+        m = dispatch.solve_block_admm(loaded, devices, self._task(), cfg)["metrics"]
+        self.assertEqual(m["admm_gate_mode"], "relative")
+        self.assertEqual(m["admm_soc_residual_gate_mode"], "relative")
+
+    def test_sum_abs_residuals_are_recorded_and_not_gated(self):
+        """Integrals of the violation over every bus/unit and hour: diagnostics only."""
+        loaded, devices = self._loaded(self._devices(storage=True))
+        cfg = self._cfg(
+            max_imbalance_mw=1e9,
+            max_soc_residual_mwh=1e9,
+            solver_kwargs={
+                "num_iterations": 5,
+                "minimum_iterations": 1,
+                "rho_power": 1.0,
+                "adaptive_rho": False,
+                "battery_inner_iterations": 1,
+            },
+        )
+        payload = dispatch.solve_block_admm(loaded, devices, self._task(), cfg)
+        m = payload["metrics"]
+
+        # Far from converged, so both integrals are strictly positive and at least
+        # as large as the corresponding max over a single bus-hour / unit-hour.
+        self.assertGreater(m["admm_sum_abs_imbalance_mwh"], 0.0)
+        self.assertGreaterEqual(m["admm_sum_abs_imbalance_mwh"] + 1e-12, m["admm_max_imbalance_mw"])
+        self.assertGreater(m["admm_sum_abs_soc_residual_mwh"], 0.0)
+        self.assertGreaterEqual(
+            m["admm_sum_abs_soc_residual_mwh"] + 1e-12, m["admm_max_soc_residual_mwh"]
+        )
+        # No gate: with both absolute gates wide open the row stays `ok`, however
+        # large the two integrals are.
+        self.assertNotIn("status", payload)
+
+    def test_sum_abs_imbalance_matches_a_hand_computed_state(self):
+        import torch
+
+        from zap.admm.util import unsqueeze_terminals_times_x
+
+        state = SimpleNamespace(
+            num_terminals=torch.tensor([[2.0], [1.0]]),
+            avg_power=torch.tensor([[1.0, -2.0], [3.0, 0.0]]),
+        )
+        imbalance = unsqueeze_terminals_times_x(state.num_terminals, state.avg_power)
+        expected_max = float(torch.max(torch.abs(imbalance)).item())
+        expected_sum = float(torch.sum(torch.abs(imbalance)).item())
+        got_max, got_sum = dispatch.admm_imbalance_stats(state)
+        self.assertAlmostEqual(got_max, expected_max)
+        self.assertAlmostEqual(got_sum, expected_sum * dispatch.HOURS_PER_STEP)
+
+    def test_gate_columns_reach_metrics_csv(self):
+        run_dir = self.tmp / "run"
+        (run_dir / "tasks").mkdir(parents=True)
+        record = {
+            "task_id": "t0",
+            "status": "ok",
+            "method": "admm",
+            "block_size": 24,
+            "metrics": {
+                "operational_cost": 1.0,
+                "block_peak_load_mw": 80000.0,
+                "storage_energy_capacity_mwh": 40000.0,
+                "admm_imbalance_rel": 1.2e-5,
+                "admm_soc_residual_rel": 3.4e-5,
+                "admm_imbalance_gate_mw": 2.0,
+                "admm_soc_residual_gate_mwh": 1.0,
+                "admm_gate_mode": "relative",
+                "admm_soc_residual_gate_mode": "relative",
+                "admm_max_inner_prox_residual_mw": 0.004,
+                "admm_sum_abs_imbalance_mwh": 12.5,
+                "admm_sum_abs_soc_residual_mwh": 0.75,
+            },
+        }
+        with open(run_dir / "tasks" / "t0.json", "w") as f:
+            json.dump(record, f)
+        frame = metrics.aggregate(run_dir)
+        for key in record["metrics"]:
+            self.assertIn(key, frame.columns)
+        written = pd.read_csv(run_dir / "metrics.csv")
+        self.assertEqual(written.loc[0, "admm_gate_mode"], "relative")
+
+
+class TestPriceErrorVsReference(TempRunMixin):
+    """A3: block-level dual accuracy, computed at aggregate time from `hourly`.
+
+    Deliberately not computed inside the solve: the reference block and the
+    blocked solves are separate SLURM array tasks in an arbitrary order, so no
+    solve can see the reference.
+    """
+
+    def _hourly(self, rows) -> pd.DataFrame:
+        base = {
+            "task_id": "t",
+            "design_id": "asbuilt",
+            "method": "lp",
+            "block_size": "24",
+            "year": 2020,
+            "block_index": 0,
+            "draw": None,
+            "hour": 0,
+            "quantity": metrics.PRICE_QUANTITY,
+            "carrier": "",
+            "bus": "b0",
+            "name": "",
+            "value": 0.0,
+            "unit": "$/MWh",
+        }
+        return pd.DataFrame([{**base, **row} for row in rows])
+
+    def _write(self, run_dir: Path, frame: pd.DataFrame) -> None:
+        persist.write_parquet_atomic(frame, run_dir / "hourly.parquet", persist.hourly_schema())
+
+    def test_price_error_vs_reference_joins_on_bus_and_hour(self):
+        """The join key is (year, draw, bus, hour), not (bus, hour).
+
+        `hour` is the hour *within* a weather year and `block_index` restarts per
+        year, so a two-year two-draw run is the case that catches a key that is
+        missing either column: every (year, draw) here is offset by a different
+        constant, so a wrong join reports a wrong delta rather than nothing.
+        """
+        run_dir = self.tmp / "run"
+        rows = []
+        # A different price level per (year, draw) so a mis-join is visible.
+        offsets = {(2020, 0): 0.0, (2020, 1): 5.0, (2021, 0): 100.0, (2021, 1): 105.0}
+        for hour, (b0, b1) in enumerate([(30.0, 40.0), (50.0, 60.0)]):
+            for (year, draw), offset in offsets.items():
+                for bus, value in (("b0", b0), ("b1", b1)):
+                    rows.append(
+                        {
+                            "task_id": f"ref-{year}-{draw}",
+                            "block_size": "reference",
+                            "block_index": 0,
+                            "year": year,
+                            "draw": draw,
+                            "hour": hour,
+                            "bus": bus,
+                            "value": value + offset,
+                        }
+                    )
+        # Per (year, draw): block 0 (hour 0) errors +1.0 (b0) and -3.0 (b1) ->
+        # max 3.0, mean 2.0; block 1 (hour 1) errors 0.0 and +10.0 -> max 10, mean 5.
+        for (year, draw), offset in offsets.items():
+            tag = f"{year}-{draw}"
+            rows += [
+                {"task_id": f"a-{tag}", "method": "admm", "block_size": "24",
+                 "block_index": 0, "year": year, "draw": draw, "hour": 0, "bus": "b0",
+                 "value": 31.0 + offset},
+                {"task_id": f"a-{tag}", "method": "admm", "block_size": "24",
+                 "block_index": 0, "year": year, "draw": draw, "hour": 0, "bus": "b1",
+                 "value": 37.0 + offset},
+                {"task_id": f"b-{tag}", "method": "admm", "block_size": "24",
+                 "block_index": 1, "year": year, "draw": draw, "hour": 1, "bus": "b0",
+                 "value": 50.0 + offset},
+                {"task_id": f"b-{tag}", "method": "admm", "block_size": "24",
+                 "block_index": 1, "year": year, "draw": draw, "hour": 1, "bus": "b1",
+                 "value": 70.0 + offset},
+            ]
+        self._write(run_dir, self._hourly(rows))
+        df = pd.DataFrame(
+            [{"task_id": r["task_id"], "status": "ok"} for r in rows]
+        ).drop_duplicates()
+
+        out = metrics.price_error_vs_reference(run_dir, df)
+        # One row per (year, draw, block): 4 x 2.
+        self.assertEqual(len(out), 8)
+        self.assertEqual(set(out["year"]), {2020, 2021})
+        self.assertEqual(set(out["draw"]), {0, 1})
+        for (year, draw), offset in offsets.items():
+            sub = out[(out["year"] == year) & (out["draw"] == draw)]
+            first = sub[sub["block_index"] == 0].iloc[0]
+            second = sub[sub["block_index"] == 1].iloc[0]
+            self.assertAlmostEqual(first["max_abs_price_error"], 3.0)
+            self.assertAlmostEqual(first["mean_abs_price_error"], 2.0)
+            self.assertAlmostEqual(first["reference_mean_price"], 35.0 + offset)
+            self.assertEqual(int(first["n_hours"]), 1)
+            self.assertAlmostEqual(second["max_abs_price_error"], 10.0)
+            self.assertAlmostEqual(second["mean_abs_price_error"], 5.0)
+
+    def test_price_error_vs_reference_skips_without_a_reference(self):
+        run_dir = self.tmp / "run"
+        self._write(
+            run_dir,
+            self._hourly([{"task_id": "a", "method": "admm", "block_size": "24", "value": 10.0}]),
+        )
+        out = metrics.price_error_vs_reference(run_dir, pd.DataFrame())
+        self.assertTrue(out.empty)
+        self.assertIn("reference", out.attrs["skip_reason"])
+
+    def test_price_error_vs_reference_skips_without_an_hourly_artefact(self):
+        run_dir = self.tmp / "run"
+        run_dir.mkdir(parents=True)
+        out = metrics.price_error_vs_reference(run_dir, pd.DataFrame())
+        self.assertTrue(out.empty)
+        self.assertIn("hourly", out.attrs["skip_reason"])
+
+    def test_price_error_vs_reference_skips_without_price_rows(self):
+        run_dir = self.tmp / "run"
+        frame = self._hourly([{"quantity": "dispatch_mw", "value": 10.0}])
+        self._write(run_dir, frame)
+        out = metrics.price_error_vs_reference(run_dir, pd.DataFrame())
+        self.assertTrue(out.empty)
+        self.assertIn(metrics.PRICE_QUANTITY, out.attrs["skip_reason"])
+
+    def test_price_error_handles_a_nullable_int_draw_column(self):
+        """`hourly.parquet` types `draw` as a nullable Int32, which refuses a
+        string sentinel in place -- the shape every real run has."""
+        run_dir = self.tmp / "run"
+        rows = [
+            {"task_id": "ref", "block_size": "reference", "hour": 0, "value": 30.0},
+            {"task_id": "a", "method": "admm", "block_size": "24", "hour": 0, "value": 32.0},
+        ]
+        frame = self._hourly(rows)
+        frame["draw"] = pd.array([pd.NA, pd.NA], dtype="Int32")
+        self.assertEqual(str(frame["draw"].dtype), "Int32")
+        self._write(run_dir, frame)
+        df = pd.DataFrame([{"task_id": t, "status": "ok"} for t in ("ref", "a")])
+
+        out = metrics.price_error_rows(run_dir, df)
+        self.assertEqual(len(out), 1)
+        self.assertAlmostEqual(float(out.iloc[0]["delta_price"]), 2.0)
+        self.assertFalse(metrics.price_error_vs_reference(run_dir, df).empty)
+
+    def test_price_error_excludes_infeasible_tasks(self):
+        run_dir = self.tmp / "run"
+        rows = [
+            {"task_id": "ref", "block_size": "reference", "hour": 0, "value": 30.0},
+            {
+                "task_id": "a",
+                "method": "admm",
+                "block_size": "24",
+                "hour": 0,
+                "value": 90.0,
+            },
+        ]
+        self._write(run_dir, self._hourly(rows))
+        df = pd.DataFrame(
+            [{"task_id": "ref", "status": "ok"}, {"task_id": "a", "status": "infeasible"}]
+        )
+        out = metrics.price_error_vs_reference(run_dir, df)
+        self.assertTrue(out.empty)
+
+    def test_price_error_respects_reference_bounds(self):
+        run_dir = self.tmp / "run"
+        rows = [
+            {"task_id": "ref", "block_size": "reference", "hour": 0, "value": 30.0},
+            {"task_id": "ref", "block_size": "reference", "hour": 5, "value": 30.0},
+            {"task_id": "a", "method": "admm", "block_size": "24", "hour": 0, "value": 31.0},
+            {"task_id": "a", "method": "admm", "block_size": "24", "hour": 5, "value": 99.0},
+        ]
+        self._write(run_dir, self._hourly(rows))
+        df = pd.DataFrame([{"task_id": "ref", "status": "ok"}, {"task_id": "a", "status": "ok"}])
+        out = metrics.price_error_vs_reference(run_dir, df, reference_bounds=(0, 4))
+        self.assertAlmostEqual(float(out.iloc[0]["max_abs_price_error"]), 1.0)
+
+    def test_price_error_rows_decompose_by_bus_and_hour(self):
+        run_dir = self.tmp / "run"
+        rows = [
+            # Reference: two buses, two hours; b1 is not a load bus.
+            {"task_id": "ref", "block_size": "reference", "hour": 0, "bus": "b0",
+             "carrier": persist.LOAD_BUS_CARRIER, "value": 30.0},
+            {"task_id": "ref", "block_size": "reference", "hour": 1, "bus": "b0",
+             "carrier": persist.LOAD_BUS_CARRIER, "value": 40.0},
+            {"task_id": "ref", "block_size": "reference", "hour": 0, "bus": "b1",
+             "carrier": persist.NON_LOAD_BUS_CARRIER, "value": -155.0},
+            # One ADMM block over the same hours.
+            {"task_id": "a", "method": "admm", "block_size": "24", "hour": 0, "bus": "b0",
+             "carrier": persist.LOAD_BUS_CARRIER, "value": 33.0},
+            {"task_id": "a", "method": "admm", "block_size": "24", "hour": 1, "bus": "b0",
+             "carrier": persist.LOAD_BUS_CARRIER, "value": 36.0},
+            {"task_id": "a", "method": "admm", "block_size": "24", "hour": 0, "bus": "b1",
+             "carrier": persist.NON_LOAD_BUS_CARRIER, "value": -95.0},
+            # A blocked *LP* row: excluded as a row of its own (it is a blocking
+            # error, not a dual error) but joined on as the same-block control.
+            {"task_id": "l", "method": "lp", "block_size": "24", "hour": 0, "bus": "b0",
+             "carrier": persist.LOAD_BUS_CARRIER, "value": 31.0},
+        ]
+        self._write(run_dir, self._hourly(rows))
+        df = pd.DataFrame(
+            [{"task_id": t, "status": "ok"} for t in ("ref", "a", "l")]
+        )
+
+        out = metrics.price_error_rows(run_dir, df)
+        self.assertEqual(set(out["method"]), {"admm"})
+        self.assertEqual(len(out), 3)
+        self.assertEqual(list(out.columns), list(persist.PRICE_ERROR_COLUMNS))
+        self.assertEqual(set(out["block_start_hour"]), {0})
+        load = out[out["is_load_bus"]]
+        self.assertEqual(len(load), 2)
+        self.assertAlmostEqual(load["delta_price"].max(), 3.0)
+        self.assertAlmostEqual(load["delta_price"].min(), -4.0)
+        other = out[~out["is_load_bus"]]
+        self.assertAlmostEqual(float(other["delta_price"].iloc[0]), 60.0)
+
+        # The same-block LP is 31.0 at (b0, hour 0) against an ADMM 33.0, so the
+        # dual error there is 2.0 while the distance to the reference is 3.0.
+        same = out[(out["bus"] == "b0") & (out["hour"] == 0)].iloc[0]
+        self.assertAlmostEqual(same["block_lp_price"], 31.0)
+        self.assertAlmostEqual(same["delta_price_vs_block_lp"], 2.0)
+        self.assertAlmostEqual(same["delta_price"], 3.0)
+        # No LP row at hour 1, so the control is missing there rather than wrong.
+        self.assertTrue(
+            np.isnan(out[(out["bus"] == "b0") & (out["hour"] == 1)].iloc[0]["block_lp_price"])
+        )
+
+        summary = metrics.price_error_block_summary(out)
+        self.assertEqual(len(summary), 1)
+        row = summary.iloc[0]
+        self.assertAlmostEqual(row["price_error_load_max_vs_block_lp_usd_per_mwh"], 2.0)
+        self.assertAlmostEqual(row["price_error_load_rms_vs_block_lp_usd_per_mwh"], 2.0)
+        self.assertAlmostEqual(row["price_error_load_max_usd_per_mwh"], 4.0)
+        self.assertAlmostEqual(row["price_error_load_rms_usd_per_mwh"], np.sqrt(12.5))
+        self.assertAlmostEqual(row["price_error_all_bus_max_usd_per_mwh"], 60.0)
+        self.assertEqual(int(row["price_error_n_bus_hours"]), 3)
+
+    def test_aggregate_writes_price_error_and_merges_the_summary(self):
+        run_dir = self.tmp / "run"
+        (run_dir / "tasks").mkdir(parents=True)
+        rows = [
+            {"task_id": "ref", "block_size": "reference", "hour": 0, "bus": "b0",
+             "carrier": persist.LOAD_BUS_CARRIER, "value": 30.0},
+            {"task_id": "a", "method": "admm", "block_size": "24", "hour": 0, "bus": "b0",
+             "carrier": persist.LOAD_BUS_CARRIER, "value": 32.0},
+        ]
+        self._write(run_dir, self._hourly(rows))
+        for task_id, method in (("ref", "lp"), ("a", "admm")):
+            with open(run_dir / "tasks" / f"{task_id}.json", "w") as f:
+                json.dump(
+                    {
+                        "task_id": task_id,
+                        "status": "ok",
+                        "method": method,
+                        "block_size": "24",
+                        "metrics": {"operational_cost": 1.0},
+                    },
+                    f,
+                )
+
+        cfg = {"output": {"combine_hourly": False, "save_price_error": True}}
+        frame = metrics.aggregate(run_dir, cfg)
+        self.assertTrue((run_dir / "price_error.parquet").exists())
+        written = pd.read_csv(run_dir / "metrics.csv")
+        for column in metrics.PRICE_ERROR_SUMMARY_COLUMNS:
+            self.assertIn(column, frame.columns)
+            self.assertIn(column, written.columns)
+        admm = written[written["task_id"] == "a"].iloc[0]
+        self.assertAlmostEqual(admm["price_error_load_max_usd_per_mwh"], 2.0)
+
+    def test_aggregate_skips_the_price_error_when_the_flag_is_off(self):
+        run_dir = self.tmp / "run"
+        (run_dir / "tasks").mkdir(parents=True)
+        self._write(
+            run_dir,
+            self._hourly(
+                [
+                    {"task_id": "ref", "block_size": "reference", "value": 30.0},
+                    {"task_id": "a", "method": "admm", "block_size": "24", "value": 32.0},
+                ]
+            ),
+        )
+        with open(run_dir / "tasks" / "a.json", "w") as f:
+            json.dump({"task_id": "a", "status": "ok", "method": "admm", "metrics": {}}, f)
+        metrics.aggregate(run_dir, {"output": {"combine_hourly": False,
+                                               "save_price_error": False}})
+        self.assertFalse((run_dir / "price_error.parquet").exists())
+
+    def test_card_reports_admm_dual_accuracy(self):
+        cfg = config.load_config(tiny_config(self.tmp, window=(0, 48)))
+        run_dir = self.tmp / "run"
+        rows = [
+            {"task_id": "ref", "block_size": "reference", "hour": 0, "value": 30.0},
+            {"task_id": "a", "method": "admm", "block_size": "24", "hour": 0, "value": 37.5},
+        ]
+        self._write(run_dir, self._hourly(rows))
+        df = pd.DataFrame(
+            [
+                {
+                    "task_id": "a",
+                    "status": "ok",
+                    "method": "admm",
+                    "block_size": 24,
+                    "wall_clock_s": 1.0,
+                    "start": 0,
+                    "stop": 24,
+                }
+            ]
+        )
+        path = runcard.write_card(run_dir, cfg, df)
+        text = path.read_text()
+        self.assertIn("## ADMM dual accuracy vs the reference LP", text)
+        self.assertIn("consume these duals", text)
+        self.assertIn("7.5", text)
+
+    def test_card_says_why_the_dual_accuracy_table_is_missing(self):
+        cfg = config.load_config(tiny_config(self.tmp, window=(0, 48)))
+        run_dir = self.tmp / "run"
+        run_dir.mkdir(parents=True)
+        df = pd.DataFrame(
+            [
+                {
+                    "task_id": "a",
+                    "status": "ok",
+                    "method": "admm",
+                    "block_size": 24,
+                    "wall_clock_s": 1.0,
+                    "start": 0,
+                    "stop": 24,
+                }
+            ]
+        )
+        text = runcard.write_card(run_dir, cfg, df).read_text()
+        self.assertIn("## ADMM dual accuracy vs the reference LP", text)
+        self.assertIn("**Not computed:**", text)
+
+    def test_inner_prox_residual_reaches_the_card(self):
+        cfg = config.load_config(tiny_config(self.tmp, window=(0, 48)))
+        run_dir = self.tmp / "run"
+        run_dir.mkdir(parents=True)
+        df = pd.DataFrame(
+            [
+                {
+                    "task_id": "a",
+                    "status": "ok",
+                    "method": "admm",
+                    "block_size": 24,
+                    "wall_clock_s": 1.0,
+                    "start": 0,
+                    "stop": 24,
+                    "operational_cost": 10.0,
+                    "admm_max_inner_prox_residual_mw": 0.0042,
+                    "admm_imbalance_rel": 1.25e-5,
+                    "admm_soc_residual_rel": 2.5e-6,
+                    "admm_max_soc_residual_mwh": 0.5,
+                    "admm_price_movement_usd_per_mwh": 0.25,
+                }
+            ]
+        )
+        text = runcard.write_card(run_dir, cfg, df).read_text()
+        for needle in ("admm_max_inner_prox_residual_mw", "0.0042", "admm_imbalance_rel"):
+            self.assertIn(needle, text)
 
 
 class TestStubSolver(TempRunMixin):

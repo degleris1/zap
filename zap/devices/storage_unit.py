@@ -571,11 +571,6 @@ class StorageUnit(AbstractDevice):
             # _K = K_matrix(self, T, rho_power, inner_weight, machine)
             # self.K_inv = torch.linalg.inv(_K)
 
-        if rebuild:
-            # `has_changed` is set by the ADMM solver at the start of every solve, so
-            # this is the once-per-solve reset for the inner-residual warning.
-            self._inner_residual_warned = False
-
         self._prox_soc_mode = mode
         self.has_changed = False
 
@@ -609,23 +604,12 @@ class StorageUnit(AbstractDevice):
         # two iterates agree only at convergence. An unconverged prox is silent
         # otherwise -- the outer loop can declare convergence on a dispatch whose SoC
         # recursion is violated by tens of MWh (measured at inner_iterations <= 25) --
-        # so record it for the caller and warn, at most once per solve. Never raise:
-        # a slow prox is a quality problem, not a crash.
+        # so *record* it for the caller.  The device deliberately does not judge it:
+        # whether the residual matters depends on the outer nodal imbalance, which
+        # only the solver can see, so `ADMMSolver.warn_inner_prox` does the warning.
+        # `inner_atol` is kept as the inner stopping test's tolerance (A5).
         inner_residual = float(torch.max(torch.abs(x - y)).item())
         self.last_admm_inner_residual = inner_residual
-        inner_tol = inner_atol * max(float(torch.max(ymax).item()), 1.0)
-        if inner_residual > inner_tol and not getattr(self, "_inner_residual_warned", False):
-            self._inner_residual_warned = True
-            logger.warning(
-                "StorageUnit prox did not reach tolerance: ||x - y||_inf = %.3g > %.3g "
-                "after %d inner iterations (rho=%.3g). The returned charge/discharge is "
-                "box-feasible but its SoC recursion is off by up to this much; raise "
-                "inner_iterations.",
-                inner_residual,
-                inner_tol,
-                inner_iterations,
-                float(rho_power),
-            )
 
         # Extract results from the *projected* iterate `y`, not from `x`: `y` is
         # the copy that lives in the box, so the returned charge / discharge always

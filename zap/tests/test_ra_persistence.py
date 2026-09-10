@@ -260,6 +260,37 @@ class TestHourlyStore(PersistenceMixin):
         self.assertNotIn("z1_imports", buses)
         self.assertNotIn("z1_exports", buses)
 
+    def test_price_all_buses_writes_every_bus_and_flags_the_load_buses(self):
+        """`output.price_all_buses` relaxes D5, but never loses the distinction.
+
+        The extra buses are the import bus and the export buses, whose duals are
+        degenerate; they are recorded only so `price_error.parquet` can report an
+        all-bus max next to the load-bus numbers, and every consumer of a price
+        *statistic* filters them out on the carrier marker.
+        """
+        path = self.write_config(
+            "all_bus_prices",
+            {"output": {"save_hourly": "carrier_bus", "price_all_buses": True}},
+        )
+        run_dir = self.run_cli(path)
+        hourly = pd.read_parquet(run_dir / "hourly.parquet")
+        static = json.loads((run_dir / "system_static.json").read_text())
+        prices = hourly[hourly["quantity"].astype(str) == "price_usd_per_mwh"]
+
+        buses = set(prices["bus"].astype(str))
+        self.assertTrue(set(static["load_buses"]) < buses)
+        load_flagged = set(
+            prices[prices["carrier"].astype(str) == persist.LOAD_BUS_CARRIER]["bus"].astype(str)
+        )
+        self.assertEqual(load_flagged, set(static["load_buses"]))
+        other = set(
+            prices[prices["carrier"].astype(str) == persist.NON_LOAD_BUS_CARRIER][
+                "bus"
+            ].astype(str)
+        )
+        self.assertEqual(other, buses - load_flagged)
+        self.assertTrue(other)
+
     def test_hourly_quantity_filter(self):
         """T5."""
         path = self.write_config(

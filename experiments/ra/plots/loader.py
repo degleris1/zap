@@ -43,6 +43,7 @@ ARTEFACTS = {
     "eval": ("eval.parquet", "evaluate.write_eval_tables"),
     "system_static": ("system_static.json", "always written by a solved task"),
     "deviation": ("metrics.csv", "selection.reference"),
+    "price_error": ("price_error.parquet", "output.save_price_error"),
 }
 
 #: Columns of ``hourly.parquet`` that come back as pandas categoricals and are
@@ -135,6 +136,8 @@ class RunHandle:
             return self.path("eval.parquet").exists()
         if artefact == "system_static":
             return self.path("system_static.json").exists()
+        if artefact == "price_error":
+            return self.path("price_error.parquet").exists()
         raise KeyError(f"unknown artefact {artefact!r}; known: {sorted(ARTEFACTS)}")
 
     def require(self, artefact: str) -> None:
@@ -182,6 +185,19 @@ class RunHandle:
                 "store; two block files overlap (re-run the affected tasks with --force)"
             )
         return frame
+
+    def price_error(self) -> pd.DataFrame:
+        """``price_error.parquet``: the per-(bus, hour) ADMM dual error vs the LP."""
+        self.require("price_error")
+
+        def read():
+            frame = pd.read_parquet(self.path("price_error.parquet"))
+            for col in ("task_id", "method", "block_size", "bus"):
+                if col in frame.columns:
+                    frame[col] = frame[col].astype(str)
+            return frame
+
+        return self._cached("price_error", read).copy()
 
     def ens_profile(self) -> pd.DataFrame:
         self.require("ens_profile")

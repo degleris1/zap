@@ -26,9 +26,14 @@ methods:
     solver: ADMM
     dtype: float64
     timeout_s: 3600
-    # Interim absolute gates; R10 (relative to block peak load, ~2.4e-5) pending --
-    # 168 h converged solves sit at ~1.0-1.1 on both quantities, so the old 1.0
-    # thresholds rejected legitimately converged weekly blocks.
+    # Interim absolute gates, and still the effective default (Kamran, 2026-09-09):
+    # a converged 168 h solve sits at ~1.0-1.1 on both quantities while a 24 h solve
+    # sits far below, so the old 1.0 thresholds rejected legitimately converged
+    # weekly blocks. That is a block-length correction, which the relative gate
+    # (`max_imbalance_rel` / `max_soc_residual_rel` in base.yaml) does properly --
+    # but neither its threshold nor its denominator is settled, so nothing switches
+    # yet. To measure the relative form, set both keys below to `null`; every block
+    # already records `admm_imbalance_rel` and `admm_soc_residual_rel` either way.
     max_imbalance_mw: 2.0
     max_soc_residual_mwh: 2.0   # storage SoC-recursion residual gate (projected prox iterate)
     solver_kwargs:
