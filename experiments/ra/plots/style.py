@@ -58,7 +58,19 @@ CARRIER_COLORS: dict[str, str] = {
     # (battery vs solar dE 0.6, the CCGT reds vs any green ~3-6): that is a
     # property of the upstream PyPSA-USA palette, unchanged by this entry, and
     # a CVD-safe rebuild of all 30 carriers is a separate decision.
-    "PHS": "#08ad97",
+    # PHS is *not* upstream's teal any more: `hydro` is #08ad97 too, and the two
+    # were one colour above and below the axis.  #7c70fc clears the data-viz
+    # gates against every carrier it can sit next to -- hydro 26.1 normal /
+    # 20.6 CVD, BESS 47.5 / 45.3, solar 44.7 / 42.3, onwind 15.4 / 12.0,
+    # offwind_floating 18.5 / 13.2 (OKLab dE x100, min of protan and deutan),
+    # measured with the bundled `dataviz` validate_palette.py.
+    "PHS": "#7c70fc",
+    #: The one battery colour: `battery`, `4hr_battery_storage`,
+    #: `8hr_battery_storage` and anything else matching *battery* are merged into
+    #: the display group `BESS` (:func:`display_carrier`), which keeps upstream's
+    #: generic-battery hue.  The per-carrier entries below stay for readers that
+    #: colour a raw carrier directly; no plot does.
+    "BESS": "#b8ea04",
     "battery": "#b8ea04",
     "4hr_battery_storage": "#5aa02c",
     "8hr_battery_storage": "#185430",
@@ -97,6 +109,7 @@ DATASET_CARRIERS: tuple[str, ...] = (
     "onwind",
     "solar",
     "PHS",
+    "BESS",
     "battery",
     "4hr_battery_storage",
     "8hr_battery_storage",
@@ -144,9 +157,9 @@ CARRIER_STACK_ORDER: tuple[str, ...] = (
     "onwind",
     "offwind_floating",
     # --- batteries / storage discharge ---
-    "battery",
-    "4hr_battery_storage",
-    "8hr_battery_storage",
+    # One slot for the whole battery fleet: plots group by *display* carrier
+    # (:func:`display_carrier`), so the three battery rows arrive here as `BESS`.
+    "BESS",
     "demand_response",
     # --- thermal ---
     "CCGT",
@@ -215,6 +228,41 @@ def carrier_color(name: str) -> str:
     g = 105 + digest[1] % 70
     b = 130 + digest[2] % 70
     return f"#{r:02x}{g:02x}{b:02x}"
+
+
+#: Carriers merged into one **display** category before any plot colours,
+#: stacks or labels them.  The merge happens at the plot layer only: every
+#: persisted table (``raw_data/*.csv``, ``hourly.parquet``, ``design.json``)
+#: keeps the per-carrier rows, so a number can still be read per battery type.
+CARRIER_DISPLAY_GROUPS: dict[str, str] = {
+    "battery": "BESS",
+    "4hr_battery_storage": "BESS",
+    "8hr_battery_storage": "BESS",
+}
+
+#: Any carrier whose name contains this (case-insensitively) and is not already
+#: in :data:`CARRIER_DISPLAY_GROUPS` also merges into ``BESS`` -- the datasets
+#: name duration variants freely (``2hr_battery_storage`` and friends) and a new
+#: one must not silently become its own band.
+BESS_MATCH = "battery"
+BESS_GROUP = "BESS"
+
+
+def display_carrier(name) -> str:
+    """The display category of a raw carrier: batteries collapse to ``BESS``."""
+    key = str(name)
+    if key in CARRIER_DISPLAY_GROUPS:
+        return CARRIER_DISPLAY_GROUPS[key]
+    if BESS_MATCH in key.lower():
+        return BESS_GROUP
+    return key
+
+
+def display_carriers(values):
+    """:func:`display_carrier` over a pandas Series (or any iterable)."""
+    if isinstance(values, pd.Series):
+        return values.map(display_carrier)
+    return [display_carrier(v) for v in values]
 
 
 def stack_order(carriers) -> list[str]:

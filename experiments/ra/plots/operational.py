@@ -304,7 +304,12 @@ def _below_axis_stack(ax, group, *, index: str, aggfunc: str, labelled=(), handl
 
 
 def _stack_pivot(frame: pd.DataFrame, value: str, index: str, aggfunc: str) -> pd.DataFrame:
-    """A carrier pivot whose columns are already in the global stacking order."""
+    """A carrier pivot: display groups merged, columns in the stacking order.
+
+    The battery carriers are summed into one ``BESS`` column here -- *after* the
+    plot's table is built, so the CSV beside the figure stays per-carrier.
+    """
+    frame = frame.assign(carrier=style.display_carriers(frame["carrier"]))
     pivot = frame.pivot_table(
         index=index, columns="carrier", values=value, aggfunc=aggfunc
     ).fillna(0.0)
@@ -1097,9 +1102,9 @@ def o5_dispatch_difference(runs, *, window=None, year=None, method=None, block_s
     table = merged.sort_values(key).reset_index(drop=True)
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    pivot = table[table["series"] == "generation"].pivot_table(
-        index="hour", columns="carrier", values="diff_gw", aggfunc="sum"
-    ).fillna(0.0)
+    pivot = _stack_pivot(
+        table[table["series"] == "generation"], "diff_gw", "hour", "sum"
+    )
     for carrier in pivot.columns:
         ax.plot(pivot.index, pivot[carrier], linewidth=1.0,
                 color=style.carrier_color(carrier), label=carrier)
@@ -1175,7 +1180,11 @@ def o6_state_of_charge(runs, *, window=None, year=None, method=None, block_size=
     groups = list(table.groupby(["run_id", "label", "method", "block_size"], sort=True))
     fig, axes = _facet_axes(len(groups), height=3.0)
     for ax, ((_run_id, label, meth, size), group) in zip(axes, groups):
-        for carrier, sub in group.groupby("carrier", sort=True):
+        # One line per *display* carrier: the battery rows sum into BESS.
+        shown = group.assign(carrier=style.display_carriers(group["carrier"]))
+        shown = shown.groupby(["carrier", "hour"], as_index=False)["soc_gwh"].sum()
+        for carrier in style.stack_order(shown["carrier"].unique()):
+            sub = shown[shown["carrier"] == carrier].sort_values("hour")
             ax.plot(sub["hour"], sub["soc_gwh"], linewidth=1.1,
                     color=style.carrier_color(carrier), label=carrier)
         for hour in group.loc[group["block_boundary"], "hour"].unique():

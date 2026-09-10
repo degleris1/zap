@@ -682,12 +682,13 @@ class TestStackedPlots(PlotFixture):
         # baseload < renewables < batteries < thermal < trade
         self.assertLess(order.index("nuclear"), order.index("solar"))
         self.assertLess(order.index("PHS"), order.index("solar"))
-        self.assertLess(order.index("offwind_floating"), order.index("battery"))
-        self.assertLess(order.index("8hr_battery_storage"), order.index("CCGT"))
+        self.assertLess(order.index("offwind_floating"), order.index("BESS"))
+        self.assertLess(order.index("BESS"), order.index("CCGT"))
         self.assertLess(order.index("oil"), order.index("imports"))
 
-        picked = style_mod.stack_order(["CCGT", "solar", "battery", "nuclear"])
-        self.assertEqual(picked, ["nuclear", "solar", "battery", "CCGT"])
+        # `stack_order` takes *display* carriers (callers map first).
+        picked = style_mod.stack_order(["CCGT", "solar", "BESS", "nuclear"])
+        self.assertEqual(picked, ["nuclear", "solar", "BESS", "CCGT"])
         # Order does not depend on the order the carriers arrive in.
         self.assertEqual(style_mod.stack_order(reversed(picked)), picked)
 
@@ -780,7 +781,7 @@ class TestStackedPlots(PlotFixture):
                 colours = [to_hex(c.get_facecolor()[0]) for c in below]
                 # One band per below-axis carrier, in the carrier's own colour and
                 # in the *same* sequence as above the axis (PHS before battery).
-                expected = style_mod.stack_order(["battery", "PHS", "exports"])
+                expected = style_mod.stack_order(["BESS", "PHS", "exports"])
                 self.assertEqual(
                     colours, [to_hex(style_mod.carrier_color(c)) for c in expected]
                 )
@@ -802,8 +803,8 @@ class TestStackedPlots(PlotFixture):
                 labels = self._legend_labels(fig)
                 self.assertNotIn("storage charge", labels)
                 self.assertEqual(len(labels), len(set(labels)), labels)
-                # battery discharges *and* charges, and appears exactly once.
-                self.assertEqual(labels.count("battery"), 1)
+                # BESS discharges *and* charges, and appears exactly once.
+                self.assertEqual(labels.count("BESS"), 1)
                 # PHS and exports only ever appear below the axis, and still get
                 # an entry rather than an unlabelled band.
                 for carrier in ("PHS", "exports"):
@@ -817,7 +818,7 @@ class TestStackedPlots(PlotFixture):
         fig, table = plots_mod.plot("O4", self.handles(self.run_a))
         charging = table[table["series"] == "storage_charge"]
         self.assertFalse(charging.empty)
-        carriers = style_mod.stack_order(set(charging["carrier"]))
+        carriers = style_mod.stack_order(style_mod.display_carriers(set(charging["carrier"])))
         below = self._below_axis(fig.axes[0])
         self.assertEqual(len(below), len(carriers))
         self.assertEqual(
@@ -882,10 +883,9 @@ class TestStackedPlots(PlotFixture):
         # store omits a carrier that is off for a whole block), so each panel is
         # checked against its own bands: every band is a charging carrier's own
         # colour, and the sequence away from the axis is the pinned order.
-        by_colour = {
-            to_hex(style_mod.carrier_color(c)): c for c in set(charging["carrier"])
-        }
-        self.assertEqual(len(by_colour), len(set(charging["carrier"])))
+        shown = set(style_mod.display_carriers(set(charging["carrier"])))
+        by_colour = {to_hex(style_mod.carrier_color(c)): c for c in shown}
+        self.assertEqual(len(by_colour), len(shown))
         panels = [ax for ax in fig.axes if self._below_axis(ax)]
         self.assertTrue(panels)
         for ax in panels:
@@ -895,6 +895,69 @@ class TestStackedPlots(PlotFixture):
             self.assertEqual(carriers, style_mod.stack_order(carriers))
         self.assertNotIn("storage charge", self._legend_labels(fig))
         plt.close(fig)
+
+    def test_battery_carriers_merge_into_one_bess_display_group(self):
+        """Every `*battery*` carrier is one band, one colour, one legend entry."""
+        self.assertEqual(style_mod.display_carrier("battery"), "BESS")
+        self.assertEqual(style_mod.display_carrier("4hr_battery_storage"), "BESS")
+        self.assertEqual(style_mod.display_carrier("8hr_battery_storage"), "BESS")
+        # A duration variant the loader has never emitted still merges.
+        self.assertEqual(style_mod.display_carrier("2hr_battery_storage"), "BESS")
+        self.assertEqual(style_mod.display_carrier("Battery_Storage"), "BESS")
+        # ...and nothing else does.
+        for carrier in ("PHS", "hydro", "solar", "CCGT", "demand_response"):
+            self.assertEqual(style_mod.display_carrier(carrier), carrier)
+        # The stack order carries the merged group, not the raw battery rows.
+        self.assertIn("BESS", style_mod.CARRIER_STACK_ORDER)
+        for carrier in ("battery", "4hr_battery_storage", "8hr_battery_storage"):
+            self.assertNotIn(carrier, style_mod.CARRIER_STACK_ORDER)
+        # Its slot: after the renewables, before the thermal block.
+        order = style_mod.CARRIER_STACK_ORDER
+        self.assertLess(order.index("offwind_floating"), order.index("BESS"))
+        self.assertLess(order.index("BESS"), order.index("CCGT"))
+        self.assertLess(order.index("PHS"), order.index("solar"))  # PHS stays baseload
+
+        for plot_id in ("O4", "O4b", "O6"):
+            with self.subTest(plot=plot_id):
+                fig, table = plots_mod.plot(plot_id, self.handles(self.run_a))
+                labels = self._legend_labels(fig)
+                self.assertEqual(labels.count("BESS"), 1, labels)
+                for carrier in ("battery", "4hr_battery_storage", "8hr_battery_storage"):
+                    self.assertNotIn(carrier, labels)
+                # The persisted table is still per carrier.
+                raw = set(table["carrier"])
+                self.assertIn("battery", raw)
+                self.assertNotIn("BESS", raw)
+                plt.close(fig)
+
+    def test_bess_band_sums_the_battery_carriers(self):
+        """The merge adds the rows up; it does not drop or double-count them."""
+        from experiments.ra.plots import operational
+
+        _fig, table = plots_mod.plot("O4", self.handles(self.run_a))
+        plt.close("all")
+        rows = table[table["series"] == "storage_discharge"]
+        pivot = operational._stack_pivot(rows, "value_gw", "hour", "sum")
+        self.assertIn("BESS", pivot.columns)
+        expected = (
+            rows[rows["carrier"].str.contains("battery", case=False)]
+            .groupby("hour")["value_gw"].sum()
+        )
+        merged = pivot["BESS"].reindex(expected.index).fillna(0.0)
+        self.assertTrue((merged - expected).abs().max() < 1e-9)
+
+    def test_phs_is_visually_distinct_from_hydro(self):
+        """PHS and hydro shared #08ad97; they are the two storage-vs-baseload bands."""
+        phs = style_mod.CARRIER_COLORS["PHS"]
+        for other in ("hydro", "BESS", "solar", "onwind", "offwind_floating"):
+            with self.subTest(pair=other):
+                colour = style_mod.CARRIER_COLORS[other]
+                self.assertNotEqual(phs, colour)
+                self.assertGreaterEqual(delta_e(phs, colour), NORMAL_FLOOR)
+                for kind in MACHADO:
+                    self.assertGreaterEqual(delta_e(phs, colour, kind), CVD_FLOOR)
+        # The regression this test exists for: the old PHS colour *was* hydro's.
+        self.assertEqual(delta_e("#08ad97", style_mod.CARRIER_COLORS["hydro"]), 0.0)
 
     def test_monthly_profile_uses_local_pacific_hours_and_month_boundaries(self):
         from experiments.ra.plots import operational

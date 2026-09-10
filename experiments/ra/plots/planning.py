@@ -149,11 +149,16 @@ def p1_capacity_by_carrier(runs, **_):
              if u in set(table["unit"])]
     fig, axes = plt.subplots(len(units), 1, figsize=(9.5, 3.4 * len(units)), squeeze=False)
     for ax, unit in zip(axes[:, 0], units):
+        # Bars are drawn per *display* carrier (batteries merged into BESS) and
+        # ordered by the global stacking order; the returned table stays per
+        # carrier, so `raw_data` keeps every battery type separately.
         sub = table[table["unit"] == unit]
+        sub = sub.assign(carrier=style.display_carriers(sub["carrier"]))
+        order = style.stack_order(sub["carrier"].unique())
         pivot_built = sub.pivot_table(index="carrier", columns="label", values="as_built",
-                                      aggfunc="sum").fillna(0.0)
+                                      aggfunc="sum").fillna(0.0).reindex(order)
         pivot_new = sub.pivot_table(index="carrier", columns="label", values="delta",
-                                    aggfunc="sum").fillna(0.0)
+                                    aggfunc="sum").fillna(0.0).reindex(order)
         positions = np.arange(len(pivot_built.index))
         width = 0.8 / max(1, len(pivot_built.columns))
         for j, label in enumerate(pivot_built.columns):
@@ -223,8 +228,10 @@ def p2_design_matrix(runs, **_):
     table = table.sort_values(keys).reset_index(drop=True)
 
     power = table[table["unit"] == style.unit_label("power")]
+    power = power.assign(carrier=style.display_carriers(power["carrier"]))
     pivot = power.pivot_table(index="label", columns="carrier", values="designed", aggfunc="sum")
     pivot = pivot.fillna(0.0)
+    pivot = pivot[style.stack_order(pivot.columns)]
     fig, ax = plt.subplots(figsize=(1.1 * max(4, len(pivot.columns)) + 2,
                                     0.6 * max(2, len(pivot.index)) + 2))
     image = ax.imshow(pivot.to_numpy(), aspect="auto", cmap="YlGnBu")
