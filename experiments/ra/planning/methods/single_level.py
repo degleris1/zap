@@ -9,6 +9,7 @@ class; what separates them is ``selection`` and
 
 from __future__ import annotations
 
+import logging
 import time
 
 from zap.planning import MonolithicPlanningProblem, RelaxedPlanningProblem
@@ -17,6 +18,8 @@ from ...config import ConfigError
 from .. import base, constraints, objectives
 
 __all__ = ["SingleLevelMethod", "optimality_gap", "problem_size"]
+
+logger = logging.getLogger(__name__)
 
 
 def optimality_gap(objective: float, lower_bound: float | None) -> float | None:
@@ -124,6 +127,44 @@ class SingleLevelMethod(base.PlanningMethod):
         if opex is not None:
             opex = opex - carbon_payment
 
+        # Split the reported opex into gross dispatch cost and the credit earned
+        # by negative-marginal-cost rows, read off the solved LP's own primal
+        # dispatch (no second solve).  `RelaxedPlanningProblem` builds no primal
+        # dispatch, so the split is simply absent there.
+        credit = None
+        export_revenue = None
+        outcomes = data.get("dispatch_outcomes")
+        if outcomes is not None:
+            # `subproblem_scales` is `w_i * snapshot_weight_i`, which is exactly
+            # what `MonolithicPlanningProblem.solve` charged each block's
+            # operation objective -- and therefore what `opex` above sums.  (The
+            # gradient path weights by `w_i` alone; see `problem_cost_credit`.)
+            scales = data.get("subproblem_scales") or [1.0] * len(outcomes)
+            subs = data.get("subproblems") or []
+
+            def _weighted(classes, _scales=scales, _subs=subs, _outcomes=outcomes) -> float:
+                return float(
+                    sum(
+                        float(scale)
+                        * objectives.dispatch_cost_credit(
+                            sub.layer.devices,
+                            y.power,
+                            y.angle,
+                            y.local_variables,
+                            classes=classes,
+                        )
+                        for scale, sub, y in zip(_scales, _subs, _outcomes)
+                    )
+                )
+
+            try:
+                credit = _weighted(objectives.CREDIT_CLASSES)
+                export_revenue = _weighted(objectives.EXPORT_CLASSES)
+            except Exception as exc:  # reporting must not fail a solve
+                logger.warning("could not split the opex by cost sign: %s", exc, exc_info=True)
+                credit = None
+                export_revenue = None
+
         return base.PlanningResult.from_context(
             ctx,
             method=self.name,
@@ -134,6 +175,7 @@ class SingleLevelMethod(base.PlanningMethod):
                 "raw": objective_raw,
                 "capex_raw": capex,
                 "opex_raw": opex,
+                **objectives.opex_split(opex, credit, export_revenue),
                 "carbon_payment_raw": carbon_payment,
                 # An LP is its own lower bound (stated, like the objective, net
                 # of the carbon payment).

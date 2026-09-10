@@ -131,7 +131,7 @@ class MonolithicPlanningProblem:
         # second full forward pass.
         emissions_term = EmissionsObjective(devices)(y, parameters=parameters, la=cp)
 
-        return operation_objective, primal_constraints, emissions_term
+        return operation_objective, primal_constraints, emissions_term, y
 
     def solve(self):
         """Solve the joint single-level LP."""
@@ -143,13 +143,14 @@ class MonolithicPlanningProblem:
         operation_objectives = []
         primal_constraints = []
         emissions_terms = []
+        dispatch_outcomes = []
 
         subs, weights = weighted_subproblems(self.problem)
         if isinstance(self.problem, StochasticPlanningProblem):
             print(f"Solving monolithic single-level problem with {len(subs)} scenarios.")
 
         for w, sub in zip(weights, subs):
-            op, pc, em = self.setup_inner_problem(sub, net_params)
+            op, pc, em, y = self.setup_inner_problem(sub, net_params)
             # Same weighting as StochasticPlanningProblem.forward:
             # w_i * snapshot_weight_i * op_i.  With the uniform weights and unit
             # snapshot weights of phase 1 this is the identity.
@@ -157,6 +158,11 @@ class MonolithicPlanningProblem:
             operation_objectives.append(scale * op)
             primal_constraints += list(pc)
             emissions_terms.append(scale * em)
+            # The primal dispatch of this subproblem, so a caller can report
+            # quantities the objective does not decompose into (e.g. the
+            # negative-price part of the operation cost).  These are cvxpy
+            # expressions: read `.value` after the solve.
+            dispatch_outcomes.append(y)
 
         constraints = box_constraints + budget_constraints + list(primal_constraints)
         emissions_constraint = None
@@ -180,6 +186,12 @@ class MonolithicPlanningProblem:
             "operation_objective": operation_objectives,
             "primal_constraints": primal_constraints,
             "emissions_terms": emissions_terms,
+            "dispatch_outcomes": dispatch_outcomes,
+            "subproblems": list(subs),
+            "subproblem_scales": [
+                float(w) * float(getattr(sub, "snapshot_weight", 1.0))
+                for w, sub in zip(weights, subs)
+            ],
             "emissions_limit": self.emissions_limit,
             "emissions_constraint": emissions_constraint,
             "problem": problem,

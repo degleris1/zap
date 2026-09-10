@@ -647,6 +647,9 @@ def solve_block_stub(task, cfg: dict) -> dict[str, Any]:
     metrics = {
         "operational_cost": cost,
         "generation_cost": cost,
+        # The stub has no negative-cost generator, so the split is the identity.
+        "generation_cost_gross": cost,
+        "generation_credit": 0.0,
         "voll_cost": 0.0,
         "export_revenue": 0.0,
         "unserved_energy_mwh": 0.0,

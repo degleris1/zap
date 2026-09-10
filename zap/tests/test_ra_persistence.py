@@ -404,8 +404,24 @@ class TestIterationTables(PersistenceMixin):
         self.assertEqual(len(scalars), 4)  # num_iterations + 1
         self.assertEqual(list(scalars["iteration"]), [0, 1, 2, 3])
         self.assertTrue(((scalars["clip_fraction"] > 0) & (scalars["clip_fraction"] <= 1)).all())
-        expected = scalars["step_size"] * np.minimum(scalars["grad_norm_l2"], scalars["clip"])
-        np.testing.assert_allclose(scalars["step_norm_mw"], expected, rtol=1e-12)
+
+        # `step_norm_mw` is the POST-PROJECTION movement ||eta - eta_prev||_2,
+        # not the step the rule asked for
+        # (`memory/plans/2026-09-10-step-rule-spec.md` section 1: the old column
+        # reported 1,000 MW on ca2040_z4 while the design moved 13 MW).  This
+        # fixture is the extreme case -- every row is frozen by `p_nom_min ==
+        # p_nom_max`, so the projection undoes the whole step and the design
+        # never moves, where the old formula reported `step_size * clip` = 1,000
+        # MW at every iteration.
+        asked_for = scalars["step_size"] * np.minimum(scalars["grad_norm_l2"], scalars["clip"])
+        np.testing.assert_allclose(asked_for, 1.0e3, rtol=1e-12)
+        np.testing.assert_allclose(
+            scalars["step_norm_mw"], scalars["step_norm_mw_actual"], rtol=1e-12
+        )
+        np.testing.assert_allclose(scalars["step_norm_mw"], 0.0, atol=1e-9)
+        self.assertTrue((scalars["n_free"] == 0).all())
+        self.assertEqual(int(scalars["rule"].nunique()), 1)
+        self.assertEqual(scalars["rule"].iloc[0], "gradient")
 
         blocks = history_mod.read_table(run_dir, "iteration_blocks")
         self.assertEqual(tuple(blocks.columns), history_mod.ITERATION_BLOCKS_COLUMNS)
@@ -444,6 +460,10 @@ class TestIterationRegressions(TestIterationTables):
                         "num_iterations": 1,
                         "batch_size": 1,
                         "batch_strategy": "sequential",
+                        # `best_sampled` is a ConfigError under a minibatch and
+                        # the iterate chosen is irrelevant here: the assertions
+                        # are all on the per-iteration table.
+                        "design_selection": "final",
                     },
                 }
             },

@@ -334,7 +334,19 @@ class TestPlanTaskEnumeration(unittest.TestCase):
     def test_two_batch_rules_enumerate_distinct_design_ids(self):
         det = self._plan_cfg("c4", {"planning": {"optimizer": {"batch_size": 0}}})
         sgd = self._plan_cfg(
-            "c5", {"planning": {"optimizer": {"batch_size": 4, "batch_strategy": "random"}}}
+            "c5",
+            {
+                "planning": {
+                    "optimizer": {
+                        "batch_size": 4,
+                        "batch_strategy": "random",
+                        # A minibatch forbids `best_sampled` (config.validate),
+                        # so this mirrors the shipped c5 preset.
+                        "design_selection": "best_checkpointed",
+                        "checkpoint_every": 20,
+                    }
+                }
+            },
         )
         det_ids = [t.design_id for t in tasks_mod.enumerate_tasks(det)]
         sgd_ids = [t.design_id for t in tasks_mod.enumerate_tasks(sgd)]

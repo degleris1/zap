@@ -160,6 +160,11 @@ class AbstractPlanningProblem:
         time_limit_s=None,
         batch_seed=42,
         iteration_hook=None,
+        tol_rel_objective=None,
+        tol_window=20,
+        tol_stationarity=None,
+        stationarity_scale=None,
+        grad_history_every=0,
     ):
         """Run the descent loop.
 
@@ -179,15 +184,61 @@ class AbstractPlanningProblem:
         history lists exactly -- and once more after the loop with
         ``final=True`` (the last index is therefore passed twice; hooks dedupe
         on ``index``).  It is the seam for evaluating a full-horizon objective
-        at a checkpoint while a minibatch loop is running.
+        at a checkpoint while a minibatch loop is running.  A hook that returns
+        a **truthy** value stops the loop with
+        ``stop_reason == "checkpoint_tolerance"``: that is how a stochastic run
+        applies the objective-plateau test, whose series has to be the
+        checkpoints (a 20-sample window of a sigma ~ 1 B$ per-iteration
+        estimator still carries ~3.5 % noise).
+
+        Convergence (spec ``2026-09-10-step-rule-spec.md`` section 3).  Both
+        tests are off by default, which is the historical behaviour --
+        ``num_iterations`` and ``time_limit_s`` are then the only stops:
+
+        ``tol_rel_objective`` / ``tol_window``
+            objective *plateau*.  Over the last ``W = tol_window`` recorded
+            losses, the relative decrease from the first half's mean to the
+            second half's, ``(F1 - F2) / |Fbar|``, below ``tol_rel_objective``
+            stops the loop with ``stop_reason == "objective_tolerance"``.  The
+            comparison is signed, so "the objective got worse" also counts as
+            "no longer making progress".  This reads ``history[LOSS]``, which is
+            the full-horizon objective only when the batch is the whole block
+            set; a minibatch run must leave this ``None`` and use the hook.
+        ``tol_stationarity`` / ``stationarity_scale``
+            first-order optimality: ``max_j |mhat_j| / gamma_j`` over the rows
+            strictly inside their bounds, where ``gamma_j`` is the annualised
+            capital cost of row ``j`` from ``stationarity_scale``, i.e. every
+            interior row's marginal value is within ``tol_stationarity`` of its
+            own capex.  ``mhat`` is the step rule's smoothed gradient where it
+            has one (Adam's bias-corrected first moment) and the raw gradient
+            otherwise.  Recorded every iteration as
+            ``history["stationarity_max"]`` whenever ``stationarity_scale`` is
+            given, whether or not the tolerance is set.
+
+        ``grad_history_every`` (0 = off) is the sampling period of the
+        ``grad_sampled`` / ``opt_moments`` trackers.
         """
         if algorithm is None:
             algorithm = GradientDescent()
 
+        # The trackers read the rule's own diagnostics off the problem, and a
+        # stateful rule (Adam's moments, the trust radius) must not carry state
+        # across `solve` calls -- under `emissions.mode: dual_ascent` the same
+        # algorithm object is reused for every outer iteration.
+        self.algorithm = algorithm
+        if hasattr(algorithm, "reset"):
+            algorithm.reset()
+        self.grad_history_every = int(grad_history_every or 0)
+
         if trackers is None:
             trackers = DEFAULT_TRACKERS
 
-        if batch_size is None or batch_size > self.time_horizon or batch_size <= 0:
+        # A minibatch is a subset of the *subproblems* (blocks), so the guard is
+        # against `num_subproblems`.  It used to test `self.time_horizon`, which
+        # is the block length in hours: with 24 h blocks any `batch_size > 24`
+        # silently collapsed to full-batch gradient descent, and with a 2 h test
+        # horizon so did `batch_size = 3`.
+        if batch_size is None or batch_size > self.num_subproblems or batch_size <= 0:
             batch_size = self.num_subproblems
 
         assert all([t in TRACKER_MAPS for t in trackers])
@@ -271,9 +322,16 @@ class AbstractPlanningProblem:
         history = self.update_history(
             history, trackers, J, grad, state, None, wandb, log_wandb_every
         )
+        _record_stationarity(history, self, algorithm, grad, state, stationarity_scale)
 
-        if iteration_hook is not None:
-            iteration_hook(0, state, history, False)
+        if iteration_hook is not None and iteration_hook(0, state, history, False):
+            self.stop_reason = "checkpoint_tolerance"
+            num_iterations = 0
+
+        # First-order model bookkeeping for `TrustRegionDescent`; NaN says "no
+        # model to score yet", which leaves the radius at its initial value.
+        _actual_decrease = float("nan")
+        _predicted_decrease = float("nan")
 
         # Gradient descent loop
         for iteration in range(num_iterations):
@@ -289,8 +347,22 @@ class AbstractPlanningProblem:
             if (self.iteration) % checkpoint_every == 0:
                 checkpoint_func(state, history)
 
-            # Gradient step and project
-            state = algorithm.step(state, grad)
+            # Gradient step and project.  Every rule takes the same keyword
+            # arguments (`GradientDescent.step` sinks them in `**kwargs`), so
+            # the loop never branches on which rule it is running.
+            state = algorithm.step(
+                state,
+                grad,
+                iteration=iteration,
+                num_iterations=num_iterations,
+                actual_decrease=_actual_decrease,
+                predicted_decrease=_predicted_decrease,
+                # The box, so a rule that normalises a step can normalise over
+                # the *projected* gradient rather than over coordinates that
+                # cannot move (`TrustRegionDescent`).
+                lower_bounds=self.lower_bounds,
+                upper_bounds=self.upper_bounds,
+            )
             state = self.project(state)
 
             if self.la == torch:
@@ -321,23 +393,61 @@ class AbstractPlanningProblem:
 
             print(batch) if verbosity >= 2 else None
 
+            # The realised step (post-projection) and the loss it started from,
+            # so the trust region can score its own model on the next pass.
+            _prev_J = float(J)
+            _prev_grad = {k: v for k, v in grad.items()}
+            _prev_step = {k: _numpy(state[k]) - _numpy(last_state[k]) for k in state}
+
             self.batch = list(batch)
             J, grad = self.forward_and_back(**state, batch=batch)
+
+            _actual_decrease = _prev_J - float(J)
+            _predicted_decrease = -float(
+                sum(
+                    float(np.sum(_numpy(_prev_grad[k]) * _prev_step[k]))
+                    for k in _prev_step
+                )
+            )
 
             # Record stuff
             history = self.update_history(
                 history, trackers, J, grad, state, last_state, wandb, log_wandb_every
             )
+            stationarity = _record_stationarity(
+                history, self, algorithm, grad, state, stationarity_scale
+            )
 
-            if iteration_hook is not None:
-                iteration_hook(self.iteration, state, history, False)
+            stop = None
+            if iteration_hook is not None and iteration_hook(
+                self.iteration, state, history, False
+            ):
+                stop = "checkpoint_tolerance"
+
+            if (
+                stop is None
+                and tol_rel_objective is not None
+                and _plateau(history.get(LOSS) or [], tol_window, tol_rel_objective)
+            ):
+                stop = "objective_tolerance"
+
+            if (
+                stop is None
+                and tol_stationarity is not None
+                and stationarity is not None
+                and stationarity < float(tol_stationarity)
+            ):
+                stop = "stationarity"
 
             # Soft wall-clock cap: the iteration just finished is fully
             # recorded, so the caller keeps a design and a history.
-            if time_limit_s is not None and (
+            if stop is None and time_limit_s is not None and (
                 time.time() - self.start_time >= float(time_limit_s)
             ):
-                self.stop_reason = "wall_clock"
+                stop = "wall_clock"
+
+            if stop is not None:
+                self.stop_reason = stop
                 break
 
         if iteration_hook is not None:
@@ -615,6 +725,104 @@ def weighted_subproblems(problem):
     if isinstance(problem, StochasticPlanningProblem):
         return list(problem.subproblems), [float(w) for w in problem.weights]
     return [problem], [1.0]
+
+
+def _numpy(x) -> np.ndarray:
+    """A flat float64 numpy view of a numpy array or a torch tensor."""
+    if isinstance(x, torch.Tensor):
+        x = x.detach().cpu().numpy()
+    return np.asarray(x, dtype=float).reshape(-1)
+
+
+def _plateau(series, window, tol) -> bool:
+    """Has the objective stopped decreasing over the last ``window`` entries?
+
+    Compares the mean of the first half of the window to the mean of the second
+    half, relative to the mean over the window: ``(F1 - F2) / |Fbar| < tol``.
+
+    The window does **not** shrink to fit: with fewer than ``window`` recorded
+    values the answer is False.  An earlier version compared whatever history
+    existed, which for the first ``W`` iterations degenerates to a
+    single-iteration test and is roughly ``W/2`` times stricter than the
+    quantity ``tol_rel_objective`` is calibrated against.  On c4's recorded
+    series the per-iteration relative decrease is 4.7e-5 and the 20-iteration
+    one is ~9.4e-4, so the shrinking form stopped the run after **one**
+    iteration at the campaign's ``tol = 1e-4`` while the windowed form
+    correctly does not stop at all.
+
+    Signed, not absolute: an objective that *increased* has a negative relative
+    decrease and stops the loop, because "no longer making progress" is the
+    condition being tested, not "moved by less than tol".  That is also why the
+    window has to be full first -- a single non-improving iterate must not end
+    a run.
+    """
+    values = [float(v) for v in series if v is not None and np.isfinite(float(v))]
+    n = len(values)
+    w = int(window or 0)
+    if w < 2 or n < w:
+        return False
+    segment = np.asarray(values[n - w :], dtype=float)
+    half = w // 2
+    mean = float(np.mean(segment))
+    if mean == 0.0:
+        return False
+    first = float(np.mean(segment[:half]))
+    second = float(np.mean(segment[half:]))
+    return ((first - second) / abs(mean)) < float(tol)
+
+
+def stationarity_max(algorithm, grad, state, problem, scale) -> float:
+    """``max_j |mhat_j| / gamma_j`` over the rows strictly inside their bounds.
+
+    ``gamma`` (``scale``) is the annualised capital cost of each row, so the
+    quantity is "how far this row's marginal value is from its own capex", in
+    units of that capex, and ``tol_stationarity = 0.02`` reads as "every
+    interior row is within 2 % of break-even".  Rows at a bound are excluded:
+    the KKT condition there is an inequality, and 127 of the 166 rows on
+    ``ca2040_z4`` are frozen at ``lower == upper``.
+    """
+    from .trackers import active_set
+
+    smoothed = {}
+    fn = getattr(algorithm, "smoothed_gradient", None)
+    if fn is not None:
+        try:
+            smoothed = fn() or {}
+        except Exception:  # noqa: BLE001  # pragma: no cover - never fail a solve
+            smoothed = {}
+
+    masks = active_set(state, problem)
+    worst = 0.0
+    seen = False
+    for param, mask in masks.items():
+        free = mask["free"]
+        if not np.any(free):
+            continue
+        if param not in scale:
+            # No annualised capex for this parameter at all: there is nothing to
+            # measure its gradient against, so it is skipped.  Scaling it by 1.0
+            # instead would compare a $/MW-yr gradient to a dimensionless
+            # tolerance and make `tol_stationarity` unreachable.
+            continue
+        g = _numpy(smoothed[param]) if param in smoothed else _numpy(grad[param])
+        gamma = np.abs(_numpy(scale[param]))
+        # A row with no capital cost has no scale to be measured against; it is
+        # left out rather than divided by zero.
+        usable = free & np.isfinite(gamma) & (gamma > 0.0)
+        if not np.any(usable):
+            continue
+        seen = True
+        worst = max(worst, float(np.max(np.abs(g[usable]) / gamma[usable])))
+    return worst if seen else float("nan")
+
+
+def _record_stationarity(history, problem, algorithm, grad, state, scale):
+    """Append this iteration's stationarity measure to ``history`` and return it."""
+    if scale is None:
+        return None
+    value = stationarity_max(algorithm, grad, state, problem, scale)
+    history.setdefault("stationarity_max", []).append(value)
+    return None if not np.isfinite(value) else value
 
 
 def get_next_batch(batch, batch_size, num_subproblems):

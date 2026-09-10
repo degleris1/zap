@@ -1,0 +1,46 @@
+# Step-rule ablation A4 (memory/plans/2026-09-10-step-rule-spec.md section 4):
+# CAPEX-PRECONDITIONED gradient descent, cell 4's system, 200 iterations.
+#
+#   eta <- eta - alpha * g / gamma,   alpha in MW, gamma in $/MW-yr
+#
+# Kamran's own proposal, and worth measuring: it fixes the units (alpha is in
+# MW, the ratio is dimensionless) and much of the cross-technology
+# conditioning. It is not admissible as the primary rule for two reasons that
+# this run should make visible: g/gamma is about -10 under VOLL scarcity, so
+# the first step is still ten times nominal, and it divides by gamma, which is
+# zero for any row with no capital cost (`capex_scaled.floor` is the guard).
+#
+# No `stopping` tolerances: an ablation compares rules at a fixed iteration
+# count, so nothing may stop early.
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_gradient.yaml
+  - ../selection/all_weeks.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_a4_capex_scaled
+dataset: {years: [2020], window: {start: 7, stop: 8743}}
+system: {demand_scaling: none, export_mode: drop}
+planning:
+  dispatch_solver: HIGHS
+  dispatch_solver_kwargs: {verbose: false}
+  num_workers: 12
+  timeout_s: 7200
+  warm_start: {enabled: true, num_blocks: 12, solver: HIGHS}
+  optimizer:
+    rule: capex_scaled
+    step_size: 200.0            # alpha, MW per unit of g/gamma
+    adam: {max_step_mw: 600.0}  # the per-row MW cap is shared by every rule
+    capex_scaled: {floor: 1.0}  # $/MW-yr floor on gamma (it divides)
+    lr_decay: none
+    num_iterations: 200
+    batch_size: 0
+    batch_strategy: sequential
+    max_seconds: 3600
+    design_selection: best_checkpointed
+    checkpoint_every: 20
+    save_param_history: true
+    grad_history_every: 10
+output: {save_iterations: true}

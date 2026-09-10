@@ -1,0 +1,68 @@
+# Phase-2 campaign, cell 5' (c5b): STOCHASTIC gradient descent with the ADAM
+# step rule (memory/plans/2026-09-10-step-rule-spec.md).
+#
+# Identical to `plan_z4_2020_c5_sgd_b4.yaml` except for `planning.optimizer`,
+# and identical to cell 4' (`plan_z4_2020_c4b_adam.yaml`) except for
+# `batch_size` / `batch_strategy` / `num_workers` / `num_iterations`. Same rule,
+# same hyper-parameters: deterministic-vs-stochastic is not confounded by the
+# optimiser.
+#
+# Adam self-scales under minibatch noise without being told to: with per-row
+# gradient SNR s, sqrt(vhat) ~ sigma, so the step is about `step_size * s`.
+# c5's measured SNR is 0.20-0.42, so this cell automatically takes ~0.3x cell
+# 4's step at 1/7 of the per-iteration cost -- hence `num_iterations: 6000`
+# against cell 4's 800. Wall clock (`max_seconds: 3600`) is the binding budget
+# in both.
+#
+# `checkpoint_every: 20`: the per-iteration loss is a 4-block estimate with
+# sigma ~ 1 B$ against a true per-iteration decrease of ~0.3 M$ (SNR 3e-4), so
+# both the design selection and the objective-plateau stop must run on the
+# checkpoint series. If the checkpoints exceed ~20 % of wall clock, raise this
+# to 100 and say so on the run card.
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_gradient.yaml
+  - ../selection/all_weeks.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_c5b_adam
+dataset: {years: [2020], window: {start: 7, stop: 8743}}
+system: {demand_scaling: none, export_mode: drop}
+planning:
+  dispatch_solver: HIGHS
+  dispatch_solver_kwargs: {verbose: false}
+  num_workers: 4
+  timeout_s: 7200
+  warm_start: {enabled: true, num_blocks: 12, solver: HIGHS}
+  optimizer:
+    rule: adam
+    step_size: 200.0
+    adam:
+      beta1: 0.9
+      beta2: 0.999
+      eps: 1.0
+      max_step_mw: 600.0
+    lr_decay: cosine
+    lr_decay_final_frac: 0.05
+    num_iterations: 6000
+    batch_size: 4
+    batch_strategy: random
+    max_seconds: 3600
+    design_selection: best_checkpointed
+    checkpoint_every: 20
+    save_param_history: true
+    stopping:
+      # Measured on the CHECKPOINT series, not the per-iteration loss: the
+      # config validator rejects `tol_rel_objective` under a minibatch without
+      # `checkpoint_every > 0` for exactly this reason.
+      tol_rel_objective: 1.0e-4
+      tol_window: 20              # unused here (minibatch); stated for symmetry
+      # In CHECKPOINTS: 5 of them at `checkpoint_every: 20` is a 100-iteration
+      # window, and the test cannot fire before iteration 80. Re-using
+      # `tol_window` here would be 20 checkpoints = 400 iterations.
+      checkpoint_window: 5
+      tol_stationarity: 0.02
+    grad_history_every: 10
+output: {save_iterations: true}

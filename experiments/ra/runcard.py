@@ -301,19 +301,41 @@ def planning_sections(run_dir: Path, cfg: dict, df: pd.DataFrame | None) -> list
         "reported on its own as `carbon_payment_annual`. `lower_bound_raw` is the "
         "warm-start LP optimum, and is only reported when the warm start ran on the "
         "*same* block set as the method it bounds (otherwise its capital cost is "
-        "pro-rated to a different coverage and it is not a bound at all)."
+        "pro-rated to a different coverage and it is not a bound at all).\n\n"
+        "`basis` says what the objective is an objective *of*: `full_window` when "
+        "the sampled blocks tile the whole window, `sampled` (i.e. `in_sample`) "
+        "when they do not -- an annualized *estimate* from the blocks the planner "
+        "saw, which understates the design's true cost on the unseen hours. "
+        "`opex_annual` is reported alongside its two halves, `opex_gross_annual` "
+        "(dispatch at non-negative marginal cost) and `opex_credit_annual` "
+        "(the production credit earned by negative-marginal-cost **generator** rows, "
+        "<= 0), because the net is a small difference of two large numbers wherever a "
+        "PTC-priced row is in the fleet. `opex_credit_annual` is generator-only, so it "
+        "means the same thing as the block-level `generation_credit`; export revenue is "
+        "a different economic object and is reported as `opex_export_rev_annual`, which "
+        "is a component *of* `opex_gross_annual` rather than a third term of the "
+        "identity `opex = gross + credit`."
     )
     lines.append("")
     if records:
         rows = []
         for record in records:
             obj = record.get("objective", {})
+            model = obj.get("operational_model") or {}
             rows.append(
                 {
                     "design_id": record.get("design_id"),
+                    # What the objective is an objective *of*, before its value.
+                    "basis": obj.get("basis"),
+                    "in_sample": obj.get("in_sample"),
+                    "block_size": model.get("block_size"),
+                    "n_blocks_obj": model.get("n_blocks"),
                     "objective_annual": obj.get("annual"),
                     "capex_annual": obj.get("capex_annual"),
                     "opex_annual": obj.get("opex_annual"),
+                    "opex_gross_annual": obj.get("opex_gross_annual"),
+                    "opex_credit_annual": obj.get("opex_credit_annual"),
+                    "opex_export_rev_annual": obj.get("opex_export_revenue_annual"),
                     "carbon_payment_annual": obj.get("carbon_payment_annual"),
                     "emissions_t_annual": obj.get("emissions_tonnes_annual"),
                     "objective_raw": obj.get("raw"),

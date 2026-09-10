@@ -1,0 +1,66 @@
+# Step-rule ablation A3 (memory/plans/2026-09-10-step-rule-spec.md section 4):
+# TRUST REGION, cell 4's system, 200 iterations -- the deterministic upper
+# bound.
+#
+# F is an LP value function plus linear capex, i.e. convex piecewise linear,
+# and at c4's 13 MW steps the curvature is under 0.5 % of the decrease: the
+# ratio of realised to first-order-predicted decrease is 0.994-1.006 at every
+# sampled iteration of c4, so this radius expands (x2) on essentially every
+# iteration up to `max_radius_mw`. That is the best any step rule can do here
+# with one gradient per iteration, which is exactly why it is the yardstick
+# and not the campaign rule.
+#
+# It is inadmissible under a minibatch -- rho needs the TRUE decrease, and a
+# 4-block estimate has sigma ~ 1 B$ against a true decrease of ~0.3 M$ (SNR
+# 3e-4) -- so `config.validate` rejects `rule: trust_region` with
+# `batch_size > 0`. Cell 4 only.
+#
+# No `stopping` tolerances: an ablation compares rules at a fixed iteration
+# count, so nothing may stop early.
+includes:
+  - ../base.yaml
+  - ../datasets/ca2040_z4.yaml
+  - ../networks/z4_full.yaml
+  - ../methods/plan_gradient.yaml
+  - ../selection/all_weeks.yaml
+  - ../heuristics/none.yaml
+  - ../emissions/none.yaml
+name: plan_z4_2020_a3_trust_region
+dataset: {years: [2020], window: {start: 7, stop: 8743}}
+system: {demand_scaling: none, export_mode: drop}
+planning:
+  dispatch_solver: HIGHS
+  dispatch_solver_kwargs: {verbose: false}
+  num_workers: 12
+  timeout_s: 7200
+  warm_start: {enabled: true, num_blocks: 12, solver: HIGHS}
+  optimizer:
+    rule: trust_region
+    # `step_size` / `clip` are ignored by this rule and are not set here; the
+    # radius is the only knob, and it is the REALISED step in MW: the rule
+    # normalises over the projected gradient, so ||eta - eta_prev||_2 is the
+    # radius exactly (before the box projection, which can only shorten it).
+    trust_region:
+      initial_radius_mw: 50.0
+      # rho is ~1 on this objective, so the radius doubles nearly every
+      # iteration and reaches this ceiling in ~7 -- which makes the ceiling, not
+      # the initial radius, the setting that matters. 5 GW of L2 movement per
+      # iteration is ~2.4 % of z4-2020's ~209 GW fleet, and spread over the ~39
+      # rows that are free it is ~800 MW/row, the low end of the Newton steps
+      # measured on c4 (700-13,500 MW/row). If the run saturates here for most
+      # of its length, raise it and say so on the card.
+      max_radius_mw: 5.0e+3
+      min_radius_mw: 1.0e-3
+      eta_low: 0.1
+      eta_high: 0.9
+      expand: 2.0
+      shrink: 0.5
+    num_iterations: 200
+    batch_size: 0
+    batch_strategy: sequential
+    max_seconds: 3600
+    design_selection: best_checkpointed
+    checkpoint_every: 20
+    save_param_history: true
+    grad_history_every: 10
+output: {save_iterations: true}

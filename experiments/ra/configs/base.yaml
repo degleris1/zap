@@ -82,8 +82,68 @@ planning:                   # `mode: plan` only (WP5 spec 8.1)
     # iteration moves exactly step_size * clip: 0.2 * 5e3 = 1,000 MW per
     # step, ~0.5 % of z4-2020's ~209 GW fleet. The old (1e-3, 1e+3) pair allowed
     # 1 MW per iteration and made the gradient method a no-op.
+    # Which STEP RULE turns the gradient into a capacity move
+    # (memory/plans/2026-09-10-step-rule-spec.md). `gradient` is the historical
+    # normalised-clipped rule and stays the default, so every config written
+    # before 2026-09-10 keeps its behaviour bit-for-bit.
+    #   gradient      eta <- eta - step_size * clip * g/||g||   (step_size is MW^2/$)
+    #   adam          eta <- eta - step_size * mhat/(sqrt(vhat)+eps)  (step_size is MW)
+    #   adagrad       Adam with no first moment (fallback; no momentum under noise)
+    #   capex_scaled  eta <- eta - step_size * g/gamma           (ablation A4)
+    #   trust_region  steepest descent inside an adaptive radius (ablation A3,
+    #                 deterministic only: rho needs the true decrease)
+    # The `gradient` rule normalises over ALL coordinates; on ca2040_z4 127 of
+    # 166 rows are structurally frozen and carry 98.7 % of the gradient norm, so
+    # a reported 1,000 MW step moved the design by 13 MW.
+    rule: gradient
     step_size: 0.2
     clip: 5.0e+3
+    adam:
+      beta1: 0.9
+      beta2: 0.999
+      # $/MW-yr -- the UNITS OF THE GRADIENT, not the ML default 1e-8. It is the
+      # gradient magnitude below which a row is treated as numerical dust; at
+      # 1e-8 such a row still takes a full `step_size` MW step (the ADMM-rho
+      # units trap again, LESSONS 2026-09-09).
+      eps: 1.0
+      max_step_mw: null     # null -> 3 * step_size; a hard per-row cap, in MW
+    lr_decay: none          # none | cosine | inverse_sqrt (per-coordinate rules)
+    lr_decay_final_frac: 0.05
+    capex_scaled: {floor: 1.0}      # $/MW-yr floor on gamma (it divides)
+    trust_region:
+      initial_radius_mw: 50.0
+      max_radius_mw: 5.0e+3
+      min_radius_mw: 1.0e-3
+      eta_low: 0.1
+      eta_high: 0.9
+      expand: 2.0
+      shrink: 0.5
+    # Convergence tests. All null = off, i.e. `num_iterations` / `max_seconds`
+    # are the only stops (the pre-2026-09-10 behaviour). `stop_reason` /
+    # `stopped_by` on the run card say which one fired.
+    stopping:
+      # Relative decrease of the objective across a `tol_window` window, below
+      # which the loop stops. A deterministic cell measures it on the sampled
+      # loss (which IS the full loss); a minibatch cell must have
+      # `checkpoint_every > 0` and measures it on the checkpoint series.
+      tol_rel_objective: null
+      # Window of the plateau test in ITERATIONS (full-batch cells) and in
+      # CHECKPOINTS (minibatch cells). The test does NOT fire before its window
+      # is full: on c4's recorded series the per-iteration relative decrease is
+      # 4.7e-5 and the 20-iteration one ~9.4e-4, so a window that shrinks to fit
+      # would stop the run after ONE iteration at tol = 1e-4.
+      tol_window: 20
+      checkpoint_window: 5      # 5 checkpoints at checkpoint_every: 20 = 100 iterations
+      # max_j |mhat_j| / gamma_j over rows strictly inside their bounds, with
+      # gamma = annualised capex: "every interior row's marginal value is within
+      # this fraction of its own break-even". 0.02 is the campaign value.
+      tol_stationarity: null
+    # 0 = off. Period, in iterations, of the per-row gradient table
+    # iterations/<task>.iteration_gradient.parquet (gradient, step, Adam moments
+    # and the active set, one row per parameter row). Every number in the
+    # step-rule diagnosis had to be back-solved from the param history because
+    # this table did not exist.
+    grad_history_every: 0
     batch_size: 0           # 0 -> all subproblems
     batch_strategy: sequential   # sequential | fixed | random
     init_full_loss: true
@@ -103,6 +163,9 @@ planning:                   # `mode: plan` only (WP5 spec 8.1)
     # (batch_size: 0); with a minibatch, argmin over the sampled losses picks
     # the luckiest batch, so use `best_checkpointed` (full-horizon forward pass
     # every `checkpoint_every` iterations, plus the first and last iterate).
+    # `best_sampled` / `best_rolling` together with batch_size > 0 is a
+    # ConfigError, not a warning: the spread across 4-week batches on z4-2020
+    # is ~1 B$ (sigma), which swamps the differences between iterates.
     design_selection: best_sampled
     checkpoint_every: 0     # 0 = none; > 0 required by best_checkpointed
     eval_final_full_loss: false  # DEPRECATED and ignored; setting it true is a ConfigError

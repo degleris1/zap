@@ -88,10 +88,29 @@ def serialize_history(history: dict) -> dict:
             return x.tolist()
         return list(x)
 
+    def _nested(x):
+        # `grad_sampled` / `opt_moments` / `opt_diag` are per-iteration mappings
+        # that are `None` on the iterations where nothing was recorded
+        # (`optimizer.grad_history_every`), and `opt_moments` is a mapping OF
+        # mappings, so neither `_scalar` nor `_snapshot` covers them.
+        if x is None:
+            return None
+        if isinstance(x, dict):
+            return {str(k): _nested(v) for k, v in x.items()}
+        if hasattr(x, "detach"):
+            x = x.detach().cpu().numpy()
+        if isinstance(x, np.ndarray):
+            return float(x.item()) if x.size == 1 else x.tolist()
+        if hasattr(x, "tolist"):
+            return x.tolist()
+        return x
+
     serialized: dict = {}
     for key, values in history.items():
         if key in ("param", "batch"):
             serialized[key] = [_snapshot(snapshot) for snapshot in values]
+        elif key in ("grad", "grad_sampled", "opt_moments", "opt_diag"):
+            serialized[key] = [_nested(x) for x in values]
         else:
             serialized[key] = [_scalar(x) for x in values]
     return serialized

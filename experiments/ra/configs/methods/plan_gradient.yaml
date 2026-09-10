@@ -31,3 +31,11 @@ planning:
     clip: 5.0e+3
     batch_size: 4
     batch_strategy: random
+    # `batch_size: 4` above makes every iteration's loss a 4-block estimate of
+    # the objective, so `best_sampled` / `best_rolling` would select the
+    # luckiest batch (sigma ~ 1 B$ across 4-week batches on z4-2020) and
+    # `config.validate` rejects them here. `best_checkpointed` compares
+    # full-horizon forward passes instead; a preset that sets `batch_size: 0`
+    # may go back to `best_sampled`, which is then exact.
+    design_selection: best_checkpointed
+    checkpoint_every: 20

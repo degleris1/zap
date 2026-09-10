@@ -63,8 +63,73 @@ PLANNING_DEFAULTS: dict = {
     # 1 MW per iteration and made the method a no-op (WP5 verification).
     "optimizer": {
         "num_iterations": 100,
+        # Which step rule turns the gradient into a capacity move.  `gradient`
+        # is the historical normalised-clipped rule and stays the default so
+        # that every existing config keeps its behaviour bit-for-bit; `adam` is
+        # the phase-2 rule, whose `step_size` is a learning rate in MW.
+        #   gradient      -- eta <- eta - step_size * clip * g / ||g||
+        #   adam          -- eta <- eta - step_size * mhat / (sqrt(vhat) + eps)
+        #   adagrad       -- Adam with no first moment (the fallback)
+        #   capex_scaled  -- eta <- eta - step_size * g / gamma (ablation A4)
+        #   trust_region  -- steepest descent inside an adaptive radius (A3)
+        "rule": "gradient",
+        # `gradient`: the MW^2/$ step and the norm cap.
+        # `adam` / `adagrad` / `capex_scaled` / `trust_region`: `step_size` is
+        # the learning rate / radius, in MW per coordinate per iteration, and
+        # `clip` is ignored.
         "step_size": 0.2,
         "clip": 5.0e3,
+        "adam": {
+            "beta1": 0.9,
+            "beta2": 0.999,
+            # $/MW-yr, NOT the ML default 1e-8: `eps` is in the units of the
+            # gradient and sets the magnitude below which a row's gradient is
+            # treated as numerical dust.  At 1e-8 such a row still takes a full
+            # `step_size` step.
+            "eps": 1.0,
+            # null -> 3 * step_size.  A hard per-row cap in MW, which is what
+            # makes the first iteration un-spikeable from any starting point.
+            "max_step_mw": None,
+        },
+        # Learning-rate schedule for the per-coordinate rules (MW).
+        "lr_decay": "none",  # none | cosine | inverse_sqrt
+        "lr_decay_final_frac": 0.05,
+        "capex_scaled": {"floor": 1.0},
+        "trust_region": {
+            "initial_radius_mw": 50.0,
+            "max_radius_mw": 5.0e3,
+            "min_radius_mw": 1.0e-3,
+            "eta_low": 0.1,
+            "eta_high": 0.9,
+            "expand": 2.0,
+            "shrink": 0.5,
+        },
+        # Convergence tests; all null = off, i.e. `num_iterations` /
+        # `max_seconds` are the only stops (the pre-2026-09-10 behaviour).
+        "stopping": {
+            # Relative decrease of the objective over a `tol_window` window,
+            # below which the loop stops.  Deterministic cells measure it on
+            # the sampled loss (which IS the full loss); a minibatch cell
+            # measures it on the checkpoint series instead, so it needs
+            # `checkpoint_every > 0`.
+            "tol_rel_objective": None,
+            # Window of the plateau test, in ITERATIONS, for a full-batch cell
+            # whose per-iteration loss is the full-horizon objective.  The test
+            # does not fire before the window is full.
+            "tol_window": 20,
+            # Window of the same test in CHECKPOINTS for a minibatch cell, whose
+            # only full-horizon series is the checkpoints.  5 checkpoints at
+            # `checkpoint_every: 20` is 100 iterations; re-using `tol_window`
+            # here would be 20 checkpoints = 400 iterations.
+            "checkpoint_window": 5,
+            # max_j |mhat_j| / gamma_j over interior rows, gamma = annualised
+            # capex: "every interior row is within this fraction of its own
+            # break-even".
+            "tol_stationarity": None,
+        },
+        # 0 = off.  Period, in iterations, of the per-row gradient table
+        # `iterations/<task>.iteration_gradient.parquet`.
+        "grad_history_every": 0,
         "batch_size": 0,
         "batch_strategy": "sequential",
         "init_full_loss": True,
@@ -338,24 +403,43 @@ class PlanningResult:
         """
         obj = dict(objective or {})
         af = float(ctx.annualization_factor)
-        for key in (
-            "raw",
-            "capex_raw",
-            "opex_raw",
-            "emissions_tonnes_raw",
-            "carbon_payment_raw",
-        ):
-            annual_key = {
-                "raw": "annual",
-                "capex_raw": "capex_annual",
-                "opex_raw": "opex_annual",
-                "emissions_tonnes_raw": "emissions_tonnes_annual",
-                "carbon_payment_raw": "carbon_payment_annual",
-            }[key]
+        annual_keys = {
+            "raw": "annual",
+            "capex_raw": "capex_annual",
+            "opex_raw": "opex_annual",
+            # The two halves of `opex_raw`: gross dispatch cost and the credit
+            # earned by negative-marginal-cost rows (<= 0).  They annualize the
+            # same way, so the identity survives the scaling.
+            "opex_gross_raw": "opex_gross_annual",
+            "opex_credit_raw": "opex_credit_annual",
+            # A component *of* `opex_gross_raw`, not a third term of the
+            # identity: the negative-price part contributed by export links.
+            "opex_export_revenue_raw": "opex_export_revenue_annual",
+            "emissions_tonnes_raw": "emissions_tonnes_annual",
+            "carbon_payment_raw": "carbon_payment_annual",
+        }
+        for key, annual_key in annual_keys.items():
             if obj.get(key) is not None and obj.get(annual_key) is None:
                 obj[annual_key] = float(obj[key]) * af
 
         meta = dict(ctx.meta)
+
+        # Say, on the design itself, what the objective is an objective *of*.
+        # A sampled block set makes `annual` an in-sample extrapolation of the
+        # sampled blocks, not the objective of the design over the full window
+        # (a 12-random-week LP on z4-2020 reported 1,072 M$ of annual opex where
+        # the full-window evaluation of the same design was 767 M$).  Nothing
+        # downstream can tell the two apart from the number alone, so the design
+        # carries the flag.
+        selection_meta = dict(meta.get("selection", {}) or {})
+        block_size = selection_meta.get("block_size")
+        obj["basis"] = "full_window" if ctx.coverage >= 1.0 else "sampled"
+        obj["in_sample"] = bool(ctx.coverage < 1.0)
+        obj["operational_model"] = {
+            "block_size": int(block_size) if block_size is not None else int(ctx.total_hours),
+            "n_blocks": len(ctx.blocks),
+            "storage_soc_mode": meta.get("storage_soc_mode"),
+        }
         return cls(
             design_id=design_id,
             method=method,
@@ -531,6 +615,12 @@ class PlanningMethod(abc.ABC):
             "weights": None,
         }
         meta["emissions"] = objectives.emissions_record(self.cfg, af)
+        # `system.meta` already carries the mode the system was *built* with;
+        # prefer the config when it states one, so `PlanningResult.from_context`
+        # can report the operational model without re-reading the config.
+        soc_mode = (self.cfg.get("system") or {}).get("storage_soc_mode")
+        if soc_mode is not None:
+            meta["storage_soc_mode"] = str(soc_mode)
         meta["bounds"] = {
             "min_capacity_mw": float(bounds_cfg["min_capacity_mw"]),
             "min_storage_mw": float(bounds_cfg["min_storage_mw"]),

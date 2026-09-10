@@ -7,6 +7,7 @@ on that dict, so the aggregation path is testable without a solver.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from collections.abc import Iterable, Sequence
@@ -24,6 +25,15 @@ logger = logging.getLogger(__name__)
 ADDITIVE_METRICS = (
     "operational_cost",
     "generation_cost",
+    # `generation_cost` is a small difference of two large numbers whenever a
+    # generator carries a negative marginal cost (the 2040 `onwind` rows on
+    # ca2040_z4 are priced at -12.76 $/MWh, a PTC credit worth ~-2.3 B$/yr
+    # against ~2.4 B$/yr of gross dispatch cost).  Reporting only the net makes
+    # a large modelling change look like a rounding error, so the two halves are
+    # carried alongside it: `generation_cost_gross + generation_credit ==
+    # generation_cost` by construction, and `generation_credit <= 0`.
+    "generation_cost_gross",
+    "generation_credit",
     "voll_cost",
     "export_revenue",
     "unserved_energy_mwh",
@@ -124,6 +134,61 @@ def _row_sum(x) -> np.ndarray:
     return np.asarray(x, dtype=np.float64).sum(axis=1)
 
 
+def numpy_device(device):
+    """A shallow copy of ``device`` whose torch tensors are numpy arrays.
+
+    ``methods/admm.py`` torchifies every block device (``AbstractDevice.torchify``
+    converts each numeric ndarray in ``__dict__`` and sets ``torched = True``), so
+    a torchified device's ``min_power`` / ``nominal_capacity`` are tensors and
+    ``Injector.operation_cost(..., la=np)`` does ``numpy_power - Tensor`` and
+    raises ``TypeError`` (verifier V-S3-1: the ADMM half of the campaign lost the
+    opex split to the caller's ``except``).  Evaluating cost in numpy therefore
+    needs a numpy device as well as a numpy state.  Detection is by duck typing
+    (``.detach``) so this module keeps its numpy-only imports.
+    """
+    clone = copy.copy(device)
+    try:
+        attributes = vars(device)
+    except TypeError:  # pragma: no cover - a __slots__ device; torchify warns too
+        return clone
+    converted = {k: v.detach().cpu().numpy() for k, v in attributes.items() if hasattr(v, "detach")}
+    if converted:
+        # Assign through __dict__ so attrs converters / validators do not fire.
+        clone.__dict__.update(converted)
+        clone.__dict__["torched"] = False
+    return clone
+
+
+def negative_cost_credit(device, power, angle=None, local_variables=None) -> float:
+    """The part of ``device.operation_cost`` earned at a **negative** price (<= 0).
+
+    Every zap device's operation cost is affine in its ``linear_cost``, so the
+    negative-price part is ``cost(min(o, 0)) - cost(0)``: the difference cancels
+    any quadratic or constant term, and the caller recovers the gross part
+    exactly as ``total - credit`` whatever the device class.  Returns ``0.0``
+    for a device with no ``linear_cost`` or no negative coefficient in it, so
+    the split is the identity on a system without credits.
+
+    ``power`` / ``angle`` / ``local_variables`` must already be numpy; the device
+    is converted here, so a torchified (ADMM) device is handled too.
+    """
+    lc = getattr(device, "linear_cost", None)
+    if lc is None:
+        return 0.0
+    lc = _to_numpy(lc)
+    if lc is None or lc.size == 0 or not np.any(lc < 0.0):
+        return 0.0
+
+    base = numpy_device(device)
+
+    def _cost(values) -> float:
+        clone = copy.copy(base)
+        clone.__dict__["linear_cost"] = values
+        return float(clone.operation_cost(power, angle, local_variables, la=np))
+
+    return _cost(np.minimum(lc, 0.0)) - _cost(np.zeros_like(lc))
+
+
 def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
     """Metrics of one solved block. ``loaded`` may be None (only the index is used)."""
     index = getattr(loaded, "index", None)
@@ -158,9 +223,37 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
     else:  # pragma: no cover - only when a caller has no network handle
         operational_cost = float(np.nansum(per_device_cost))
 
+    generator_rows = groups.get("Generator", [])
+    generation_cost = float(sum(per_device_cost[i] for i in generator_rows))
+    # Negative-marginal-cost generation (a PTC credit, say) nets against gross
+    # dispatch cost inside `generation_cost`; report both halves so a design
+    # change that moves 100 M$ of gross cost is visible even when the net moves
+    # by 1 M$.  `credit` is derived and `gross` is the residual, so the identity
+    # `gross + credit == generation_cost` is exact by construction.
+    generation_credit = 0.0
+    for i in generator_rows:
+        try:
+            generation_credit += negative_cost_credit(
+                devices[i], power[i], angle[i], local_vars[i]
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "negative_cost_credit failed for %s: %s",
+                device_class(devices[i]),
+                exc,
+                exc_info=True,
+            )
+            failures[f"negative_cost_credit:{device_class(devices[i])}"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            generation_credit = float("nan")
+            break
+
     metrics: dict[str, Any] = {
         "operational_cost": operational_cost,
-        "generation_cost": float(sum(per_device_cost[i] for i in groups.get("Generator", []))),
+        "generation_cost": generation_cost,
+        "generation_cost_gross": generation_cost - generation_credit,
+        "generation_credit": generation_credit,
         "voll_cost": float(sum(per_device_cost[i] for i in groups.get("Load", []))),
         "hours": int(block.hours),
     }
@@ -384,7 +477,14 @@ def block_metrics(loaded, devices: Sequence, outcome, block) -> dict[str, Any]:
 #: Metrics denominated in money (scaled by ``cost_unit * power_unit``), in power
 #: or energy (``power_unit``), and in price (``cost_unit``). Everything else --
 #: hours, counts, ratios such as ``storage_cycles`` -- is unit-invariant.
-_MONEY_METRICS = ("operational_cost", "generation_cost", "voll_cost", "export_revenue")
+_MONEY_METRICS = (
+    "operational_cost",
+    "generation_cost",
+    "generation_cost_gross",
+    "generation_credit",
+    "voll_cost",
+    "export_revenue",
+)
 _ENERGY_METRICS = (
     "unserved_energy_mwh",
     "demand_mwh",
@@ -1072,9 +1172,15 @@ def planning_metrics(result) -> dict[str, Any]:
         "capex_annual": objective.get("capex_annual"),
         "opex_annual": objective.get("opex_annual"),
         "emissions_tonnes_annual": objective.get("emissions_tonnes_annual"),
+        "opex_gross_annual": objective.get("opex_gross_annual"),
+        "opex_credit_annual": objective.get("opex_credit_annual"),
+        "opex_export_revenue_annual": objective.get("opex_export_revenue_annual"),
         "objective_raw": objective.get("raw"),
         "capex_raw": objective.get("capex_raw"),
         "opex_raw": objective.get("opex_raw"),
+        "opex_gross_raw": objective.get("opex_gross_raw"),
+        "opex_credit_raw": objective.get("opex_credit_raw"),
+        "opex_export_revenue_raw": objective.get("opex_export_revenue_raw"),
         "emissions_tonnes_raw": objective.get("emissions_tonnes_raw"),
         "lower_bound_raw": objective.get("lower_bound_raw"),
         "optimality_gap": objective.get("optimality_gap"),
@@ -1098,6 +1204,16 @@ def planning_metrics(result) -> dict[str, Any]:
     # Which iterate the design came from and why the loop stopped (empty for the
     # single-level presets, which have neither).
     solver = result.solver or {}
+    # What the objective is an objective *of*: a sampled block set makes
+    # `objective_annual` an in-sample extrapolation, not the design's cost over
+    # the full window.
+    operational_model = objective.get("operational_model") or {}
+    metrics["objective_basis"] = objective.get("basis")
+    metrics["objective_in_sample"] = objective.get("in_sample")
+    metrics["objective_block_size"] = operational_model.get("block_size")
+    metrics["objective_n_blocks"] = operational_model.get("n_blocks")
+    metrics["objective_storage_soc_mode"] = operational_model.get("storage_soc_mode")
+
     metrics["design_selection"] = objective.get("design_selection")
     metrics["design_iteration"] = objective.get("design_iteration")
     metrics["num_iterations_completed"] = solver.get("num_iterations_completed")

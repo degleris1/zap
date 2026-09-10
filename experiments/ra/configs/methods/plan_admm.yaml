@@ -21,4 +21,12 @@ planning:
     # block merges OVER base.yaml, so the value has to be restated here.
     solver_kwargs: {num_iterations: 1000, rho_power: 0.1, minimum_iterations: 100}
   warm_start: {enabled: false}
-  optimizer: {num_iterations: 100, batch_size: 4, batch_strategy: random}
+  # `batch_size: 4` makes each iteration's loss a 4-block estimate, so
+  # `best_sampled` / `best_rolling` are a ConfigError here (they would pick the
+  # luckiest batch); `best_checkpointed` compares full-horizon forward passes.
+  optimizer:
+    num_iterations: 100
+    batch_size: 4
+    batch_strategy: random
+    design_selection: best_checkpointed
+    checkpoint_every: 20

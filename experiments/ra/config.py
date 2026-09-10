@@ -82,6 +82,13 @@ VALID_EMISSIONS_MODES = ("none", "price", "cap", "dual_ascent")
 VALID_CAP_BASIS = ("annual", "horizon")
 VALID_BATCH_STRATEGIES = ("sequential", "fixed", "random")
 VALID_DESIGN_SELECTION = ("final", "best_sampled", "best_rolling", "best_checkpointed")
+#: `planning.optimizer.rule` -- the step rule of the descent loop
+#: (`memory/plans/2026-09-10-step-rule-spec.md`).  `gradient` is the historical
+#: normalised-clipped rule and is the default so that nothing changes silently.
+VALID_STEP_RULES = ("gradient", "adam", "adagrad", "capex_scaled", "trust_region")
+VALID_LR_DECAYS = ("none", "cosine", "inverse_sqrt")
+#: The rules whose `step_size` is a learning rate in MW per coordinate.
+PER_COORDINATE_RULES = ("adam", "adagrad", "capex_scaled")
 VALID_MACHINES = ("cpu", "cuda", "mps")
 
 #: ``execution.task_granularity`` values (WP-E3): one task per block solve, or
@@ -424,6 +431,119 @@ def _normalize_planning(plan: dict) -> None:
         plan["budget_constraints"] = str(plan["budget_constraints"])
 
 
+def _validate_step_rule(plan: dict, opt: dict) -> None:
+    """Validate ``planning.optimizer``'s step rule and convergence block.
+
+    The defaults reproduce the pre-2026-09-10 behaviour exactly (``rule:
+    gradient``, every tolerance null, ``grad_history_every: 0``), so a config
+    that says nothing about any of this is unaffected -- except for its **run
+    id**, which changes because ``identity.py`` hashes the whole config surface
+    including keys a run never reads.
+    """
+    rule = opt["rule"]
+    if rule not in VALID_STEP_RULES:
+        raise ConfigError(
+            f"planning.optimizer.rule must be one of {VALID_STEP_RULES}, got {rule!r}"
+        )
+    if opt["lr_decay"] not in VALID_LR_DECAYS:
+        raise ConfigError(
+            f"planning.optimizer.lr_decay must be one of {VALID_LR_DECAYS}, "
+            f"got {opt['lr_decay']!r}"
+        )
+    if not (0.0 < float(opt["lr_decay_final_frac"]) <= 1.0):
+        raise ConfigError(
+            "planning.optimizer.lr_decay_final_frac must be in (0, 1], got "
+            f"{opt['lr_decay_final_frac']!r}"
+        )
+    if float(opt["step_size"]) <= 0.0:
+        raise ConfigError(
+            f"planning.optimizer.step_size must be positive, got {opt['step_size']!r}"
+        )
+    if rule in PER_COORDINATE_RULES and float(opt["step_size"]) > 1.0e5:
+        raise ConfigError(
+            f"planning.optimizer.step_size is {opt['step_size']} with rule {rule!r}, where it "
+            "is a per-coordinate learning rate in MW per iteration, not the MW^2/$ step of "
+            "rule 'gradient'. A value above 1e5 MW/iteration is almost certainly a setting "
+            "carried over from the 'gradient' rule."
+        )
+    adam = opt["adam"]
+    if not (0.0 <= float(adam["beta1"]) < 1.0):
+        raise ConfigError(
+            f"planning.optimizer.adam.beta1 must be in [0, 1), got {adam['beta1']!r}"
+        )
+    if not (0.0 <= float(adam["beta2"]) < 1.0):
+        raise ConfigError(
+            f"planning.optimizer.adam.beta2 must be in [0, 1), got {adam['beta2']!r}"
+        )
+    if float(adam["eps"]) <= 0.0:
+        raise ConfigError(
+            "planning.optimizer.adam.eps must be positive; it is in $/MW-yr (the units of "
+            f"the gradient), not the ML default 1e-8. Got {adam['eps']!r}"
+        )
+    if adam["max_step_mw"] is not None and float(adam["max_step_mw"]) <= 0.0:
+        raise ConfigError(
+            "planning.optimizer.adam.max_step_mw must be null (= 3 * step_size) or a "
+            f"positive number of MW, got {adam['max_step_mw']!r}"
+        )
+    tr = opt["trust_region"]
+    if rule == "trust_region":
+        if float(tr["initial_radius_mw"]) <= 0.0 or float(tr["max_radius_mw"]) <= 0.0:
+            raise ConfigError(
+                "planning.optimizer.trust_region radii must be positive numbers of MW, got "
+                f"initial={tr['initial_radius_mw']!r}, max={tr['max_radius_mw']!r}"
+            )
+        if float(tr["initial_radius_mw"]) > float(tr["max_radius_mw"]):
+            raise ConfigError(
+                f"planning.optimizer.trust_region.initial_radius_mw "
+                f"({tr['initial_radius_mw']}) exceeds max_radius_mw ({tr['max_radius_mw']})"
+            )
+        if not (0.0 <= float(tr["eta_low"]) <= float(tr["eta_high"])):
+            raise ConfigError(
+                "planning.optimizer.trust_region needs 0 <= eta_low <= eta_high, got "
+                f"eta_low={tr['eta_low']!r}, eta_high={tr['eta_high']!r}"
+            )
+        if int(opt["batch_size"]) > 0:
+            raise ConfigError(
+                "planning.optimizer.rule 'trust_region' is not admissible under a minibatch "
+                f"(batch_size = {opt['batch_size']}): the radius update scores the realised "
+                "decrease against the first-order prediction, and a 4-block estimate of the "
+                "objective has sigma ~ 1 B$ against a true per-iteration decrease of ~0.3 M$ "
+                "(SNR 3e-4). Use rule 'adam' for a stochastic cell; trust_region is the "
+                "deterministic-only ablation (spec section 2)."
+            )
+    stopping = opt["stopping"]
+    for key in ("tol_rel_objective", "tol_stationarity"):
+        value = stopping[key]
+        if value is not None and float(value) <= 0.0:
+            raise ConfigError(
+                f"planning.optimizer.stopping.{key} must be null (off) or positive, "
+                f"got {value!r}"
+            )
+    for key in ("tol_window", "checkpoint_window"):
+        if int(stopping[key]) < 2:
+            raise ConfigError(
+                f"planning.optimizer.stopping.{key} must be at least 2 (the window is split "
+                f"into two halves whose means are compared), got {stopping[key]!r}"
+            )
+    if (
+        stopping["tol_rel_objective"] is not None
+        and int(opt["batch_size"]) > 0
+        and int(opt["checkpoint_every"] or 0) <= 0
+    ):
+        raise ConfigError(
+            "planning.optimizer.stopping.tol_rel_objective needs a full-horizon objective "
+            f"series, but batch_size = {opt['batch_size']} makes every iteration's loss a "
+            "minibatch estimate (sigma ~ 1 B$ on ca2040_z4, so a 20-sample window still "
+            "carries ~3.5 % noise). Set checkpoint_every > 0 so the plateau test runs on the "
+            "checkpoint series, or set batch_size: 0."
+        )
+    if int(opt["grad_history_every"]) < 0:
+        raise ConfigError(
+            "planning.optimizer.grad_history_every must be >= 0 (0 = no per-row gradient "
+            f"table), got {opt['grad_history_every']!r}"
+        )
+
+
 def _validate_planning(cfg: dict) -> None:
     """Validate the ``planning`` / ``selection`` keys ``mode: plan`` reads."""
     plan = cfg["planning"]
@@ -500,6 +620,18 @@ def _validate_planning(cfg: dict) -> None:
             "planning.optimizer.save_param_history: true (the chosen iterate is read back "
             "out of the parameter history)."
         )
+    if opt["design_selection"] in ("best_sampled", "best_rolling") and int(opt["batch_size"]) > 0:
+        raise ConfigError(
+            f"planning.optimizer.design_selection {opt['design_selection']!r} is not a valid "
+            f"rule under a minibatch (planning.optimizer.batch_size = {opt['batch_size']}): "
+            "the sampled loss is a noisy estimate of the objective, so its argmin selects the "
+            "luckiest batch, not the best design. The block-to-block spread of a 4-week batch "
+            "on ca2040_z4 WY2020 is about 1 B$ (sigma), which swamps the differences between "
+            "iterates. Use design_selection 'best_checkpointed' with checkpoint_every > 0 "
+            "(each checkpoint is a full-horizon forward pass, so the comparison is unbiased), "
+            "or set batch_size: 0 to make every iteration see the whole block set."
+        )
+    _validate_step_rule(plan, opt)
     if plan["emissions"]["mode"] not in VALID_EMISSIONS_MODES:
         raise ConfigError(
             f"planning.emissions.mode must be one of {VALID_EMISSIONS_MODES}, "
