@@ -19,6 +19,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -33,12 +34,13 @@ from experiments.ra.plots import style as style_mod
 
 CATALOGUE_IDS = (
     tuple(f"O{i}" for i in range(1, 14))
+    + ("O4b",)
     + tuple(f"P{i}" for i in range(1, 10))
     + tuple(f"R{i}" for i in range(1, 8))
 )
 
 PHASE_A_IDS = (
-    "O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "O12", "O13",
+    "O1", "O2", "O3", "O4", "O4b", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "O12", "O13",
     "P1", "P2", "P6",
 )
 
@@ -53,6 +55,9 @@ GOLDEN_COLUMNS = {
            "net_load_gw", "headroom_gw", "headroom_frac", "ens_gw"],
     "O4": ["run_id", "label", "method", "block_size", "year", "hour", "series", "carrier",
            "value_gw"],
+    "O4b": ["run_id", "label", "method", "block_size", "year", "month", "day", "day_index",
+            "hour", "hour_of_day", "series", "carrier", "value_gw", "peak_net_load_gw",
+            "peak_net_load_hour"],
     "O5": ["label_a", "label_b", "year", "hour", "series", "carrier", "value_a_gw",
            "value_b_gw", "diff_gw"],
     "O6": ["run_id", "label", "method", "block_size", "year", "hour", "carrier", "soc_gwh",
@@ -290,8 +295,12 @@ class PlotFixture(unittest.TestCase):
 class TestCatalogue(PlotFixture):
     def test_catalogue_is_complete(self):
         """T12."""
+        # A lettered sub-plot sorts next to its parent, not at the end.
+        self.assertEqual(
+            [p for p in plots_mod.ids() if p.startswith("O4")], ["O4", "O4b"]
+        )
         self.assertEqual(set(plots_mod.PLOTS), set(CATALOGUE_IDS))
-        self.assertEqual(len(plots_mod.PLOTS), 29)
+        self.assertEqual(len(plots_mod.PLOTS), 30)
         for plot_id, spec in plots_mod.PLOTS.items():
             self.assertTrue(spec.title.strip(), plot_id)
             self.assertIn(spec.tier, ("debug", "report"), plot_id)
@@ -650,13 +659,22 @@ class TestStackedPlots(PlotFixture):
             return frame.rename(columns={"value": "available_gw"})
         frame = frame.rename(columns={"value": "value_gw"})
         frame["series"] = "generation"
+        frame.loc[frame["carrier"] == "battery", "series"] = "storage_discharge"
         load = frame[frame["carrier"] == "solar"].assign(
             series="load", carrier="load", value_gw=10.0
         )
-        charge = frame[frame["carrier"] == "solar"].assign(
-            series="storage_charge", carrier="battery", value_gw=1.0
+        charge = pd.concat([
+            frame[frame["carrier"] == "solar"].assign(
+                series="storage_charge", carrier="battery", value_gw=1.0
+            ),
+            frame[frame["carrier"] == "solar"].assign(
+                series="storage_charge", carrier="PHS", value_gw=0.5
+            ),
+        ])
+        exports = frame[frame["carrier"] == "solar"].assign(
+            series="exports", carrier="exports", value_gw=0.25
         )
-        return pd.concat([frame, load, charge], ignore_index=True)
+        return pd.concat([frame, load, charge, exports], ignore_index=True)
 
     def test_stack_order_is_pinned_and_warns_on_unknown_carriers(self):
         order = style_mod.CARRIER_STACK_ORDER
@@ -718,6 +736,164 @@ class TestStackedPlots(PlotFixture):
         fig = operational._o1_figure(short)
         self.assertEqual(len(fig.axes), 1)
         self.assertNotIn(fig.axes[0].get_title(), operational.MONTH_LABELS)
+        plt.close(fig)
+
+    def _legend_labels(self, fig):
+        """The figure's legend labels, wherever the legend lives.
+
+        A monthly grid puts one legend on each group's *subfigure*; the hourly
+        form puts it on the axes.
+        """
+        legends = list(fig.legends)
+        for subfig in getattr(fig, "subfigs", ()):
+            legends.extend(subfig.legends)
+        for ax in fig.axes:
+            if ax.get_legend() is not None:
+                legends.append(ax.get_legend())
+        self.assertTrue(legends, "the figure has no legend at all")
+        return [text.get_text() for text in legends[0].get_texts()]
+
+    def _below_axis(self, ax):
+        """The stacked bands drawn under the axis, outermost value per band."""
+        return [
+            collection
+            for collection in ax.collections
+            if getattr(collection, "get_paths", None)
+            and float(np.min(collection.get_paths()[0].vertices[:, 1])) < 0
+        ]
+
+    def test_charging_is_stacked_below_the_axis_by_carrier(self):
+        """Charging mirrors the stack: one band per carrier, its own colour."""
+        from matplotlib.colors import to_hex
+
+        from experiments.ra.plots import operational
+
+        for build, monthly in ((operational._o4_figure, True), (operational._o4_figure, False)):
+            table = self._year_table("O4")
+            if not monthly:
+                table = table[table["hour"] < 7 + 3 * 168]
+            with self.subTest(monthly=monthly):
+                self.assertEqual(operational.is_monthly_view(table), monthly)
+                fig = build(table)
+                ax = fig.axes[0]
+                below = self._below_axis(ax)
+                colours = [to_hex(c.get_facecolor()[0]) for c in below]
+                # One band per below-axis carrier, in the carrier's own colour and
+                # in the *same* sequence as above the axis (PHS before battery).
+                expected = style_mod.stack_order(["battery", "PHS", "exports"])
+                self.assertEqual(
+                    colours, [to_hex(style_mod.carrier_color(c)) for c in expected]
+                )
+                # ...and hatched, so the sign is readable without a second hue.
+                for band in below:
+                    self.assertEqual(band.get_hatch(), operational.BELOW_AXIS_HATCH)
+                plt.close(fig)
+
+    def test_no_separate_storage_charge_legend_entry(self):
+        """One legend entry per carrier covers both signs."""
+        from experiments.ra.plots import operational
+
+        for monthly in (True, False):
+            table = self._year_table("O4")
+            if not monthly:
+                table = table[table["hour"] < 7 + 3 * 168]
+            with self.subTest(monthly=monthly):
+                fig = operational._o4_figure(table)
+                labels = self._legend_labels(fig)
+                self.assertNotIn("storage charge", labels)
+                self.assertEqual(len(labels), len(set(labels)), labels)
+                # battery discharges *and* charges, and appears exactly once.
+                self.assertEqual(labels.count("battery"), 1)
+                # PHS and exports only ever appear below the axis, and still get
+                # an entry rather than an unlabelled band.
+                for carrier in ("PHS", "exports"):
+                    self.assertIn(carrier, labels)
+                plt.close(fig)
+
+    def test_the_real_run_draws_charging_per_carrier(self):
+        """The same on a solved run, not just the synthetic table."""
+        from matplotlib.colors import to_hex
+
+        fig, table = plots_mod.plot("O4", self.handles(self.run_a))
+        charging = table[table["series"] == "storage_charge"]
+        self.assertFalse(charging.empty)
+        carriers = style_mod.stack_order(set(charging["carrier"]))
+        below = self._below_axis(fig.axes[0])
+        self.assertEqual(len(below), len(carriers))
+        self.assertEqual(
+            [to_hex(band.get_facecolor()[0]) for band in below],
+            [to_hex(style_mod.carrier_color(c)) for c in carriers],
+        )
+        labels = [text.get_text() for text in fig.axes[0].get_legend().get_texts()]
+        self.assertNotIn("storage charge", labels)
+        plt.close(fig)
+
+    def test_o4b_picks_the_argmax_daily_peak_net_load_day(self):
+        """O4b's day is the month's highest *daily peak* net load, recomputed here."""
+        from experiments.ra.plots import operational
+
+        runs = self.handles(self.run_a)
+        _fig, o2 = plots_mod.plot("O2", runs)
+        plt.close("all")
+        # Recompute the selection independently from O2's net load (same
+        # definition: load minus available VRE), per local-Pacific day.
+        expected = operational.local_calendar(o2)
+        daily = expected.groupby(["run_id", "month", "day_index", "day"], as_index=False)[
+            "net_load_gw"
+        ].max()
+        best = (
+            daily.sort_values(["run_id", "month", "net_load_gw", "day_index"],
+                              ascending=[True, True, False, True])
+            .groupby(["run_id", "month"], as_index=False)
+            .first()
+        )
+        self.assertFalse(best.empty)
+
+        fig, table = plots_mod.plot("O4b", runs)
+        got = table[["run_id", "month", "day", "day_index", "peak_net_load_gw"]].drop_duplicates()
+        self.assertEqual(len(got), len(best))
+        merged = best.merge(got, on=["run_id", "month"], suffixes=("_want", "_got"))
+        self.assertEqual(len(merged), len(best))
+        for row in merged.itertuples():
+            self.assertEqual(row.day_index_got, row.day_index_want)
+            self.assertEqual(row.day_got, row.day_want)
+            self.assertAlmostEqual(row.peak_net_load_gw, row.net_load_gw, places=6)
+
+        # The plotted hours are exactly that day's, and only that day's.
+        for (_run, month), rows in table.groupby(["run_id", "month"]):
+            self.assertEqual(set(rows["day_index"]), {int(rows["day_index"].iloc[0])})
+            self.assertTrue(rows["hour_of_day"].between(0, 23).all())
+        # Both lines are drawn, and the panel title names the day and the peak.
+        titles = [ax.get_title() for ax in fig.axes if "peak net load" in ax.get_title()]
+        self.assertTrue(titles)
+        self.assertIn("day ", titles[0])
+        labels = self._legend_labels(fig)
+        self.assertIn("load", labels)
+        self.assertIn("net load", labels)
+        plt.close(fig)
+
+    def test_o4b_charging_is_per_carrier_too(self):
+        from matplotlib.colors import to_hex
+
+        fig, table = plots_mod.plot("O4b", self.handles(self.run_a))
+        charging = table[table["series"] == "storage_charge"]
+        self.assertFalse(charging.empty)
+        # A panel stacks the charging carriers *it* has rows for (the hourly
+        # store omits a carrier that is off for a whole block), so each panel is
+        # checked against its own bands: every band is a charging carrier's own
+        # colour, and the sequence away from the axis is the pinned order.
+        by_colour = {
+            to_hex(style_mod.carrier_color(c)): c for c in set(charging["carrier"])
+        }
+        self.assertEqual(len(by_colour), len(set(charging["carrier"])))
+        panels = [ax for ax in fig.axes if self._below_axis(ax)]
+        self.assertTrue(panels)
+        for ax in panels:
+            drawn = [to_hex(band.get_facecolor()[0]) for band in self._below_axis(ax)]
+            self.assertTrue(set(drawn).issubset(by_colour), drawn)
+            carriers = [by_colour[c] for c in drawn]
+            self.assertEqual(carriers, style_mod.stack_order(carriers))
+        self.assertNotIn("storage charge", self._legend_labels(fig))
         plt.close(fig)
 
     def test_monthly_profile_uses_local_pacific_hours_and_month_boundaries(self):

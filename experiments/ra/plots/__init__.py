@@ -202,8 +202,12 @@ def catalogue() -> pd.DataFrame:
     return frame.sort_values("plot_id", key=lambda s: s.map(_sort_key)).reset_index(drop=True)
 
 
-def _sort_key(plot_id: str) -> tuple[str, int]:
-    return (str(plot_id)[0], int(str(plot_id)[1:] or 0))
+def _sort_key(plot_id: str) -> tuple[str, int, str]:
+    """``O4`` before ``O4b`` before ``O5``; a lettered suffix is a sub-plot."""
+    text = str(plot_id)
+    digits = "".join(ch for ch in text[1:] if ch.isdigit())
+    suffix = text[1:].lstrip("0123456789")
+    return (text[0], int(digits or 0), suffix)
 
 
 def ids(*, tier: str | None = None, phase: str | None = None) -> list[str]:

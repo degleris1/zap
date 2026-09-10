@@ -68,6 +68,19 @@ PACIFIC_UTC_OFFSET_HOURS = 7
 #: month after February by a day.
 CALENDAR_REFERENCE_YEAR = 2001
 
+#: Series drawn **below** the x axis, in the order they leave it.  Each is
+#: stacked *by carrier*, in the same colours and the same order as above the
+#: axis, so the band nearest the axis below is the same carrier as the band
+#: nearest it above (Kamran, 2026-09-09).  ``exports`` is here as the declared
+#: seam: no hourly quantity writes it today (`persist.HOURLY_QUANTITIES` has no
+#: export series and the benchmark runs use ``export_mode: drop``), and it is
+#: drawn the moment a table carries it.
+BELOW_AXIS_SERIES = ("storage_charge", "exports")
+
+#: The hatch that marks a below-axis band as the *charging* half of its carrier.
+#: The hue stays the carrier's, so one legend entry covers both signs.
+BELOW_AXIS_HATCH = "///"
+
 MONTH_LABELS = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -198,12 +211,24 @@ def is_monthly_view(table: pd.DataFrame) -> bool:
 
 
 def local_calendar(frame: pd.DataFrame) -> pd.DataFrame:
-    """Add ``hour_of_day`` (local Pacific) and ``month`` to an hourly frame."""
+    """Add ``hour_of_day``, ``month``, ``day`` and ``day_index`` (local Pacific).
+
+    ``day_index`` counts local days from the start of the weather year and is the
+    key a "one day per month" plot groups on; ``day`` is the day of the month.
+    Hours before the first local midnight (0-6 of a window that starts at hour 0)
+    are clipped into day 0 so the calendar columns stay consistent with it.
+    """
     local = frame["hour"].astype(int) - PACIFIC_UTC_OFFSET_HOURS
+    clipped = local.clip(lower=0)
     stamps = pd.Timestamp(f"{CALENDAR_REFERENCE_YEAR}-01-01") + pd.to_timedelta(
-        local.clip(lower=0), unit="h"
+        clipped, unit="h"
     )
-    return frame.assign(hour_of_day=(local % 24).astype(int), month=stamps.dt.month.astype(int))
+    return frame.assign(
+        hour_of_day=(local % 24).astype(int),
+        month=stamps.dt.month.astype(int),
+        day=stamps.dt.day.astype(int),
+        day_index=(clipped // 24).astype(int),
+    )
 
 
 def _monthly_figure(groups, *, title_of, ylabel, draw, width=13.0, height=6.8):
@@ -245,6 +270,37 @@ def _monthly_figure(groups, *, title_of, ylabel, draw, width=13.0, height=6.8):
         if handles:
             subfig.legend(list(handles.values()), list(handles), loc="center right", fontsize=7)
     return fig
+
+
+def _below_axis_stack(ax, group, *, index: str, aggfunc: str, labelled=(), handles=None):
+    """Stack ``BELOW_AXIS_SERIES`` under the axis, by carrier, mirrored.
+
+    Same colours and same stacking sequence as above the axis, hatched to mark
+    the sign; a carrier already drawn above is *not* labelled again, so the
+    legend carries one entry per carrier covering both halves and never a
+    separate "storage charge" entry.
+    """
+    rows = group[group["series"].isin(BELOW_AXIS_SERIES)]
+    if rows.empty:
+        return []
+    pivot = _stack_pivot(rows, "value_gw", index, aggfunc)
+    if pivot.empty or not float(np.abs(pivot.to_numpy()).max()):
+        return []
+    labelled = set(labelled)
+    polygons = ax.stackplot(
+        pivot.index.to_numpy(),
+        [-pivot[c].to_numpy() for c in pivot.columns],
+        colors=[style.carrier_color(c) for c in pivot.columns],
+        labels=["_nolegend_" if c in labelled else str(c) for c in pivot.columns],
+        linewidth=0.0,
+    )
+    for carrier, polygon in zip(pivot.columns, polygons):
+        polygon.set_hatch(BELOW_AXIS_HATCH)
+        polygon.set_edgecolor("white")
+        polygon.set_linewidth(0.0)
+        if handles is not None:
+            handles.setdefault(carrier, polygon)
+    return list(pivot.columns)
 
 
 def _stack_pivot(frame: pd.DataFrame, value: str, index: str, aggfunc: str) -> pd.DataFrame:
@@ -741,11 +797,13 @@ def _o4_figure(table: pd.DataFrame):
                 )
                 for carrier, polygon in zip(pivot.columns, polygons):
                     handles.setdefault(carrier, polygon)
-            for name, colour, label in (
-                ("storage_charge", "storage_charge", "storage charge"),
-                ("load", "load", "load"),
-                ("unserved", "unserved", "unserved"),
-            ):
+            # Charging (and exports) below the axis: one band per carrier, in the
+            # carrier's own colour, mirroring the order above it.
+            _below_axis_stack(
+                ax, month_rows, index=index, aggfunc=aggfunc,
+                labelled=set(pivot.columns), handles=handles,
+            )
+            for name, label in (("load", "load"), ("unserved", "unserved")):
                 hourly = (
                     month_rows[month_rows["series"] == name]
                     .groupby(["hour", "hour_of_day"], as_index=False)["value_gw"]
@@ -755,16 +813,13 @@ def _o4_figure(table: pd.DataFrame):
                 )
                 if hourly.empty or not float(hourly.abs().max()):
                     continue
-                if name == "storage_charge":
-                    artist = ax.bar(hourly.index, -hourly.to_numpy(), width=1.0,
-                                    color=style.carrier_color(colour), label=label)
-                elif name == "load":
+                if name == "load":
                     artist = ax.plot(hourly.index, hourly.to_numpy(),
-                                     color=style.carrier_color(colour), linewidth=1.2,
+                                     color=style.carrier_color(name), linewidth=1.2,
                                      label=label)[0]
                 else:
                     artist = ax.scatter(hourly.index, hourly.to_numpy(), s=10,
-                                        color=style.carrier_color(colour), label=label, zorder=5)
+                                        color=style.carrier_color(name), label=label, zorder=5)
                 handles.setdefault(label, artist)
 
         def title_of(keys, group):
@@ -781,10 +836,9 @@ def _o4_figure(table: pd.DataFrame):
         up = group[group["series"].isin(up_series)]
         pivot = _stack_pivot(up, "value_gw", "hour", "sum")
         _stack(ax, pivot, _facet_title(label, meth, size), ylabel)
-        charge = group[group["series"] == "storage_charge"].groupby("hour")["value_gw"].sum()
-        if not charge.empty:
-            ax.bar(charge.index, -charge.to_numpy(), width=1.0,
-                   color=style.carrier_color("storage_charge"), label="storage charge")
+        # Charging (and exports) below the axis: one band per carrier, in the
+        # carrier's own colour, mirroring the order above it.
+        _below_axis_stack(ax, group, index="hour", aggfunc="sum", labelled=set(pivot.columns))
         load = group[group["series"] == "load"].groupby("hour")["value_gw"].sum()
         if not load.empty:
             ax.plot(load.index, load.to_numpy(), color=style.carrier_color("load"),
@@ -798,6 +852,186 @@ def _o4_figure(table: pd.DataFrame):
     axes[-1].set_xlabel("hour of the weather year")
     style.finish(fig, "O4 - dispatch by carrier")
     return fig
+
+
+# ---------------------------------------------------------------------------
+# O4b -- dispatch on each month's peak-net-load day
+# ---------------------------------------------------------------------------
+
+
+def _peak_net_load_days(runs, *, window, year, method, block_size) -> pd.DataFrame:
+    """Per (run, month): the local day whose peak net load is the month's highest.
+
+    Net load is ``load - available VRE``, the same definition O2 plots, so the
+    choice of day is a property of the weather and the demand and **not** of the
+    solve: every facet of a run shows the same day, which is what makes the
+    facets comparable.  Ties go to the earliest day.
+    """
+    frame = pick_series(
+        collect_hourly(
+            runs,
+            ["load_mw", "available_capacity_mw"],
+            window=window,
+            year=year,
+            method=method,
+            block_size=block_size,
+        )
+    )
+    totals = local_calendar(_series_totals(frame))
+    totals["net_load_gw"] = style.convert(totals["net_load_mw"], "power")
+    daily = (
+        totals.sort_values(["run_id", "day_index", "net_load_gw", "hour"],
+                           ascending=[True, True, False, True])
+        .groupby(["run_id", "month", "day_index"], as_index=False)
+        .first()
+    )
+    best = (
+        daily.sort_values(["run_id", "month", "net_load_gw", "day_index"],
+                          ascending=[True, True, False, True])
+        .groupby(["run_id", "month"], as_index=False)
+        .first()
+    )
+    return best.rename(
+        columns={"net_load_gw": "peak_net_load_gw", "hour_of_day": "peak_net_load_hour"}
+    )[["run_id", "month", "day_index", "day", "peak_net_load_gw", "peak_net_load_hour"]]
+
+
+def _net_load_rows(runs, *, window, year, method, block_size) -> pd.DataFrame:
+    """The hourly net-load series of each run, as ``series="net_load"`` rows."""
+    frame = pick_series(
+        collect_hourly(
+            runs,
+            ["load_mw", "available_capacity_mw"],
+            window=window,
+            year=year,
+            method=method,
+            block_size=block_size,
+        )
+    )
+    totals = _series_totals(frame)
+    rows = totals[["run_id", "label", "year", "hour"]].copy()
+    rows["series"] = "net_load"
+    rows["carrier"] = "net_load"
+    rows["value_gw"] = style.convert(totals["net_load_mw"], "power")
+    return rows
+
+
+@register(
+    "O4b",
+    title="Dispatch on each month's peak-net-load day",
+    tier="debug",
+    needs=("hourly",),
+    columns=(
+        "run_id",
+        "label",
+        "method",
+        "block_size",
+        "year",
+        "month",
+        "day",
+        "day_index",
+        "hour",
+        "hour_of_day",
+        "series",
+        "carrier",
+        "value_gw",
+        "peak_net_load_gw",
+        "peak_net_load_hour",
+    ),
+)
+def o4b_peak_day_dispatch(runs, *, window=None, year=None, method=None, block_size=None, **_):
+    """The **actual hourly** dispatch of the worst day of each month, in a 3x4 grid.
+
+    O4's monthly grid averages every day of a month, which is the right picture
+    of a typical day and the wrong one of a hard day.  This draws one real day
+    per month: the local-Pacific day whose peak net load (load minus available
+    solar and wind, as in O2) is the month's highest.  Same stacking order, same
+    per-carrier charging below the axis, with load *and* net load overlaid.
+    """
+    selection = _peak_net_load_days(
+        runs, window=window, year=year, method=method, block_size=block_size
+    )
+    dispatch = local_calendar(
+        _o4_table(runs, window=window, year=year, method=method, block_size=block_size)
+    )
+    net_load = local_calendar(
+        _net_load_rows(runs, window=window, year=year, method=method, block_size=block_size)
+    )
+    # The net-load line is a property of the run, so it is repeated once per
+    # (method, block_size) facet of that run.
+    facets = dispatch[["run_id", "label", "method", "block_size"]].drop_duplicates()
+    net_load = net_load.drop(columns=["label"]).merge(facets, on="run_id", how="inner")
+    combined = pd.concat([dispatch, net_load], ignore_index=True)
+
+    table = combined.merge(selection, on=["run_id", "month", "day_index", "day"], how="inner")
+    if table.empty:
+        raise MissingDataError(
+            runs[0].run_id,
+            "hourly",
+            "O4b found no hour on a peak-net-load day; the window carries no full local day",
+        )
+    order = ["run_id", "method", "block_size", "month", "hour", "series", "carrier"]
+    table = table.sort_values(order).reset_index(drop=True)
+    table = table[list(_columns("O4b"))]
+
+    groups = list(table.groupby(["run_id", "label", "method", "block_size"], sort=True))
+    up_series = ("generation", "storage_discharge")
+
+    def draw(ax, month_rows, handles):
+        up = month_rows[month_rows["series"].isin(up_series)]
+        pivot = _stack_pivot(up, "value_gw", "hour_of_day", "sum")
+        if not pivot.empty:
+            polygons = ax.stackplot(
+                pivot.index.to_numpy(),
+                [pivot[c].to_numpy() for c in pivot.columns],
+                colors=[style.carrier_color(c) for c in pivot.columns],
+                labels=list(pivot.columns),
+                linewidth=0.0,
+            )
+            for carrier, polygon in zip(pivot.columns, polygons):
+                handles.setdefault(carrier, polygon)
+        _below_axis_stack(
+            ax, month_rows, index="hour_of_day", aggfunc="sum",
+            labelled=set(pivot.columns), handles=handles,
+        )
+        for name, label in (("load", "load"), ("net_load", "net load"), ("unserved", "unserved")):
+            series = (
+                month_rows[month_rows["series"] == name]
+                .groupby("hour_of_day")["value_gw"]
+                .sum()
+            )
+            if series.empty or not float(series.abs().max()):
+                continue
+            if name == "unserved":
+                artist = ax.scatter(series.index, series.to_numpy(), s=10,
+                                    color=style.carrier_color(name), label=label, zorder=5)
+            else:
+                artist = ax.plot(
+                    series.index, series.to_numpy(), color=style.carrier_color(name),
+                    linewidth=1.3, linestyle="-" if name == "load" else "--", label=label,
+                )[0]
+            handles.setdefault(label, artist)
+        row = month_rows.iloc[0]
+        # Two lines: the one-line form of this title is wider than a panel and
+        # ran into its neighbour's.
+        ax.set_title(
+            f"{MONTH_LABELS[int(row['month']) - 1]} - day {int(row['day']):02d}\n"
+            f"peak net load {float(row['peak_net_load_gw']):.1f} GW "
+            f"at {int(row['peak_net_load_hour']):02d}:00",
+            fontsize=7.5,
+        )
+
+    def title_of(keys, group):
+        _run_id, label, meth, size = keys
+        return (
+            "O4b - dispatch on each month's peak-net-load day\n"
+            f"{_facet_title(label, meth, size)}"
+        )
+
+    fig = _monthly_figure(
+        groups, title_of=title_of, ylabel=f"power [{style.unit_label('power')}]", draw=draw
+    )
+    return fig, table
 
 
 # ---------------------------------------------------------------------------

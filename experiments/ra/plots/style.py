@@ -72,6 +72,7 @@ CARRIER_COLORS: dict[str, str] = {
     "AC_exp": "#4f7d14",
     # --- pseudo-carriers ---
     "load": "#111111",
+    "net_load": "#d2691e",
     "unserved": "#e3120b",
     "curtailment": "#c9a227",
     "storage_charge": "#7fb3d5",
@@ -107,6 +108,7 @@ DATASET_CARRIERS: tuple[str, ...] = (
     "DC",
     "AC_exp",
     "load",
+    "net_load",
     "unserved",
     "curtailment",
     "storage_charge",
@@ -117,8 +119,12 @@ DATASET_CARRIERS: tuple[str, ...] = (
 #: the x axis: baseload, then variable renewables, then batteries / storage
 #: discharge, then thermal, with trade last.  One list, used by every stacked
 #: plot *and* its legend, so the order cannot drift between figures (Kamran,
-#: 2026-09-09).  Storage *charging* and exports are drawn below the axis and are
-#: not part of this order.  A carrier not listed here is stacked on top, in
+#: 2026-09-09).  Storage *charging* and exports are drawn **below** the axis --
+#: also by carrier, in the carrier's own colour and in this same sequence, so
+#: the band nearest the axis below is the same carrier as the band nearest it
+#: above (see ``operational.BELOW_AXIS_SERIES``).  A hatch marks the charging
+#: half; the hue does not change, so one legend entry covers both signs and
+#: there is no separate "storage charge" entry.  A carrier not listed here is stacked on top, in
 #: alphabetical order, and warns -- see :func:`stack_order`.
 #:
 #: ``demand_response`` is the one addition to the order as dictated: it is a
