@@ -30,6 +30,7 @@ Key modelling decisions implemented here (see ``memory/plans/2026-09-08-phase1-s
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import logging
@@ -40,7 +41,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Optional, Sequence
+from typing import Any, Literal, Mapping, Optional, Sequence
 
 import numcodecs
 import numpy as np
@@ -535,6 +536,16 @@ class LoadOptions:
     model_year: Optional[int] = None
     #: Zero the as-built capacity of rows whose ``build_year + lifetime <= model_year``.
     apply_lifetimes: bool = True
+    #: Capacities of a *design* to build the system at, keyed by device-class name
+    #: (``"Generator"``, ``"StorageUnit"``, ``"DirectedLine"``) with one value per
+    #: source row, in static-table order.  Applied *after* the lifetime rule and
+    #: *before* the outage / UCAP lookup, so the availability multipliers are
+    #: weighted over the units backing the **designed** capacity: capacity built
+    #: on a retired or greenfield row draws from the pool instead of being
+    #: outage-free (WP-E1).  See :func:`apply_design_capacity`.
+    design_capacity: Optional[Mapping[str, Sequence[float]]] = None
+    #: Provenance only: the ``design_id`` the capacities came from.
+    design_id: Optional[str] = None
     link_losses: bool = True
     ignore_min_power: bool = True
     export_mode: Literal["sink", "drop"] = "sink"
@@ -744,6 +755,121 @@ def apply_retirements(
         summary["retired_capacity_mw_by_carrier"][component] = by_carrier
         summary["retired_names"][component] = [str(n) for n in df.index[mask]]
     return out, summary
+
+
+# ===========================================================================
+# Design capacities (WP-E1)
+# ===========================================================================
+
+#: Device class -> static table whose ``p_nom`` a design overwrites.  Storage
+#: energy follows from ``p_nom * max_hours`` (``StorageUnit.duration``), so the
+#: designed ``e_nom`` needs no separate entry.  ``ExportSink`` is derived from
+#: the export links' capacity and is not designable here.
+DESIGN_CAPACITY_TABLES = {
+    "Generator": "generators",
+    "StorageUnit": "storage_units",
+    "DirectedLine": "links",
+}
+
+
+def design_capacity_digest(
+    design_capacity: Optional[Mapping[str, Sequence[float]]],
+) -> Optional[str]:
+    """A sha256 over the design's capacity vectors, for cache keys and provenance."""
+    if not design_capacity:
+        return None
+    h = hashlib.sha256()
+    for cls_name in sorted(design_capacity):
+        values = np.asarray(design_capacity[cls_name], dtype=np.float64).reshape(-1)
+        h.update(cls_name.encode())
+        h.update(np.ascontiguousarray(values).tobytes())
+    return h.hexdigest()
+
+
+def apply_design_capacity(
+    static: dict[str, pd.DataFrame],
+    design_capacity: Optional[Mapping[str, Sequence[float]]],
+) -> tuple[dict[str, pd.DataFrame], dict]:
+    """Overwrite the static tables' ``p_nom`` with a design's capacities.
+
+    Called *after* :func:`apply_retirements` and *before* the outage / UCAP
+    lookup in :func:`load_system`, so the system that is built **is** the
+    designed system: a retired or greenfield row carrying designed capacity is a
+    new build on that row and draws its availability from that row's slice of
+    the outage pool, and an expanded row is derated over the units backing its
+    *designed* capacity rather than its as-built capacity (WP-E1).
+
+    Rows are kept and their order is unchanged; only ``p_nom`` moves.  Storage
+    energy follows through ``max_hours``.  Returns ``(static, summary)`` where
+    ``static`` holds copies of the touched tables.
+    """
+    summary: dict[str, Any] = {
+        "applied": bool(design_capacity),
+        "digest": design_capacity_digest(design_capacity),
+        "classes": {},
+    }
+    if not design_capacity:
+        return static, summary
+
+    unknown = sorted(set(design_capacity) - set(DESIGN_CAPACITY_TABLES))
+    if unknown:
+        raise ValueError(
+            f"design_capacity has unknown device classes {unknown}; "
+            f"expected any of {sorted(DESIGN_CAPACITY_TABLES)}"
+        )
+
+    out = dict(static)
+    for cls_name, values in design_capacity.items():
+        key = DESIGN_CAPACITY_TABLES[cls_name]
+        df = out[key]
+        designed = np.asarray(values, dtype=np.float64).reshape(-1)
+        if designed.size != len(df):
+            raise ValueError(
+                f"design_capacity[{cls_name!r}] has {designed.size} values but "
+                f"static/{key}.csv has {len(df)} rows"
+            )
+        if not np.all(np.isfinite(designed)):
+            raise ValueError(f"design_capacity[{cls_name!r}] has non-finite values")
+        if np.any(designed < 0.0):
+            bad = [str(n) for n in df.index[designed < 0.0]]
+            raise ValueError(f"design_capacity[{cls_name!r}] has negative capacity on rows {bad}")
+
+        previous = df["p_nom"].to_numpy(dtype=np.float64)
+        df = df.copy()
+        df["p_nom"] = designed
+        out[key] = df
+
+        changed = designed != previous
+        summary["classes"][cls_name] = {
+            "n_rows": int(designed.size),
+            "n_rows_changed": int(changed.sum()),
+            "capacity_mw": float(designed.sum()),
+            "as_built_mw": float(previous.sum()),
+            "capacity_added_mw": float((designed - previous).sum()),
+            "n_rows_built_from_zero": int(np.sum((previous <= 0.0) & (designed > 0.0))),
+        }
+    return out, summary
+
+
+#: Signature of ``zap.reliability.outages._row_weights``'s pool-overflow error.
+#: Only that failure is re-labelled with the design; every other ``ValueError``
+#: (a fill-valued chunk, a bad window, ...) propagates untouched.
+POOL_OVERFLOW_MARKER = "pool only holds"
+
+
+@contextlib.contextmanager
+def _design_context(options: LoadOptions, cls_name: str):
+    """Re-raise a *pool-capacity* failure naming the design that caused it."""
+    try:
+        yield
+    except ValueError as exc:
+        designed = bool(options.design_capacity) and cls_name in options.design_capacity
+        if not designed or POOL_OVERFLOW_MARKER not in str(exc):
+            raise
+        raise ValueError(
+            f"design {options.design_id or '<unnamed>'!r} exceeds the outage pool on "
+            f"{cls_name}: {exc}"
+        ) from exc
 
 
 def _thermal_carriers() -> frozenset[str]:
@@ -1359,7 +1485,14 @@ def _demand_scale(options: LoadOptions, peak_load: float, peak_available: float)
 
 
 def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> LoadedSystem:
-    """Build a ``zap`` system from a dataset directory and its weather store."""
+    """Build a ``zap`` system from a dataset directory and its weather store.
+
+    Order of the capacity rules, which matters (WP-E1): the lifetime
+    retirements are applied first, then ``options.design_capacity`` overwrites
+    ``p_nom``, and only then are the outage draw / UCAP factors looked up.  So a
+    design is never patched onto a system that was already derated at as-built
+    capacity -- the loaded system *is* the designed system.
+    """
     dataset_dir = Path(dataset_dir)
     options = options if options is not None else LoadOptions()
 
@@ -1416,6 +1549,27 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
             "Lifetimes (model_year=%s from %s): no rows retired.", model_year, model_year_source
         )
 
+    # ---- Design capacities (WP-E1) ---------------------------------------
+    # The design is imposed on the static tables *here*, after the lifetime rule
+    # and before the outage / UCAP lookup below, so every availability
+    # multiplier is computed over the units backing the designed capacity.
+    # `as_built` keeps the pre-design tables: the demand-scaling denominators
+    # are a property of the scenario, not of the design being scored, and must
+    # not move from one design to the next.
+    as_built = static
+    static, design_summary = apply_design_capacity(static, options.design_capacity)
+    if design_summary["applied"]:
+        logger.info(
+            "Design %s applied to the static tables (%s).",
+            options.design_id or "<unnamed>",
+            ", ".join(
+                f"{cls}: {info['capacity_mw']:.1f} MW "
+                f"({info['capacity_added_mw']:+.1f} MW on {info['n_rows_changed']} rows, "
+                f"{info['n_rows_built_from_zero']} from zero)"
+                for cls, info in design_summary["classes"].items()
+            ),
+        )
+
     years = tuple(int(y) for y in options.years)
     if not years:
         raise ValueError("LoadOptions.years is empty")
@@ -1439,27 +1593,35 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         gen_ucap, ucap_sha = _ucap_factors(dataset_dir, "Generator", static["generators"].index)
         storage_ucap, _ = _ucap_factors(dataset_dir, "StorageUnit", static["storage_units"].index)
     elif options.outage_draw is not None:
-        gen_outage, outage_attrs = _outage_availability(
-            dataset_dir,
-            options.outage_draw,
-            "Generator",
-            static["generators"].index,
-            static["generators"]["p_nom"],
-            years,
-            window,
-        )
-        storage_outage, _ = _outage_availability(
-            dataset_dir,
-            options.outage_draw,
-            "StorageUnit",
-            static["storage_units"].index,
-            static["storage_units"]["p_nom"],
-            years,
-            window,
-        )
+        # The capacities handed to `_outage_availability` are the *designed*
+        # ones (`static` is post-design): a row that outgrows its slice of the
+        # pool raises here rather than being silently under-derated.
+        with _design_context(options, "Generator"):
+            gen_outage, outage_attrs = _outage_availability(
+                dataset_dir,
+                options.outage_draw,
+                "Generator",
+                static["generators"].index,
+                static["generators"]["p_nom"],
+                years,
+                window,
+            )
+        with _design_context(options, "StorageUnit"):
+            storage_outage, _ = _outage_availability(
+                dataset_dir,
+                options.outage_draw,
+                "StorageUnit",
+                static["storage_units"].index,
+                static["storage_units"]["p_nom"],
+                years,
+                window,
+            )
 
     # ---- Demand scaling (D9) ---------------------------------------------
-    peaks = _peak_metrics(static, store, years)
+    # As-built capacities on purpose: the peak-available denominator (and hence
+    # `peak_fraction` demand scaling) must be identical for every design scored
+    # against this scenario.
+    peaks = _peak_metrics(as_built, store, years)
     peak_load = peaks["peak_load_mw"]
     peak_available = peaks["peak_available_mw"]
     implied_scale, applied_scale = _demand_scale(options, peak_load, peak_available)
@@ -1472,6 +1634,17 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
     line = _build_links(static, store, bus_index, options)
     storage = _build_storage(static, bus_index, options, n_hours, storage_outage, storage_ucap)
     sink = _build_export_sinks(static, bus_index) if options.export_mode == "sink" else None
+    if sink is not None and design_summary["classes"].get("DirectedLine"):
+        # The export sink's capacity is the sum of the incoming export links'
+        # `p_nom`, so a design that expands those links also enlarges the sink --
+        # which the phase-1 lesson says must instead be capped by the built store
+        # `e_nom`.  Evaluation uses `export_mode: drop`, so this is a warning, not
+        # a refusal; a designed-link run in `sink` mode is not trustworthy.
+        logger.warning(
+            "export_mode='sink' with a DirectedLine design: the export sink capacity follows "
+            "the designed link p_nom, not the built export-store e_nom. Use export_mode='drop' "
+            "for evaluation, or cap the sink by the built e_nom before trusting export revenue."
+        )
 
     ordered = [
         ("Generator", generator),
@@ -1539,6 +1712,14 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "retired_capacity_mw": retirements["retired_capacity_mw"],
         "retired_capacity_mw_by_carrier": retirements["retired_capacity_mw_by_carrier"],
         "retired_names": retirements["retired_names"],
+        "design_id": options.design_id,
+        "design_capacity_applied": bool(design_summary["applied"]),
+        "design_capacity_digest": design_summary["digest"],
+        "design_capacity_summary": design_summary["classes"],
+        # The peak-load / peak-available metrics above are computed at the
+        # *as-built* (post-retirement, pre-design) capacities so demand scaling
+        # is identical across the designs scored on one scenario.
+        "peaks_at": "as_built",
         "link_losses": bool(options.link_losses),
         "storage_soc_mode": str(options.storage_soc_mode),
         "storage_init_soc": float(options.storage_init_soc),

@@ -79,9 +79,83 @@ def block_time_periods(cfg: dict, block) -> np.ndarray:
     return np.arange(offset, offset + block.hours)
 
 
+#: Capacity attribute per device class, in the order ``Design`` writes them.
+DESIGN_CAPACITY_ATTRS = ("nominal_capacity", "power_capacity")
+
+#: Tolerance of the design-application check, in MW.
+DESIGN_CAPACITY_TOL_MW = 1e-6
+
+
+def check_design_applied(loaded, design, tol_mw: float = DESIGN_CAPACITY_TOL_MW) -> None:
+    """Assert the loaded system already carries ``design``'s capacities (WP-E1).
+
+    The design must be imposed *inside* ``load_system`` -- before the outage
+    lookup -- so that built capacity draws from the outage pool.  Patching it on
+    afterwards (``Design.apply``) would leave the availability multipliers
+    weighted over the as-built units, i.e. outage-free new capacity.  This is the
+    guard that a build which ignored the design cannot pass silently.
+
+    Capacities are compared in MW: device attributes are in MW / ``power_unit``
+    after ``scale_power``, so the loaded values are scaled back up before the
+    comparison.
+    """
+    if design is None or not getattr(design, "capacities", None):
+        return
+
+    meta = getattr(loaded, "meta", None) or {}
+    power_unit = float(meta.get("power_unit", 1.0) or 1.0)
+    index = loaded.index
+
+    for cls_name, values in design.capacities.items():
+        if cls_name not in index.device_index:
+            raise ValueError(
+                f"design {getattr(design, 'design_id', '?')!r} sets capacity on device class "
+                f"{cls_name!r}, which this system does not have ({sorted(index.device_index)})"
+            )
+        device = loaded.devices[index.device_index[cls_name]]
+        actual = None
+        for attr in DESIGN_CAPACITY_ATTRS:
+            found = getattr(device, attr, None)
+            if found is not None:
+                actual = np.asarray(found, dtype=float).reshape(-1) * power_unit
+                break
+        if actual is None:
+            raise ValueError(
+                f"device class {cls_name!r} has none of {DESIGN_CAPACITY_ATTRS}; "
+                "cannot check that the design was applied"
+            )
+
+        expected = np.asarray(values, dtype=float).reshape(-1)
+        if actual.size != expected.size:
+            raise ValueError(
+                f"design {getattr(design, 'design_id', '?')!r} has {expected.size} "
+                f"{cls_name} capacities but the loaded system has {actual.size} rows"
+            )
+        diff = np.abs(actual - expected)
+        worst = int(np.argmax(diff)) if diff.size else 0
+        if diff.size and diff[worst] > tol_mw:
+            names = index.names.get(cls_name)
+            row = str(names[worst]) if names is not None and len(names) > worst else worst
+            raise ValueError(
+                f"the loaded system does not carry design "
+                f"{getattr(design, 'design_id', '?')!r}: {cls_name} row {row!r} is "
+                f"{actual[worst]:.6f} MW but the design says {expected[worst]:.6f} MW "
+                f"(worst of {int((diff > tol_mw).sum())} rows beyond {tol_mw} MW). "
+                "Build the system with `build_system(cfg, draw=..., design=design)` so the "
+                "outage draw is weighted over the designed capacity (WP-E1); do not apply "
+                "the design after loading."
+            )
+
+
 def slice_devices(loaded, cfg: dict, block, design=None) -> list:
-    """Per-block devices: sample the window's devices down to the block's hours."""
-    devices = design.apply(loaded) if design is not None else loaded.devices
+    """Per-block devices: sample the window's devices down to the block's hours.
+
+    The design is **not** applied here -- the system handed in is already the
+    designed one (``build_system(..., design=...)``); this only checks that it is
+    (WP-E1, spec 3.1).
+    """
+    check_design_applied(loaded, design)
+    devices = loaded.devices
     win_start, win_stop = window_bounds(cfg)
     total_hours = (win_stop - win_start) * len(cfg["dataset"]["years"])
     periods = block_time_periods(cfg, block)
@@ -120,7 +194,10 @@ def solve_block(task, cfg: dict, design=None, run_dir=None) -> dict[str, Any]:
     if is_stub(cfg, task.method):
         return solve_block_stub(task, cfg)
 
-    loaded = system_mod.build_system(cfg, draw=task.draw)
+    # The design goes into the *build* (WP-E1): the outage availability of every
+    # pooled row must be weighted over its designed capacity, which is decided
+    # inside `load_system`, not patched onto the devices afterwards.
+    loaded = system_mod.build_system(cfg, draw=task.draw, design=design)
     devices = slice_devices(loaded, cfg, task.block, design=design)
 
     if task.method == "lp":
