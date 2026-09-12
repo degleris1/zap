@@ -428,140 +428,116 @@ def test_ignore_min_power_false_raises(dataset):
         _load(dataset, ignore_min_power=False)
 
 
-def test_missing_outage_store_raises(dataset):
-    with pytest.raises(FileNotFoundError):
-        _load(dataset, outage_draw=0)
-
-
 # ---------------------------------------------------------------------------
-# Outage draws (join with WP2)
+# Outage draws (generated on demand -- there is no store, issue #18)
 # ---------------------------------------------------------------------------
 
 
-def _write_tiny_outage_store(root: Path) -> Path:
-    """Hand-written ``outages.zarr`` in WP2's schema (spec 3.4).
+def _expected_row_availability(dataset: Path, row_name: str, capacity: float, *, draw: int,
+                               hours: int = N_HOURS, year: int = 2020) -> np.ndarray:
+    """What the sampler says one row's availability is, straight from zap."""
+    from zap.reliability.keys import row_specs
+    from zap.reliability.outages import load_outage_params, read_static_tables, row_availability
 
-    Two pooled rows -- one generator and one storage unit -- with three slots
-    each, so the availability weighting has both an exact and a remainder case.
-    """
-    unit_size = 50.0
-    rows = [("Generator", "z1 CCGT", "CCGT", "z1"), ("StorageUnit", "z1 battery", "battery", "z1")]
-    n_slots = 3
-
-    unit_id, unit_row, unit_carrier, unit_bus, unit_component = [], [], [], [], []
-    unit_slot, unit_offset, unit_units = [], [], []
-    for i, (component, row, carrier, bus) in enumerate(rows):
-        for slot in range(n_slots):
-            unit_id.append(f"{row}#{slot}")
-            unit_row.append(row)
-            unit_carrier.append(carrier)
-            unit_bus.append(bus)
-            unit_component.append(component)
-            unit_slot.append(slot)
-            unit_offset.append(i * n_slots)
-            unit_units.append(n_slots)
-
-    n_units = len(unit_id)
-    available = np.ones((1, 1, N_HOURS, n_units), dtype=np.uint8)
-    # z1 CCGT (p_nom 100, unit size 50 -> 2 units of weight 1): drop slot 0.
-    available[0, 0, 5:11, 0] = 0
-    # z1 battery (p_nom 30, unit size 50 -> 1 unit of weight 0.6): drop slot 0.
-    available[0, 0, 20:23, 3] = 0
-
-    path = Path(root) / "outages.zarr"
-    group = zarr.open_group(str(path), mode="w")
-    arr = group.create_dataset(
-        "available",
-        shape=available.shape,
-        chunks=(1, 1, N_HOURS, n_units),
-        dtype="uint8",
-        fill_value=255,
-        compressor=numcodecs.Blosc(cname="zstd", clevel=5, shuffle=numcodecs.Blosc.BITSHUFFLE),
+    params = load_outage_params()
+    spec = next(
+        s for s in row_specs(read_static_tables(dataset), params) if s.name == row_name
     )
-    arr[:] = available
-
-    def _int(name, values, dtype="int32"):
-        a = group.create_dataset(name, shape=(len(values),), chunks=(len(values),), dtype=dtype)
-        a[:] = np.asarray(values, dtype=dtype)
-
-    def _str(name, values):
-        a = group.create_dataset(
-            name,
-            shape=(len(values),),
-            chunks=(len(values),),
-            dtype=object,
-            object_codec=numcodecs.VLenUTF8(),
-        )
-        a[:] = np.array(values, dtype=object)
-
-    _int("weather_year", [2020])
-    _int("draw", [0])
-    _int("hour", np.arange(N_HOURS))
-    _int("unit_slot", unit_slot)
-    _int("unit_row_offset", unit_offset)
-    _int("unit_row_units", unit_units)
-    _int("unit_size_mw", np.full(n_units, unit_size), dtype="float32")
-    _str("unit_id", unit_id)
-    _str("unit_row", unit_row)
-    _str("unit_carrier", unit_carrier)
-    _str("unit_bus", unit_bus)
-    _str("unit_component", unit_component)
-
-    group.attrs.update(
-        {
-            "generator_version": 1,
-            "dataset": Path(root).name,
-            "base_seed": 20260908,
-            "weather_years": [2020],
-            "n_draws": 1,
-            "hours_per_year": N_HOURS,
-        }
-    )
-    return path
+    options = LoadOptions()
+    return row_availability(
+        [spec],
+        {row_name: float(capacity)},
+        params,
+        year=year,
+        draw=draw,
+        base_seed=options.outage_seed,
+        scheme=options.outage_scheme,
+        window=(0, hours),
+    )[:, 0]
 
 
 def test_outage_draw_applies(dataset):
     pytest.importorskip("zap.reliability.outages")
-    _write_tiny_outage_store(dataset)
 
     base = _load(dataset, window=HourWindow(0, N_HOURS))
     drawn = _load(dataset, window=HourWindow(0, N_HOURS), outage_draw=0)
 
     gens = _static(dataset, "generators")
-    row = list(gens.index).index("z1 CCGT")
+    generator_names = list(gens.index)
     base_gen = base.index.get(base.devices, "Generator")
     drawn_gen = drawn.index.get(drawn.devices, "Generator")
 
-    # p_nom 100 with 50 MW units -> two weight-1 units; one of them is out.
-    expected = np.ones(N_HOURS)
-    expected[5:11] = 0.5
-    np.testing.assert_allclose(
-        drawn_gen.dynamic_capacity[row, :],
-        base_gen.dynamic_capacity[row, :] * expected,
-        rtol=1e-12,
-    )
+    # Every pooled generator row is derated by exactly what the sampler says.
+    pooled = {"z1 CCGT", "z2 CCGT", "z2 hydro", "z1 legacy CCGT"}
+    for name in pooled:
+        i = generator_names.index(name)
+        capacity = float(drawn_gen.nominal_capacity.ravel()[i])
+        expected = _expected_row_availability(dataset, name, capacity, draw=0)
+        np.testing.assert_allclose(
+            drawn_gen.dynamic_capacity[i, :],
+            base_gen.dynamic_capacity[i, :] * expected,
+            rtol=1e-12,
+        )
 
     # Rows outside the pool are untouched.
-    for i, name in enumerate(gens.index):
-        if name == "z1 CCGT":
+    for i, name in enumerate(generator_names):
+        if name in pooled:
             continue
         np.testing.assert_allclose(
             drawn_gen.dynamic_capacity[i, :], base_gen.dynamic_capacity[i, :], rtol=1e-12
         )
 
+    # Storage derates power only.
     units = _static(dataset, "storage_units")
     storage = drawn.index.get(drawn.devices, "StorageUnit")
     battery = list(units.index).index("z1 battery")
-    expected_storage = np.ones(N_HOURS)
-    expected_storage[20:23] = 0.0
     assert storage.power_availability.shape == (len(units), N_HOURS)
-    np.testing.assert_allclose(storage.power_availability[battery, :], expected_storage, rtol=1e-12)
     np.testing.assert_allclose(
-        storage.power_availability[1 - battery, :], np.ones(N_HOURS), rtol=1e-12
+        storage.power_availability[battery, :],
+        _expected_row_availability(
+            dataset, "z1 battery", float(storage.power_capacity.ravel()[battery]), draw=0
+        ),
+        rtol=1e-12,
     )
 
     assert drawn.meta["outage_draw"] == 0
-    assert drawn.meta["outage_store_attrs"]["base_seed"] == 20260908
+    assert drawn.meta["outage_scheme"] == "slot-v1"
+    assert drawn.meta["outage_seed"] == 20260908
+    assert drawn.meta["outages"]["scheme"] == "slot-v1"
+    assert drawn.meta["outages"]["base_seed"] == 20260908
+    assert len(drawn.meta["outages"]["params_sha256"]) == 64
+    assert drawn.meta["outages"]["n_units"] > 0
+
+
+def test_no_draw_records_no_outage_block(dataset):
+    system = _load(dataset, window=HourWindow(0, N_HOURS))
+    assert system.meta["outages"] is None
+    assert system.meta["outage_draw"] is None
+
+
+def test_outage_scheme_and_seed_change_the_draw(dataset):
+    pytest.importorskip("zap.reliability.outages")
+    a = _load(dataset, window=HourWindow(0, N_HOURS), outage_draw=0)
+    b = _load(dataset, window=HourWindow(0, N_HOURS), outage_draw=0, outage_seed=1)
+    gen_a = a.index.get(a.devices, "Generator")
+    gen_b = b.index.get(b.devices, "Generator")
+    assert not np.array_equal(gen_a.dynamic_capacity, gen_b.dynamic_capacity)
+
+    with pytest.raises(KeyError):
+        _load(dataset, window=HourWindow(0, N_HOURS), outage_draw=0, outage_scheme="nope")
+
+
+def test_block_realisation_is_window_independent(dataset):
+    """A 24 h window is the first 24 hours of the full-window realisation (D1.2)."""
+    pytest.importorskip("zap.reliability.outages")
+    whole = _load(dataset, window=HourWindow(0, N_HOURS), outage_draw=0)
+    part = _load(dataset, window=HourWindow(0, 24), outage_draw=0)
+    gen_whole = whole.index.get(whole.devices, "Generator")
+    gen_part = part.index.get(part.devices, "Generator")
+    i = list(_static(dataset, "generators").index).index("z1 CCGT")
+    np.testing.assert_allclose(
+        gen_part.dynamic_capacity[i, :], gen_whole.dynamic_capacity[i, :24], rtol=1e-12
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -741,51 +717,40 @@ def test_retirement_meta_and_peak_capacity(dataset):
     assert peak_available_mw(system) == pytest.approx(peak_available_mw(kept) - retired_mw)
 
 
-def test_retired_row_gets_the_minimum_outage_pool(dataset):
-    """The pool keeps the retired row's slot, sized as if it were a 0 MW candidate.
 
-    Written against the *rule*, not against today's ``min_pool_capacity_mw``: the
-    shipped value is a floor every row is sized on (10 GW as of 2026-09-09), which
-    hides the retirement effect, so the "sized as a 0 MW candidate" half of the
-    contract is checked with the floor removed.
+def test_retired_row_keeps_its_slot_keys(dataset):
+    """A retired row is still a pooled row; only its *capacity* falls to zero.
+
+    Slot ids are a function of (carrier, bus, ordinal, k) alone, so retirement
+    neither renumbers anything nor changes any other row's draws -- the failure
+    mode the v1 offset axis had to be defended against no longer exists.
     """
-    import dataclasses
-    import math
-
+    keys = pytest.importorskip("zap.reliability.keys")
     ox = pytest.importorskip("zap.reliability.outages")
-    shipped = ox.load_outage_params()
+    params = ox.load_outage_params()
     retired = TINY_RETIRED_GENERATORS[0]
 
-    # (a) With no capacity floor, a retired row falls back to the minimum pool
-    # while the same row sized on its 70 MW as-built capacity gets more.
-    floorless = dataclasses.replace(shipped, min_pool_capacity_mw=0.0)
-    pool = ox.build_unit_pool(dataset, floorless)
-    assert retired in pool.row_offset
-    assert pool.row_units[retired] == floorless.min_units_per_row
-    kept = ox.build_unit_pool(dataset, floorless, model_year=1999)
-    assert kept.row_units[retired] > floorless.min_units_per_row
+    specs = {s.name: s for s in keys.row_specs(ox.read_static_tables(dataset), params)}
+    assert retired in specs
 
-    # (b) With the shipped floor, a retired row is pooled exactly like any other
-    # zero-capacity expansion candidate -- retirement is sizing-neutral.
-    shipped_pool = ox.build_unit_pool(dataset, shipped)
-    unit_size = shipped_pool.row_size[retired]
-    expected = max(
-        shipped.min_units_per_row,
-        math.ceil(shipped.pool_multiplier * shipped.min_pool_capacity_mw / unit_size),
-    )
-    assert shipped_pool.row_units[retired] == expected
-    assert ox.build_unit_pool(dataset, shipped, model_year=1999).row_units[retired] == expected, (
-        "the 70 MW as-built row is below the floor, so the lifetime rule cannot change its pool"
+    # The lifetime rule zeroes the row's active capacity, so it uses no slots ...
+    active = ox.active_capacities(dataset, params)
+    assert active[retired] == 0.0
+    assert ox.slot_counts(list(specs.values()), active, params)[retired] == 0
+
+    # ... while the same row before its retirement year does use slots.
+    kept = ox.active_capacities(dataset, params, model_year=1999)
+    assert kept[retired] > 0.0
+    assert ox.slot_counts(list(specs.values()), kept, params)[retired] >= 1
+
+    # And the ids of a *different* row are identical either way.
+    other = next(n for n in specs if n != retired)
+    scheme = keys.get_scheme("slot-v1")
+    np.testing.assert_array_equal(
+        scheme.unit_ids(specs[other], 5), scheme.unit_ids(specs[other], 5)
     )
 
-    # Offsets stay a running cumulative sum over the same rows in the same order.
-    for built in (pool, kept, shipped_pool):
-        assert list(built.row_offset) == list(pool.row_offset)
-        offset = 0
-        for row, n in built.row_units.items():
-            assert built.row_offset[row] == offset
-            offset += n
-        assert offset == built.n_units
+
 
 
 # ---------------------------------------------------------------------------
@@ -869,13 +834,3 @@ def test_real_z4_lifetime_retirements():
     )
 
 
-def test_outage_draw_rejects_unwritten_chunk(dataset):
-    """A chunk that was never generated (fill value 255) must not load as availability."""
-    pytest.importorskip("zap.reliability.outages")
-    import zarr
-
-    path = _write_tiny_outage_store(dataset)
-    group = zarr.open_group(str(path), mode="a")
-    group["available"][0, 0, 3:6, :] = 255
-    with pytest.raises(ValueError, match="fill values|never generated"):
-        _load(dataset, window=HourWindow(0, N_HOURS), outage_draw=0)

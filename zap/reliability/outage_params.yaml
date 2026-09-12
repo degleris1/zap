@@ -5,32 +5,28 @@
 # USER TO REVIEW before any reported run.
 #
 # Semantics of each field:
-#   unit_size_mw       nameplate size of one virtual unit of this carrier; a
-#                      source row of capacity C is represented by ceil(C / size)
-#                      units, the last one weighted by the remainder.
+#   unit_size_mw       nameplate size of one virtual unit ("slot") of this
+#                      carrier; a source row at designed capacity C is backed by
+#                      slots 0 .. n-1 with n = ceil(C / size), the last one
+#                      weighted by the remainder. The virtual pool is unbounded:
+#                      slot k exists whether or not any design reaches it, and
+#                      its realisation never depends on n.
 #   forced_outage_rate long-run probability that a unit is unavailable (EFOR-like).
 #   mttr_h             mean time to repair, hours. Together with the FOR this
 #                      pins the two-state Markov chain:
 #                        mttf_h  = mttr_h * (1 - FOR) / FOR
-#                        p_fail  = 1 - exp(-1 / mttf_h)
-#                        p_repair= 1 - exp(-1 / mttr_h)
+#                        p_fail  = 1 / mttf_h
+#                        p_repair= 1 / mttr_h
 #   source             provenance of the two numbers above. Required on every line.
+#
+# Version 2 (2026-09-11, issue #18) dropped `pool_multiplier`,
+# `min_units_per_row` and `min_pool_capacity_mw`: with slot keys and on-demand
+# generation there is no finite pool to size and nothing that can overflow.
+# The sha256 of this file is recorded on every run card; changing it changes
+# every reported draw.
 
-version: 1
+version: 2
 reviewed: false            # flip to true only after the user has checked the numbers
-pool_multiplier: 3.0       # pool capacity = multiplier x reference capacity
-min_units_per_row: 3
-# Floor on the capacity every pooled row is sized for:
-#   reference_mw = max(active_mw, min_pool_capacity_mw)
-#   row_units    = max(min_units_per_row, ceil(pool_multiplier * reference_mw / unit_size_mw))
-# 10 GW matches the upper bound the planning harness invents for an expansion
-# candidate with no finite `p_nom_max` -- `experiments/ra/planning/expansion.py`
-# uses `(p_nom + 1000) * max_capacity_multiple` with `max_capacity_multiple: 10`,
-# i.e. 10 GW for a zero-capacity row. With `pool_multiplier: 3.0` the pool
-# therefore covers 3x that bound, so `row_availability` cannot run out of units
-# for any design the harness can produce. Raising this floor renumbers the unit
-# axis, so a store generated with a different value is not draw-comparable.
-min_pool_capacity_mw: 10000.0
 
 # Carriers that are deliberately given no outage units. VRE availability is
 # already in the weather profiles; AC/DC/imports/exports are network carriers.

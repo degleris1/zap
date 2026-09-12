@@ -1,86 +1,91 @@
-"""Thermal / storage forced-outage pool, sampler, store, and UCAP table.
+"""Thermal / storage forced-outage sampling and the UCAP table.
 
 This module is deliberately independent of the rest of the CH3 harness: it reads
-only ``<dataset_dir>/static/*.csv`` and writes only new files
-(``outages.zarr``, ``outage_units.csv``, ``ucap.csv``).
+only ``<dataset_dir>/static/*.csv`` and ``outage_params.yaml``, and writes only
+``ucap.csv``.
 
 Model
 -----
 Every source row of ``generators.csv`` / ``storage_units.csv`` whose carrier has
-outage parameters is represented by a contiguous, disjoint slice of *virtual
-units* on a global unit axis (spec D6: the key is the **source row**, never
-``(carrier, bus)`` -- the import buses carry many rows of the same carrier and
-bus, which would otherwise be perfectly correlated or double counted).
+outage parameters is backed by *virtual units* ("slots") of that carrier's
+``unit_size_mw``. A row at designed capacity ``C`` uses slots ``0 .. n-1`` with
+``n = 0`` if ``C == 0`` else ``max(1, ceil(C / size))``; the last slot carries
+the remainder as a weight. Each slot is an independent two-state Markov chain in
+discrete hourly time with stationary availability ``1 - FOR``.
 
-Each unit is an independent two-state Markov chain in discrete hourly time with
-stationary availability ``1 - FOR``.
+There is **no store**. Draws are generated on demand and the canonical artefact
+is ``(base_seed, scheme, params sha256)`` -- forty bytes on a run card instead of
+the ~1.1 M files a 23 y x 500-draw ``outages.zarr`` would have cost.
 
-RNG contract (spec D7)
-----------------------
-One ``numpy.random.Generator`` per ``(weather_year, draw)``::
+RNG contract (spec D1.2)
+------------------------
+A draw is a pure function of ``(base_seed, scheme, year, draw, key)`` and of
+nothing else::
 
-    rng = np.random.default_rng(
-        np.random.SeedSequence(entropy=base_seed, spawn_key=(year, draw))
-    )
-    u = rng.random((n_units, n_hours))     # a single, C-order call
+    uid = uint64(blake2b(f"{scheme}|{carrier}|{bus}|{ordinal}|{k}", digest_size=8))
+    rng = default_rng(SeedSequence(entropy=(base_seed, year, draw, uid_hi, uid_lo)))
+    u   = rng.random(n_hours)
 
-NumPy fills C-order, so unit ``u`` always consumes stream positions
-``[u * n_hours, (u + 1) * n_hours)``. Appending units to the pool therefore
-leaves every existing unit's draw bit-identical, and a chunk is reproducible in
-isolation without paying for ``n_units`` ``SeedSequence`` spawns.
+Two consequences, both load-bearing:
+
+* **Slot k's realisation does not depend on n.** Growing a row's capacity leaves
+  every slot it already used bit-identical, so perturbed designs are
+  common-random-number paired on the slots they share.
+* **The chain always starts at hour 0 of the weather year** and is then sliced to
+  the window, so a 168 h block's realisation is identical whether it is loaded
+  alone or inside a full year. ``n_hours < 8760`` gives exactly the first
+  ``n_hours`` hours of the full-year realisation, because the uniforms are a
+  prefix of the same stream.
 
 Caveats
 -------
 * Storage outages derate **power only**; the energy cap is untouched (spec D8).
 * Hydro carries outage draws even though its ``p_max_pu`` profile already encodes
-  availability, so the two derates compound (spec R6). ``excluded_carriers`` in
+  availability, so the two derates compound (issue #16). ``excluded_carriers`` in
   ``outage_params.yaml`` makes a no-hydro sensitivity a one-line change.
 * The storage UCAP produced here is a forced-outage derate, **not** an
-  accreditation (ELCC). Label it that way on run cards (spec R5).
-* The ``done`` array in the store is the **authoritative** resume ledger: it has
-  one chunk per ``(year, draw)``, so concurrent shards never race on it. The root
-  attribute ``completed`` is a convenience view recomputed from ``done`` at the
-  end of each shard, and can lag while other shards are still running.
+  accreditation (ELCC). Label it that way on run cards.
+* ``outage_params.yaml`` is still ``reviewed: false`` (issue #7).
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import math
-import subprocess
+import os
 import sys
 import time
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-import numcodecs
 import numpy as np
 import pandas as pd
 import yaml
-import zarr
 
-GENERATOR_VERSION = 1
+from zap.reliability.keys import (
+    COMPONENT_TABLES,
+    DEFAULT_SCHEME,
+    RowSpec,
+    get_scheme,
+    row_specs,
+)
+
+GENERATOR_VERSION = 2
 HOURS_PER_YEAR = 8760
+DEFAULT_BASE_SEED = 20260908
 DEFAULT_PARAMS_PATH = Path(__file__).parent / "outage_params.yaml"
 
-UNIT_TABLE_COLUMNS = [
-    "unit_id",
-    "component",
-    "row",
-    "carrier",
-    "bus",
-    "slot",
-    "unit_size_mw",
-    "row_offset",
-    "row_units",
-]
+#: Units whose uniforms are materialised in one go. 512 x 8760 float64 is ~36 MB;
+#: the recursion is vectorised across the chunk, so this is a memory knob only.
+_BATCH_UNITS = 512
 
-# (component name, static csv file) in the order they enter the unit axis.
-_COMPONENT_FILES = [("Generator", "generators.csv"), ("StorageUnit", "storage_units.csv")]
+#: Cap on the in-process slot cache, in slots. 20,000 x 8,760 uint8 ~ 175 MB.
+CACHE_UNITS_ENV = "CH3_OUTAGE_CACHE_UNITS"
+DEFAULT_CACHE_UNITS = 20_000
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +132,7 @@ class CarrierOutageParams:
 
         The exponential form ``1 - exp(-1/MTTF)`` does *not*: it biases
         unavailability high by roughly 1 % of FOR, which is detectable at the
-        sample sizes this store is generated at.
+        sample sizes this sampler is run at.
         """
         return 1.0 / self.mttf_h
 
@@ -147,41 +152,42 @@ class CarrierOutageParams:
 
 @dataclass(frozen=True)
 class OutageParams:
-    """The full resolved contents of ``outage_params.yaml``."""
+    """The full resolved contents of ``outage_params.yaml`` (version 2).
+
+    Version 2 dropped ``pool_multiplier`` / ``min_units_per_row`` /
+    ``min_pool_capacity_mw``: with on-demand, slot-keyed generation there is no
+    pool to size and nothing that can overflow.
+    """
 
     version: int
     reviewed: bool
-    pool_multiplier: float
-    min_units_per_row: int
-    min_pool_capacity_mw: float
     excluded_carriers: frozenset[str]
     carriers: Mapping[str, CarrierOutageParams]
     sha256: str
+
+    #: Keys that version 1 carried and version 2 must not.
+    RETIRED_KEYS = ("pool_multiplier", "min_units_per_row", "min_pool_capacity_mw")
 
     def to_dict(self) -> dict:
         return {
             "version": int(self.version),
             "reviewed": bool(self.reviewed),
-            "pool_multiplier": float(self.pool_multiplier),
-            "min_units_per_row": int(self.min_units_per_row),
-            "min_pool_capacity_mw": float(self.min_pool_capacity_mw),
             "excluded_carriers": sorted(self.excluded_carriers),
             "carriers": {k: v.to_dict() for k, v in sorted(self.carriers.items())},
         }
 
     @classmethod
     def from_dict(cls, raw: Mapping, sha256: str = "unknown") -> OutageParams:
-        missing = {
-            "version",
-            "reviewed",
-            "pool_multiplier",
-            "min_units_per_row",
-            "min_pool_capacity_mw",
-            "excluded_carriers",
-            "carriers",
-        } - set(raw)
+        missing = {"version", "reviewed", "excluded_carriers", "carriers"} - set(raw)
         if missing:
             raise KeyError(f"outage params missing required keys: {sorted(missing)}")
+        stale = [k for k in cls.RETIRED_KEYS if k in raw]
+        if stale:
+            raise KeyError(
+                f"outage params still carry the version-1 pool-sizing keys {stale}; "
+                "the slot-keyed scheme has no pool to size -- remove them and set "
+                "`version: 2`"
+            )
 
         carriers = {k: CarrierOutageParams(**v) for k, v in raw["carriers"].items()}
         excluded = frozenset(raw["excluded_carriers"])
@@ -194,9 +200,6 @@ class OutageParams:
         return cls(
             version=int(raw["version"]),
             reviewed=bool(raw["reviewed"]),
-            pool_multiplier=float(raw["pool_multiplier"]),
-            min_units_per_row=int(raw["min_units_per_row"]),
-            min_pool_capacity_mw=float(raw["min_pool_capacity_mw"]),
             excluded_carriers=excluded,
             carriers=carriers,
             sha256=sha256,
@@ -211,39 +214,20 @@ def load_outage_params(path: Path | None = None) -> OutageParams:
     return OutageParams.from_dict(raw, sha256=hashlib.sha256(raw_bytes).hexdigest())
 
 
+def params_fingerprint(params: OutageParams, scheme: str, base_seed: int) -> dict:
+    """The forty bytes that replace ``outages.zarr`` as the canonical artefact."""
+    return {
+        "scheme": str(scheme),
+        "base_seed": int(base_seed),
+        "params_sha256": str(params.sha256),
+        "params_version": int(params.version),
+        "reviewed": bool(params.reviewed),
+    }
+
+
 # ---------------------------------------------------------------------------
-# Unit pool
+# Static tables and row specs
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class UnitPool:
-    """The virtual-unit axis: one contiguous slice per source row."""
-
-    table: pd.DataFrame
-    row_offset: Mapping[str, int]
-    row_units: Mapping[str, int]
-    row_size: Mapping[str, float]
-
-    @property
-    def n_units(self) -> int:
-        return len(self.table)
-
-    def p_fail_vector(self, params: OutageParams) -> np.ndarray:
-        return np.array(
-            [params.carriers[c].p_fail for c in self.table["carrier"]], dtype=np.float64
-        )
-
-    def p_repair_vector(self, params: OutageParams) -> np.ndarray:
-        return np.array(
-            [params.carriers[c].p_repair for c in self.table["carrier"]], dtype=np.float64
-        )
-
-    def for_vector(self, params: OutageParams) -> np.ndarray:
-        return np.array(
-            [params.carriers[c].forced_outage_rate for c in self.table["carrier"]],
-            dtype=np.float64,
-        )
 
 
 def _read_static(dataset_dir: Path, filename: str) -> pd.DataFrame:
@@ -253,13 +237,18 @@ def _read_static(dataset_dir: Path, filename: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def read_static_tables(dataset_dir: Path) -> dict[str, pd.DataFrame]:
+    """``{"generators": df, "storage_units": df}`` with ``name`` as a column."""
+    return {key: _read_static(dataset_dir, filename) for _c, key, filename in COMPONENT_TABLES}
+
+
 def resolve_model_year(dataset_dir: Path, model_year: int | None) -> int | None:
     """Model year for the retirement rule, auto-detected when not given.
 
     Returns ``None`` -- meaning "no lifetime information, nothing retires" --
     when neither static table carries ``build_year``/``lifetime`` (the hermetic
     test fixtures) or when the dataset has no snapshot stamps to read a year
-    from, so a bare ``build_unit_pool(dir, params)`` keeps working everywhere.
+    from.
     """
     if model_year is not None:
         return int(model_year)
@@ -268,7 +257,7 @@ def resolve_model_year(dataset_dir: Path, model_year: int | None) -> int | None:
 
     dataset_dir = Path(dataset_dir)
     lifetimes = False
-    for _, filename in _COMPONENT_FILES:
+    for _component, _key, filename in COMPONENT_TABLES:
         path = dataset_dir / "static" / filename
         if path.exists() and has_lifetime_columns(pd.read_csv(path, nrows=0)):
             lifetimes = True
@@ -281,103 +270,64 @@ def resolve_model_year(dataset_dir: Path, model_year: int | None) -> int | None:
     return int(year)
 
 
-def build_unit_pool(
+def dataset_row_specs(
+    dataset_dir: Path, params: OutageParams
+) -> tuple[list[RowSpec], dict[str, pd.DataFrame]]:
+    """Pooled rows of a dataset, plus the static tables they came from."""
+    static = read_static_tables(dataset_dir)
+    return row_specs(static, params), static
+
+
+def active_capacities(
     dataset_dir: Path, params: OutageParams, model_year: int | None = None
-) -> UnitPool:
-    """Build the deterministic virtual-unit pool for a dataset.
+) -> dict[str, float]:
+    """As-built ``p_nom`` per pooled row, zeroed where the row retires by ``model_year``."""
+    from zap.importers.wy_store import retired_mask
 
-    Rows are ``generators.csv`` then ``storage_units.csv``, each in CSV order,
-    keeping only rows whose carrier has outage parameters. A carrier that appears
-    in the data but in neither ``carriers`` nor ``excluded_carriers`` is a hard
-    error, so new datasets cannot silently skip units.
-
-    Pool *sizing* uses the capacity that is active in ``model_year``: a row
-    retired by ``build_year + lifetime <= model_year`` contributes 0 MW and so
-    gets ``min_units_per_row`` units, exactly like a zero-``p_nom`` expansion
-    candidate.  It keeps its slot on the unit axis (offsets stay row-aligned) and
-    a planner may still rebuild it -- up to ``min_units_per_row * unit_size_mw``
-    before :func:`row_availability` runs out of units for it.  ``model_year is
-    None`` (or a dataset without lifetime columns) sizes on raw ``p_nom``.
-    """
-    dataset_dir = Path(dataset_dir)
     model_year = resolve_model_year(dataset_dir, model_year)
-    records = []
-    seen_rows: set[str] = set()
-
-    for component, filename in _COMPONENT_FILES:
-        df = _read_static(dataset_dir, filename)
+    rows, static = dataset_row_specs(dataset_dir, params)
+    pooled = {r.name for r in rows}
+    caps: dict[str, float] = {}
+    for _component, key, _filename in COMPONENT_TABLES:
+        df = static[key]
         if len(df) == 0:
             continue
+        retired = retired_mask(df, model_year)
+        names = df["name"].astype(str) if "name" in df.columns else df.index.astype(str)
+        for name, p_nom, gone in zip(names, df["p_nom"], retired, strict=True):
+            if str(name) in pooled:
+                caps[str(name)] = 0.0 if bool(gone) else float(p_nom)
+    return caps
 
-        from zap.importers.wy_store import retired_mask
 
-        retired = pd.Series(retired_mask(df, model_year), index=df.index)
+# ---------------------------------------------------------------------------
+# Slot arithmetic
+# ---------------------------------------------------------------------------
 
-        unknown = sorted(
-            set(df["carrier"].astype(str)) - set(params.carriers) - params.excluded_carriers
-        )
-        if unknown:
-            raise KeyError(
-                f"{filename}: carriers {unknown} are in neither `carriers` nor "
-                "`excluded_carriers` of the outage parameters; add them explicitly"
-            )
 
-        for _index, row in df.iterrows():
-            carrier = str(row["carrier"])
-            if carrier not in params.carriers:
-                continue
+def slot_count(capacity: float, size: float) -> int:
+    """Slots backing ``capacity`` MW at ``size`` MW per unit (0 when ``C == 0``).
 
-            name = str(row["name"])
-            if name in seen_rows:
-                raise ValueError(f"duplicate component name {name!r} across static tables")
-            seen_rows.add(name)
+    The epsilon keeps an exact multiple from rounding up to one unit too many;
+    the ``max(1, ...)`` guards a capacity so small that it would round down to 0.
+    """
+    if capacity <= 0.0:
+        return 0
+    return max(1, math.ceil(capacity / size - 1e-9))
 
-            cp = params.carriers[carrier]
-            active_mw = 0.0 if bool(retired.loc[_index]) else float(row["p_nom"])
-            reference_mw = max(active_mw, params.min_pool_capacity_mw)
-            n_units = max(
-                params.min_units_per_row,
-                math.ceil(params.pool_multiplier * reference_mw / cp.unit_size_mw),
-            )
-            records.append(
-                {
-                    "component": component,
-                    "row": name,
-                    "carrier": carrier,
-                    "bus": str(row["bus"]),
-                    "unit_size_mw": float(cp.unit_size_mw),
-                    "n_units": n_units,
-                }
-            )
 
-    row_offset: dict[str, int] = {}
-    row_units: dict[str, int] = {}
-    row_size: dict[str, float] = {}
-    table_rows = []
-    offset = 0
-    for rec in records:
-        row_offset[rec["row"]] = offset
-        row_units[rec["row"]] = rec["n_units"]
-        row_size[rec["row"]] = rec["unit_size_mw"]
-        for slot in range(rec["n_units"]):
-            table_rows.append(
-                {
-                    "unit_id": f"{rec['row']}#{slot}",
-                    "component": rec["component"],
-                    "row": rec["row"],
-                    "carrier": rec["carrier"],
-                    "bus": rec["bus"],
-                    "slot": slot,
-                    "unit_size_mw": rec["unit_size_mw"],
-                    "row_offset": offset,
-                    "row_units": rec["n_units"],
-                }
-            )
-        offset += rec["n_units"]
+def _row_weights(capacity: float, size: float) -> np.ndarray:
+    """Weights of the slots backing ``capacity`` MW of a row with unit size ``size``.
 
-    table = pd.DataFrame(table_rows, columns=UNIT_TABLE_COLUMNS)
-    table.index = pd.RangeIndex(len(table))
-    return UnitPool(table=table, row_offset=row_offset, row_units=row_units, row_size=row_size)
+    ``[1, ..., 1, (C - (n-1) s) / s]``. Unlike version 1 there is no bound on
+    ``n``: the virtual pool is unbounded, so nothing can overflow.
+    """
+    n = slot_count(capacity, size)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    w = np.ones(n, dtype=np.float64)
+    w[-1] = (capacity - (n - 1) * size) / size
+    return w
 
 
 # ---------------------------------------------------------------------------
@@ -385,420 +335,277 @@ def build_unit_pool(
 # ---------------------------------------------------------------------------
 
 
-def sample_chunk(
-    pool: UnitPool,
+def _as_vector(value, n: int, what: str) -> np.ndarray:
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.ndim == 0:
+        return np.full(n, float(arr))
+    arr = arr.reshape(-1)
+    if arr.size != n:
+        raise ValueError(f"{what} has {arr.size} entries but there are {n} units")
+    return arr
+
+
+def sample_units(
+    unit_ids,
+    p_fail,
+    p_repair,
+    fo_rate,
+    *,
+    year: int,
+    draw: int,
+    base_seed: int,
+    n_hours: int,
+) -> np.ndarray:
+    """``(n_units, n_hours)`` uint8 uptime, 1 = available.
+
+    One ``SeedSequence`` per unit, seeded on ``(base_seed, year, draw, uid)``, so
+    a unit's realisation depends on its key and on nothing else -- not on which
+    other units were asked for, nor on how many. The hour recursion is vectorised
+    across the batch; only the uniform fill is per unit.
+
+    ``n_hours`` shorter than a full year returns exactly the first ``n_hours``
+    hours of the full-year realisation (the uniforms are a stream prefix).
+    """
+    if n_hours < 1:
+        raise ValueError(f"n_hours must be >= 1, got {n_hours}")
+    ids = np.asarray(unit_ids, dtype=np.uint64).reshape(-1)
+    n_units = ids.size
+    out = np.empty((n_units, int(n_hours)), dtype=np.uint8)
+    if n_units == 0:
+        return out
+
+    pf = _as_vector(p_fail, n_units, "p_fail")
+    pr = _as_vector(p_repair, n_units, "p_repair")
+    f = _as_vector(fo_rate, n_units, "fo_rate")
+
+    base_seed, year, draw = int(base_seed), int(year), int(draw)
+    mask32 = np.uint64(0xFFFFFFFF)
+    for start in range(0, n_units, _BATCH_UNITS):
+        stop = min(start + _BATCH_UNITS, n_units)
+        u = np.empty((stop - start, int(n_hours)), dtype=np.float64)
+        for i, uid in enumerate(ids[start:stop]):
+            uid = np.uint64(uid)
+            entropy = (
+                base_seed,
+                year,
+                draw,
+                int(uid >> np.uint64(32)),
+                int(uid & mask32),
+            )
+            rng = np.random.default_rng(np.random.SeedSequence(entropy=entropy))
+            u[i, :] = rng.random(int(n_hours))
+
+        chunk = out[start:stop]
+        # Stationary start: available with probability 1 - FOR.
+        state = u[:, 0] < (1.0 - f[start:stop])
+        chunk[:, 0] = state
+        pf_c, pr_c = pf[start:stop], pr[start:stop]
+        for t in range(1, int(n_hours)):
+            state = np.where(state, u[:, t] >= pf_c, u[:, t] < pr_c)
+            chunk[:, t] = state
+    return out
+
+
+# ---------------------------------------------------------------------------
+# In-process slot cache (spec D3.2)
+# ---------------------------------------------------------------------------
+
+#: ``uid -> (n_hours,) uint8``, valid for exactly one
+#: ``(scheme, base_seed, year, draw, n_hours)`` and dropped wholesale when that
+#: tuple changes.  The evaluation enumerates design-inner, so consecutive cases
+#: share it and a perturbed design misses only on the slots it added.
+_UNIT_CACHE: OrderedDict[int, np.ndarray] = OrderedDict()
+_UNIT_CACHE_KEY: tuple | None = None
+_UNIT_CACHE_STATS: dict[str, Any] = {"hits": 0, "misses": 0}
+
+
+def cache_capacity() -> int:
+    """Slot cap of the in-process cache (``CH3_OUTAGE_CACHE_UNITS``)."""
+    raw = os.environ.get(CACHE_UNITS_ENV)
+    if raw is None:
+        return DEFAULT_CACHE_UNITS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_CACHE_UNITS
+    return max(0, value)
+
+
+def unit_cache_clear() -> None:
+    """Drop the cache and reset its counters (tests, long runs)."""
+    global _UNIT_CACHE_KEY
+    _UNIT_CACHE.clear()
+    _UNIT_CACHE_KEY = None
+    _UNIT_CACHE_STATS.update({"hits": 0, "misses": 0})
+
+
+def unit_cache_info() -> dict:
+    """``{"hits", "misses", "units", "key"}`` of the slot cache."""
+    return {
+        "hits": int(_UNIT_CACHE_STATS["hits"]),
+        "misses": int(_UNIT_CACHE_STATS["misses"]),
+        "units": len(_UNIT_CACHE),
+        "key": _UNIT_CACHE_KEY,
+        "capacity": cache_capacity(),
+    }
+
+
+def _cached_uptime(
+    ids: np.ndarray,
+    carriers: Sequence[str],
+    params: OutageParams,
+    *,
+    scheme: str,
+    base_seed: int,
+    year: int,
+    draw: int,
+    n_hours: int,
+) -> dict[int, np.ndarray]:
+    """Uptime rows for ``ids``, generating (in one batched call) only the misses."""
+    global _UNIT_CACHE_KEY
+    key = (str(scheme), int(base_seed), int(year), int(draw), int(n_hours))
+    if _UNIT_CACHE_KEY != key:
+        _UNIT_CACHE.clear()
+        _UNIT_CACHE_KEY = key
+
+    wanted: dict[int, np.ndarray] = {}
+    miss_ids: list[int] = []
+    miss_carriers: list[str] = []
+    for uid, carrier in zip(ids, carriers, strict=True):
+        uid = int(uid)
+        if uid in wanted:
+            continue
+        cached = _UNIT_CACHE.get(uid)
+        if cached is not None:
+            _UNIT_CACHE.move_to_end(uid)
+            _UNIT_CACHE_STATS["hits"] += 1
+            wanted[uid] = cached
+        else:
+            miss_ids.append(uid)
+            miss_carriers.append(str(carrier))
+
+    if miss_ids:
+        _UNIT_CACHE_STATS["misses"] += len(miss_ids)
+        cps = [params.carriers[c] for c in miss_carriers]
+        up = sample_units(
+            np.array(miss_ids, dtype=np.uint64),
+            [cp.p_fail for cp in cps],
+            [cp.p_repair for cp in cps],
+            [cp.forced_outage_rate for cp in cps],
+            year=year,
+            draw=draw,
+            base_seed=base_seed,
+            n_hours=n_hours,
+        )
+        capacity = cache_capacity()
+        for i, uid in enumerate(miss_ids):
+            row = up[i]
+            row.flags.writeable = False
+            wanted[uid] = row
+            if capacity:
+                _UNIT_CACHE[uid] = row
+                _UNIT_CACHE.move_to_end(uid)
+        while capacity and len(_UNIT_CACHE) > capacity:
+            _UNIT_CACHE.popitem(last=False)
+    return wanted
+
+
+# ---------------------------------------------------------------------------
+# Row availability
+# ---------------------------------------------------------------------------
+
+
+def _window_bounds(window, n_hours: int) -> tuple[int, int]:
+    if window is None:
+        return 0, int(n_hours)
+    start = getattr(window, "start", None)
+    stop = getattr(window, "stop", None)
+    if start is None or stop is None:
+        start, stop = window  # a (start, stop) pair
+    start, stop = int(start), int(stop)
+    if start < 0 or stop <= start:
+        raise ValueError(f"invalid hour window [{start}, {stop})")
+    if stop > n_hours:
+        raise ValueError(f"window [{start}, {stop}) exceeds {n_hours} hours per year")
+    return start, stop
+
+
+def row_availability(
+    rows: Sequence[RowSpec],
+    capacities: Mapping[str, float],
     params: OutageParams,
     *,
     year: int,
     draw: int,
-    n_hours: int,
-    base_seed: int,
+    base_seed: int = DEFAULT_BASE_SEED,
+    scheme: str = DEFAULT_SCHEME,
+    window=None,
+    hours_per_year: int = HOURS_PER_YEAR,
 ) -> np.ndarray:
-    """Sample one ``(weather_year, draw)`` chunk.
+    """``(n_hours, n_rows)`` availability in ``[0, 1]``, one column per row of ``rows``.
 
-    Returns ``(n_units, n_hours)`` ``uint8``, 1 = available. See the module
-    docstring for the RNG contract (spec D7): the whole chunk's uniforms come
-    from a single C-order ``rng.random`` call, so growing the pool by appending
-    units leaves existing units bit-identical.
-    """
-    if n_hours < 1:
-        raise ValueError(f"n_hours must be >= 1, got {n_hours}")
+    For row ``r`` at capacity ``C`` with unit size ``s``::
 
-    n_units = pool.n_units
-    rng = np.random.default_rng(
-        np.random.SeedSequence(entropy=int(base_seed), spawn_key=(int(year), int(draw)))
-    )
-    u = rng.random((n_units, n_hours))
-
-    pf = pool.p_fail_vector(params)
-    pr = pool.p_repair_vector(params)
-    f = pool.for_vector(params)
-
-    out = np.empty((n_units, n_hours), dtype=np.uint8)
-    state = u[:, 0] < (1.0 - f)
-    out[:, 0] = state
-    for t in range(1, n_hours):
-        state = np.where(state, u[:, t] >= pf, u[:, t] < pr)
-        out[:, t] = state
-    return out
-
-
-def _row_weights(capacity: float, size: float, available_units: int, row: str) -> np.ndarray:
-    """Weights of the units backing ``capacity`` MW of a row with unit size ``size``."""
-    if capacity <= 0.0:
-        return np.zeros(0, dtype=np.float64)
-    # max(1, ...) guards a capacity so small that the epsilon rounds n down to 0.
-    n = max(1, math.ceil(capacity / size - 1e-9))
-    if n > available_units:
-        raise ValueError(
-            f"row {row!r} needs {n} units for {capacity} MW at {size} MW/unit but the "
-            f"pool only holds {available_units}; regenerate the pool with a larger "
-            "pool_multiplier"
-        )
-    w = np.ones(n, dtype=np.float64)
-    w[-1] = (capacity - (n - 1) * size) / size
-    return w
-
-
-def row_availability(
-    up: np.ndarray,
-    pool: UnitPool,
-    capacities: pd.Series,
-    rows: Sequence[str],
-) -> np.ndarray:
-    """Map unit availability onto source rows.
-
-    ``up``: ``(n_units, n_hours)`` -> returns ``(n_hours, len(rows))`` float64 in
-    ``[0, 1]``. For row ``r`` with capacity ``C`` and unit size ``s``::
-
-        n = ceil(C / s)                       # n == 0 if C == 0 -> availability 1.0
+        n = 0 if C == 0 else max(1, ceil(C / s))     # n == 0 -> availability 1.0
         w = [1] * (n - 1) + [(C - (n - 1) s) / s]
-        availability(t) = sum_k w_k up[offset + k, t] / sum_k w_k
+        availability(t) = sum_k w_k up[uid(r, k), t] / sum_k w_k
 
-    Raises ``ValueError`` if ``n`` exceeds the units the pool holds for that row
-    (the design outgrew the pool). Rows that are absent from the pool -- VRE, or
-    any carrier in ``excluded_carriers`` -- get availability 1.0 in every hour.
+    The chain is simulated from hour 0 of the weather year and sliced to
+    ``window``, so a block's realisation does not depend on how it was loaded.
+    Rows with no slots (zero capacity) are available in every hour.
     """
-    up = np.asarray(up)
-    if up.ndim != 2:
-        raise ValueError(f"`up` must be (n_units, n_hours), got shape {up.shape}")
-    if up.shape[0] != pool.n_units:
-        raise ValueError(f"`up` has {up.shape[0]} units but the pool has {pool.n_units}")
-
-    n_hours = up.shape[1]
+    scheme_obj = get_scheme(scheme)
+    start, stop = _window_bounds(window, hours_per_year)
+    n_hours = stop - start
     out = np.ones((n_hours, len(rows)), dtype=np.float64)
 
+    per_row: list[tuple[int, np.ndarray, np.ndarray]] = []
+    all_ids: list[int] = []
+    all_carriers: list[str] = []
     for j, row in enumerate(rows):
-        if row not in pool.row_offset:
+        cp = params.carriers.get(row.carrier)
+        if cp is None:  # not pooled; availability stays 1.0
             continue
-        capacity = float(capacities[row])
-        size = pool.row_size[row]
-        w = _row_weights(capacity, size, pool.row_units[row], row)
+        capacity = float(capacities.get(row.name, 0.0))
+        w = _row_weights(capacity, cp.unit_size_mw)
         if w.size == 0:
             continue
-        offset = pool.row_offset[row]
-        block = up[offset : offset + w.size, :].astype(np.float64)
-        out[:, j] = (w @ block) / w.sum()
+        ids = scheme_obj.unit_ids(row, int(w.size))
+        per_row.append((j, ids, w))
+        all_ids.extend(int(u) for u in ids)
+        all_carriers.extend([row.carrier] * int(ids.size))
 
+    if not per_row:
+        return out
+
+    uptime = _cached_uptime(
+        np.array(all_ids, dtype=np.uint64),
+        all_carriers,
+        params,
+        scheme=scheme,
+        base_seed=base_seed,
+        year=year,
+        draw=draw,
+        n_hours=hours_per_year,
+    )
+
+    for j, ids, w in per_row:
+        block = np.stack([uptime[int(u)][start:stop] for u in ids]).astype(np.float64)
+        out[:, j] = (w @ block) / w.sum()
     return out
 
 
-# ---------------------------------------------------------------------------
-# Store
-# ---------------------------------------------------------------------------
-
-
-def _zap_commit() -> str:
-    try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=Path(__file__).resolve().parents[2],
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()
-        )
-    except Exception:  # noqa: BLE001 - provenance is best-effort
-        return "unknown"
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _vlen_str_array(group: zarr.Group, name: str, values: Sequence[str]) -> None:
-    arr = group.create_dataset(
-        name,
-        shape=(len(values),),
-        dtype=object,
-        object_codec=numcodecs.VLenUTF8(),
-        overwrite=True,
-    )
-    arr[:] = np.array([str(v) for v in values], dtype=object)
-
-
-def default_store_path(dataset_dir: Path) -> Path:
-    return Path(dataset_dir) / "outages.zarr"
-
-
-def default_units_csv(store_path: Path) -> Path:
-    """The unit sidecar lives next to its store, so a sensitivity store built with
-    ``--out`` elsewhere cannot clobber the canonical ``outage_units.csv``."""
-    store_path = Path(store_path)
-    stem = store_path.stem
-    name = "outage_units.csv" if stem == "outages" else f"{stem}_units.csv"
-    return store_path.parent / name
-
-
-def default_ucap_csv(dataset_dir: Path) -> Path:
-    return Path(dataset_dir) / "ucap.csv"
-
-
-def storage_projection(pool: UnitPool, years: Sequence[int], draws: int, hours: int) -> dict:
-    raw = pool.n_units * len(years) * draws * hours
-    return {
-        "n_units": pool.n_units,
-        "n_years": len(years),
-        "n_draws": draws,
-        "hours_per_year": hours,
-        "raw_bytes": raw,
-        "raw_gb": raw / 1e9,
-    }
-
-
-def init_store(
-    dataset_dir: Path,
-    *,
-    years: Sequence[int],
-    draws: int,
-    base_seed: int,
-    params: OutageParams,
-    out_path: Path | None = None,
-    hours_per_year: int = HOURS_PER_YEAR,
-    chunk_hours: int = 168,
-    overwrite: bool = False,
-    model_year: int | None = None,
-) -> Path:
-    """Create the empty outage store, its coordinates, and ``outage_units.csv``.
-
-    Separating this from :func:`generate` is what makes a SLURM array safe: the
-    store exists before any shard starts, so shards never race on creation and,
-    since chunking is ``(1, 1, chunk_hours, n_units)``, never share a chunk.
-    """
-    dataset_dir = Path(dataset_dir)
-    out_path = Path(out_path) if out_path is not None else default_store_path(dataset_dir)
-    years = [int(y) for y in years]
-    if sorted(set(years)) != years:
-        raise ValueError("`years` must be unique and ascending")
-    if draws < 1:
-        raise ValueError("`draws` must be >= 1")
-
-    if out_path.exists() and not overwrite:
-        raise FileExistsError(
-            f"{out_path} already exists; pass overwrite=True (--overwrite) to replace it"
-        )
-
-    model_year = resolve_model_year(dataset_dir, model_year)
-    pool = build_unit_pool(dataset_dir, params, model_year=model_year)
-    n_units = pool.n_units
-    if n_units == 0:
-        raise ValueError("the unit pool is empty; check `carriers` in the outage parameters")
-
-    root = zarr.open_group(str(out_path), mode="w")
-    root.create_dataset(
-        "available",
-        shape=(len(years), draws, hours_per_year, n_units),
-        chunks=(1, 1, min(chunk_hours, hours_per_year), n_units),
-        dtype="uint8",
-        fill_value=255,
-        compressor=numcodecs.Blosc(cname="zstd", clevel=5, shuffle=numcodecs.Blosc.BITSHUFFLE),
-        overwrite=True,
-    )
-    # Race-free resume ledger: one chunk per (year, draw), so shards never contend.
-    root.create_dataset(
-        "done",
-        shape=(len(years), draws),
-        chunks=(1, 1),
-        dtype="uint8",
-        fill_value=0,
-        overwrite=True,
-    )
-
-    root.create_dataset("weather_year", shape=(len(years),), dtype="int32", overwrite=True)[:] = (
-        np.array(years, dtype=np.int32)
-    )
-    root.create_dataset("draw", shape=(draws,), dtype="int32", overwrite=True)[:] = np.arange(
-        draws, dtype=np.int32
-    )
-    root.create_dataset("hour", shape=(hours_per_year,), dtype="int32", overwrite=True)[:] = (
-        np.arange(hours_per_year, dtype=np.int32)
-    )
-
-    table = pool.table
-    for name, col in [
-        ("unit_id", "unit_id"),
-        ("unit_row", "row"),
-        ("unit_carrier", "carrier"),
-        ("unit_bus", "bus"),
-        ("unit_component", "component"),
-    ]:
-        _vlen_str_array(root, name, table[col].tolist())
-    for name, col in [
-        ("unit_slot", "slot"),
-        ("unit_row_offset", "row_offset"),
-        ("unit_row_units", "row_units"),
-    ]:
-        root.create_dataset(name, shape=(n_units,), dtype="int32", overwrite=True)[:] = table[
-            col
-        ].to_numpy(np.int32)
-    root.create_dataset("unit_size_mw", shape=(n_units,), dtype="float32", overwrite=True)[:] = (
-        table["unit_size_mw"].to_numpy(np.float32)
-    )
-
-    root.attrs.update(
-        {
-            "generator_version": GENERATOR_VERSION,
-            "dataset": dataset_dir.name,
-            "created_utc": _utc_now(),
-            "zap_commit": _zap_commit(),
-            "base_seed": int(base_seed),
-            "params_sha256": params.sha256,
-            "params": params.to_dict(),
-            "pool_multiplier": params.pool_multiplier,
-            "min_units_per_row": params.min_units_per_row,
-            "min_pool_capacity_mw": params.min_pool_capacity_mw,
-            "weather_years": years,
-            "n_draws": int(draws),
-            "hours_per_year": int(hours_per_year),
-            "n_units": int(n_units),
-            # Model year the pool was sized for: rows retired by then (see
-            # `zap.importers.wy_store.retired_mask`) get the minimum pool.
-            "model_year": None if model_year is None else int(model_year),
-            "completed": [],
-        }
-    )
-
-    units_csv = default_units_csv(out_path)
-    table.to_csv(units_csv, index=False)
-    return out_path
-
-
-def _shard_jobs(years: Sequence[int], draws: int, chunk: tuple[int, int]) -> list[tuple[int, int]]:
-    k, n = int(chunk[0]), int(chunk[1])
-    if n < 1 or not (1 <= k <= n):
-        raise ValueError(f"chunk must be (k, n) with 1 <= k <= n, got {chunk}")
-    jobs = sorted((int(y), int(d)) for y in years for d in range(draws))
-    # Contiguous, balanced split of the sorted job list.
-    total = len(jobs)
-    start = (total * (k - 1)) // n
-    stop = (total * k) // n
-    return jobs[start:stop]
-
-
-def _assert_units_csv_matches(store_path: Path, root: zarr.Group, pool: UnitPool) -> None:
-    csv_path = default_units_csv(store_path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"missing sidecar {csv_path}; re-run `init`")
-    sidecar = pd.read_csv(csv_path)
-    if list(sidecar["unit_id"]) != list(np.asarray(root["unit_id"][:])):
-        raise ValueError(f"{csv_path} does not match the store's unit coordinates")
-    if list(sidecar["unit_id"]) != list(pool.table["unit_id"]):
-        raise ValueError(
-            f"{csv_path} does not match the pool rebuilt from static/*.csv and the "
-            "store's parameters; the static tables or parameters changed"
-        )
-
-
-def generate(
-    dataset_dir: Path,
-    *,
-    years: Sequence[int],
-    draws: int,
-    base_seed: int,
-    params: OutageParams,
-    out_path: Path | None = None,
-    chunk: tuple[int, int] = (1, 1),
-    overwrite: bool = False,
-    init: bool = False,
-    hours_per_year: int = HOURS_PER_YEAR,
-    chunk_hours: int = 168,
-    verbose: bool = True,
-    model_year: int | None = None,
-) -> Path:
-    """Generate outage draws into ``outages.zarr``.
-
-    ``chunk=(k, n)`` processes shard ``k`` (1-based) of ``n`` contiguous shards of
-    the sorted ``(year, draw)`` job list -- the SLURM-array seam. The store must
-    already exist (see :func:`init_store`) unless ``init=True``.
-
-    Already-generated ``(year, draw)`` pairs are skipped unless ``overwrite`` is
-    set, so a failed array job can simply be resubmitted.
-    """
-    dataset_dir = Path(dataset_dir)
-    out_path = Path(out_path) if out_path is not None else default_store_path(dataset_dir)
-
-    if init:
-        init_store(
-            dataset_dir,
-            years=years,
-            draws=draws,
-            base_seed=base_seed,
-            params=params,
-            out_path=out_path,
-            hours_per_year=hours_per_year,
-            chunk_hours=chunk_hours,
-            overwrite=overwrite,
-            model_year=model_year,
-        )
-    elif not out_path.exists():
-        raise FileNotFoundError(
-            f"{out_path} does not exist; run the `init` subcommand first (or pass init=True)"
-        )
-
-    root = zarr.open_group(str(out_path), mode="r+")
-    store_years = [int(y) for y in root.attrs["weather_years"]]
-    if [int(y) for y in years] != store_years:
-        raise ValueError(f"store was initialised for years {store_years}, asked for {list(years)}")
-    if int(draws) != int(root.attrs["n_draws"]):
-        raise ValueError(
-            f"store was initialised for {root.attrs['n_draws']} draws, asked for {draws}"
-        )
-    if int(base_seed) != int(root.attrs["base_seed"]):
-        raise ValueError(
-            f"store was initialised with base_seed {root.attrs['base_seed']}, asked for {base_seed}"
-        )
-    if params.sha256 != root.attrs["params_sha256"]:
-        raise ValueError(
-            "outage parameters differ from the ones the store was initialised with "
-            f"({params.sha256[:12]} != {str(root.attrs['params_sha256'])[:12]})"
-        )
-
-    hours = int(root.attrs["hours_per_year"])
-    pool = build_unit_pool(dataset_dir, params, model_year=root.attrs.get("model_year"))
-    _assert_units_csv_matches(out_path, root, pool)
-
-    year_ix = {y: i for i, y in enumerate(store_years)}
-    jobs = _shard_jobs(store_years, draws, chunk)
-    available = root["available"]
-    done = root["done"]
-
-    t0 = time.time()
-    n_written = 0
-    for year, draw in jobs:
-        yi = year_ix[year]
-        if done[yi, draw] and not overwrite:
-            if verbose:
-                print(f"  skip (done) year={year} draw={draw}")
+def slot_counts(
+    rows: Sequence[RowSpec], capacities: Mapping[str, float], params: OutageParams
+) -> dict[str, int]:
+    """``{row name: slots}`` at the given capacities -- the cost guard's input."""
+    out: dict[str, int] = {}
+    for row in rows:
+        cp = params.carriers.get(row.carrier)
+        if cp is None:
             continue
-        up = sample_chunk(pool, params, year=year, draw=draw, n_hours=hours, base_seed=base_seed)
-        available[yi, draw, :, :] = up.T
-        done[yi, draw] = 1
-        n_written += 1
-        if verbose:
-            print(f"  wrote year={year} draw={draw} ({n_written}/{len(jobs)})")
-
-    # `done` is the authoritative ledger (one chunk per job, so shards never race).
-    # `attrs["completed"]` is a convenience view recomputed at the end of each shard
-    # and can lag while other shards are still running.
-    done_arr = np.asarray(done[:])
-    completed = [[int(store_years[i]), int(j)] for i, j in zip(*np.nonzero(done_arr), strict=True)]
-    root.attrs["completed"] = completed
-
-    if verbose:
-        elapsed = time.time() - t0
-        proj = storage_projection(pool, store_years, draws, hours)
-        size = _dir_size(out_path)
-        print(
-            f"shard {chunk[0]}/{chunk[1]}: wrote {n_written} (year, draw) chunks in "
-            f"{elapsed:.1f} s; store {size / 1e6:.1f} MB on disk, projected raw "
-            f"{proj['raw_gb']:.2f} GB, {len(completed)}/{len(store_years) * draws} complete"
-        )
-    return out_path
-
-
-def _dir_size(path: Path) -> int:
-    return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
+        out[row.name] = slot_count(float(capacities.get(row.name, 0.0)), cp.unit_size_mw)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -806,84 +613,115 @@ def _dir_size(path: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
+def default_ucap_csv(dataset_dir: Path) -> Path:
+    return Path(dataset_dir) / "ucap.csv"
+
+
+UCAP_COLUMNS = [
+    "component",
+    "row",
+    "carrier",
+    "bus",
+    "ordinal",
+    "p_nom_mw",
+    "unit_size_mw",
+    "n_units_row",
+    "forced_outage_rate",
+    "ucap_analytic",
+    "ucap_empirical",
+    "n_samples",
+    "ucap_carrier_bus_empirical",
+    "outage_scheme",
+    "base_seed",
+    "n_years",
+    "n_draws",
+]
+
+
 def write_ucap(
     dataset_dir: Path,
-    store_path: Path | None = None,
+    *,
+    years: Sequence[int],
+    draws: int,
+    base_seed: int = DEFAULT_BASE_SEED,
+    scheme: str = DEFAULT_SCHEME,
+    hours_per_year: int = HOURS_PER_YEAR,
     out_csv: Path | None = None,
+    params: OutageParams | None = None,
+    model_year: int | None = None,
+    verbose: bool = True,
 ) -> pd.DataFrame:
-    """Derive ``ucap.csv`` from a generated outage store.
+    """Sample ``years x draws`` on demand and write ``ucap.csv``.
 
-    ``ucap_empirical`` is the mean over every generated ``(year, draw, hour)`` of
-    ``row_availability`` for the row at its current ``p_nom``. Because that map is
-    linear in the unit uptimes, the mean is computed from per-unit uptime sums --
-    the store is read once, streaming.
+    ``ucap_empirical`` is the mean over every sampled ``(year, draw, hour)`` of
+    the row's availability *at its active as-built ``p_nom``*.
+    ``ucap_analytic = 1 - FOR`` is scheme-independent; the empirical column is
+    an estimate of it and is not expected to move between schemes beyond its own
+    Monte-Carlo error (spec D4).
     """
     dataset_dir = Path(dataset_dir)
-    store_path = Path(store_path) if store_path is not None else default_store_path(dataset_dir)
+    params = params if params is not None else load_outage_params()
     out_csv = Path(out_csv) if out_csv is not None else default_ucap_csv(dataset_dir)
-    if not store_path.exists():
-        raise FileNotFoundError(f"no outage store at {store_path}; run `generate` first")
+    years = [int(y) for y in years]
+    draws = int(draws)
+    if not years:
+        raise ValueError("`years` must not be empty")
+    if draws < 1:
+        raise ValueError("`draws` must be >= 1")
 
-    root = zarr.open_group(str(store_path), mode="r")
-    params = OutageParams.from_dict(root.attrs["params"], sha256=root.attrs["params_sha256"])
-    model_year = resolve_model_year(dataset_dir, root.attrs.get("model_year"))
-    pool = build_unit_pool(dataset_dir, params, model_year=model_year)
-    if pool.n_units != int(root.attrs["n_units"]):
-        raise ValueError("the pool rebuilt from static/*.csv does not match the store")
+    rows, _static = dataset_row_specs(dataset_dir, params)
+    if not rows:
+        raise ValueError("no pooled rows; check `carriers` in the outage parameters")
+    caps = active_capacities(dataset_dir, params, model_year)
 
-    hours = int(root.attrs["hours_per_year"])
-    done = np.asarray(root["done"][:])
-    completed = list(zip(*np.nonzero(done), strict=True))
-    if not completed:
-        raise ValueError(f"{store_path} has no completed (year, draw) chunks")
-
-    available = root["available"]
-    uptime = np.zeros(pool.n_units, dtype=np.float64)
-    for yi, di in completed:
-        uptime += np.asarray(available[yi, di, :, :], dtype=np.float64).sum(axis=0)
-    n_samples = len(completed) * hours
-    mean_uptime = uptime / n_samples
-
-    # Capacities: the current p_nom of every pooled row.
-    # Capacities: the p_nom of every pooled row that is still active in
-    # `model_year` (a retired row contributes 0 MW, so its UCAP falls back to the
-    # analytic value -- it derates nothing because its capacity is zero).
-    from zap.importers.wy_store import retired_mask
-
-    caps = {}
-    for _, filename in _COMPONENT_FILES:
-        df = _read_static(dataset_dir, filename)
-        retired = retired_mask(df, model_year)
-        for (_, r), gone in zip(df.iterrows(), retired, strict=True):
-            if str(r["name"]) in pool.row_offset:
-                caps[str(r["name"])] = 0.0 if bool(gone) else float(r["p_nom"])
+    total = np.zeros(len(rows), dtype=np.float64)
+    n_cases = 0
+    t0 = time.time()
+    for year in years:
+        for draw in range(draws):
+            avail = row_availability(
+                rows,
+                caps,
+                params,
+                year=year,
+                draw=draw,
+                base_seed=base_seed,
+                scheme=scheme,
+                window=(0, hours_per_year),
+                hours_per_year=hours_per_year,
+            )
+            total += avail.mean(axis=0)
+            n_cases += 1
+            if verbose and n_cases % 10 == 0:
+                print(f"  ucap: {n_cases}/{len(years) * draws} (year, draw) in {time.time() - t0:.1f} s")
+    empirical = total / n_cases
+    n_samples = n_cases * hours_per_year
 
     records = []
-    for row, offset in pool.row_offset.items():
-        meta = pool.table.iloc[offset]
-        carrier = str(meta["carrier"])
-        cp = params.carriers[carrier]
-        capacity = caps[row]
+    for j, row in enumerate(rows):
+        cp = params.carriers[row.carrier]
+        capacity = float(caps.get(row.name, 0.0))
+        n_slots = slot_count(capacity, cp.unit_size_mw)
         analytic = 1.0 - cp.forced_outage_rate
-        w = _row_weights(capacity, pool.row_size[row], pool.row_units[row], row)
-        if w.size == 0:
-            empirical, samples = analytic, 0
-        else:
-            empirical = float((w @ mean_uptime[offset : offset + w.size]) / w.sum())
-            samples = n_samples
         records.append(
             {
-                "component": str(meta["component"]),
-                "row": row,
-                "carrier": carrier,
-                "bus": str(meta["bus"]),
+                "component": row.component,
+                "row": row.name,
+                "carrier": row.carrier,
+                "bus": row.bus,
+                "ordinal": int(row.ordinal),
                 "p_nom_mw": capacity,
-                "unit_size_mw": pool.row_size[row],
-                "n_units_row": pool.row_units[row],
-                "forced_outage_rate": cp.forced_outage_rate,
+                "unit_size_mw": float(cp.unit_size_mw),
+                "n_units_row": int(n_slots),
+                "forced_outage_rate": float(cp.forced_outage_rate),
                 "ucap_analytic": analytic,
-                "ucap_empirical": empirical,
-                "n_samples": samples,
+                # A row with no slots derates nothing; report the analytic value.
+                "ucap_empirical": analytic if n_slots == 0 else float(empirical[j]),
+                "n_samples": 0 if n_slots == 0 else n_samples,
+                "outage_scheme": str(scheme),
+                "base_seed": int(base_seed),
+                "n_years": len(years),
+                "n_draws": draws,
             }
         )
 
@@ -899,27 +737,13 @@ def write_ucap(
         agg.loc[(c, b)] for c, b in zip(df["carrier"], df["bus"], strict=True)
     ]
 
-    df = df[
-        [
-            "component",
-            "row",
-            "carrier",
-            "bus",
-            "p_nom_mw",
-            "unit_size_mw",
-            "n_units_row",
-            "forced_outage_rate",
-            "ucap_analytic",
-            "ucap_empirical",
-            "n_samples",
-            "ucap_carrier_bus_empirical",
-        ]
-    ]
+    df = df[UCAP_COLUMNS]
     df.to_csv(out_csv, index=False)
-    print(
-        f"wrote {out_csv} ({len(df)} rows) from {len(completed)} (year, draw) chunks, "
-        f"{n_samples} hourly samples per row"
-    )
+    if verbose:
+        print(
+            f"wrote {out_csv} ({len(df)} rows) from {n_cases} (year, draw) cases, "
+            f"{n_samples} hourly samples per row, scheme {scheme}, seed {base_seed}"
+        )
     return df
 
 
@@ -928,35 +752,35 @@ def write_ucap(
 # ---------------------------------------------------------------------------
 
 
-def _print_pool_summary(pool: UnitPool, params: OutageParams, years, draws, hours) -> None:
-    proj = storage_projection(pool, years, draws, hours)
-    by_carrier = pool.table.groupby("carrier").size().sort_values(ascending=False)
-    print(f"unit pool: {pool.n_units} units over {len(pool.row_offset)} source rows")
-    for carrier, n in by_carrier.items():
+def _print_row_summary(rows: Sequence[RowSpec], caps: Mapping[str, float], params: OutageParams):
+    counts = slot_counts(rows, caps, params)
+    by_carrier: dict[str, list[int]] = {}
+    for row in rows:
+        by_carrier.setdefault(row.carrier, []).append(counts.get(row.name, 0))
+    print(f"pooled rows: {len(rows)}; slots at active as-built p_nom: {sum(counts.values())}")
+    for carrier in sorted(by_carrier, key=lambda c: -sum(by_carrier[c])):
         cp = params.carriers[carrier]
+        slots = by_carrier[carrier]
         print(
-            f"  {carrier:>22s}: {n:5d} units @ {cp.unit_size_mw:g} MW, "
-            f"FOR={cp.forced_outage_rate:.3f}, MTTR={cp.mttr_h:g} h, "
-            f"MTTF={cp.mttf_h:.0f} h"
+            f"  {carrier:>22s}: {len(slots):4d} rows, {sum(slots):6d} slots @ "
+            f"{cp.unit_size_mw:g} MW, FOR={cp.forced_outage_rate:.3f}, "
+            f"MTTR={cp.mttr_h:g} h, MTTF={cp.mttf_h:.0f} h"
         )
-    print(
-        f"projection: {proj['n_years']} years x {proj['n_draws']} draws x "
-        f"{proj['hours_per_year']} h x {proj['n_units']} units = "
-        f"{proj['raw_gb']:.2f} GB raw uint8 (expect strong compression)"
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m zap.reliability.outages",
-        description="Generate thermal/storage forced-outage draws and the UCAP table.",
+        description="Slot-keyed forced-outage sampling and the UCAP table.",
     )
     sub = p.add_subparsers(dest="command", required=True)
 
     def common(sp):
         sp.add_argument("--dataset-dir", type=Path, required=True)
         sp.add_argument("--params", type=Path, default=None, help="outage_params.yaml override")
-        sp.add_argument("--out", type=Path, default=None, help="store path")
+        sp.add_argument(
+            "--scheme", type=str, default=DEFAULT_SCHEME, help="outage key scheme"
+        )
         sp.add_argument(
             "--model-year",
             type=int,
@@ -964,36 +788,16 @@ def build_parser() -> argparse.ArgumentParser:
             help="investment year for the lifetime rule (default: detect from the dataset)",
         )
 
-    init_p = sub.add_parser("init", help="create the empty store and its coordinates")
-    common(init_p)
-    init_p.add_argument("--years", type=int, nargs="+", required=True)
-    init_p.add_argument("--draws", type=int, required=True)
-    init_p.add_argument("--seed", type=int, required=True)
-    init_p.add_argument("--hours-per-year", type=int, default=HOURS_PER_YEAR)
-    init_p.add_argument("--chunk-hours", type=int, default=168)
-    init_p.add_argument("--overwrite", action="store_true")
-    init_p.add_argument("--dry-run", action="store_true")
-
-    gen_p = sub.add_parser("generate", help="fill one shard of (year, draw) jobs")
-    common(gen_p)
-    gen_p.add_argument("--chunk", type=str, default="1/1", help="shard k/n, 1-based")
-    gen_p.add_argument("--years", type=int, nargs="+", default=None)
-    gen_p.add_argument("--draws", type=int, default=None)
-    gen_p.add_argument("--seed", type=int, default=None)
-    gen_p.add_argument("--hours-per-year", type=int, default=HOURS_PER_YEAR)
-    gen_p.add_argument("--chunk-hours", type=int, default=168)
-    gen_p.add_argument("--init", action="store_true", help="create the store first (shard 1 only)")
-    gen_p.add_argument("--overwrite", action="store_true")
-    gen_p.add_argument("--dry-run", action="store_true")
-
-    ucap_p = sub.add_parser("ucap", help="write ucap.csv from a generated store")
+    ucap_p = sub.add_parser("ucap", help="sample on demand and write ucap.csv")
     common(ucap_p)
+    ucap_p.add_argument("--years", type=int, nargs="+", required=True)
+    ucap_p.add_argument("--draws", type=int, required=True)
+    ucap_p.add_argument("--seed", type=int, default=DEFAULT_BASE_SEED)
+    ucap_p.add_argument("--hours-per-year", type=int, default=HOURS_PER_YEAR)
     ucap_p.add_argument("--out-csv", type=Path, default=None)
 
-    pool_p = sub.add_parser("pool", help="print the unit pool without writing anything")
-    common(pool_p)
-    pool_p.add_argument("--years", type=int, nargs="+", default=[2020])
-    pool_p.add_argument("--draws", type=int, default=1)
+    rows_p = sub.add_parser("rows", help="print the pooled rows and their slot counts")
+    common(rows_p)
 
     return p
 
@@ -1008,88 +812,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    if args.command == "pool":
-        pool = build_unit_pool(args.dataset_dir, params, model_year=args.model_year)
+    if args.command == "rows":
+        rows, _ = dataset_row_specs(args.dataset_dir, params)
+        caps = active_capacities(args.dataset_dir, params, args.model_year)
         print(f"model year: {resolve_model_year(args.dataset_dir, args.model_year)}")
-        _print_pool_summary(pool, params, args.years, args.draws, HOURS_PER_YEAR)
+        print(f"scheme: {args.scheme}")
+        _print_row_summary(rows, caps, params)
         return 0
 
     if args.command == "ucap":
-        write_ucap(args.dataset_dir, store_path=args.out, out_csv=args.out_csv)
-        return 0
-
-    if args.command == "init":
-        pool = build_unit_pool(args.dataset_dir, params, model_year=args.model_year)
-        print(f"model year: {resolve_model_year(args.dataset_dir, args.model_year)}")
-        _print_pool_summary(pool, params, args.years, args.draws, args.hours_per_year)
-        if args.dry_run:
-            print("--dry-run: nothing written")
-            return 0
-        path = init_store(
+        write_ucap(
             args.dataset_dir,
             years=args.years,
             draws=args.draws,
             base_seed=args.seed,
-            params=params,
-            out_path=args.out,
+            scheme=args.scheme,
             hours_per_year=args.hours_per_year,
-            chunk_hours=args.chunk_hours,
-            overwrite=args.overwrite,
-            model_year=args.model_year,
-        )
-        print(f"initialised {path}")
-        return 0
-
-    if args.command == "generate":
-        k, n = (int(x) for x in str(args.chunk).split("/"))
-        store_path = args.out or default_store_path(args.dataset_dir)
-        if store_path.exists() and not args.init:
-            root = zarr.open_group(str(store_path), mode="r")
-            years = [int(y) for y in root.attrs["weather_years"]]
-            draws = int(root.attrs["n_draws"])
-            seed = int(root.attrs["base_seed"])
-        else:
-            if args.years is None or args.draws is None or args.seed is None:
-                raise SystemExit(
-                    "no store yet: pass --init together with --years, --draws and --seed"
-                )
-            years, draws, seed = args.years, args.draws, args.seed
-
-        if args.dry_run:
-            pool = build_unit_pool(args.dataset_dir, params, model_year=args.model_year)
-            _print_pool_summary(pool, params, years, draws, args.hours_per_year)
-            print(f"--dry-run: shard {k}/{n} would write {len(_shard_jobs(years, draws, (k, n)))}")
-            return 0
-
-        t0 = time.time()
-        path = generate(
-            args.dataset_dir,
-            years=years,
-            draws=draws,
-            base_seed=seed,
+            out_csv=args.out_csv,
             params=params,
-            out_path=args.out,
-            chunk=(k, n),
-            overwrite=args.overwrite,
-            init=args.init,
-            hours_per_year=args.hours_per_year,
-            chunk_hours=args.chunk_hours,
             model_year=args.model_year,
-        )
-        raw = _dir_size(path)
-        pool = build_unit_pool(args.dataset_dir, params, model_year=args.model_year)
-        proj = storage_projection(pool, years, draws, args.hours_per_year)
-        print(
-            json.dumps(
-                {
-                    "store": str(path),
-                    "bytes_on_disk": raw,
-                    "raw_bytes": proj["raw_bytes"],
-                    "compression_ratio": proj["raw_bytes"] / max(raw, 1),
-                    "elapsed_s": round(time.time() - t0, 1),
-                },
-                indent=2,
-            )
         )
         return 0
 

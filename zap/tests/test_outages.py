@@ -1,9 +1,9 @@
-"""Tests for `zap.reliability.outages` (WP2).
+"""Tests for `zap.reliability.outages` (outage-pool spec WP-O2).
 
 Everything here is hermetic: the fixtures write synthetic `static/*.csv` tables
 into a temporary directory, so the real `data/` tree is never required. All
-tests use <= 48 hours and <= 4 draws except `test_long_run_availability_*`,
-which needs 8760 hours for a statistical check but touches no solver.
+tests use <= 168 hours except `TestMarginalLaw`, which needs a full year for the
+E1 statistical check but touches no solver and no store.
 """
 
 import math
@@ -12,12 +12,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numcodecs
 import numpy as np
 import pandas as pd
 import yaml
-import zarr
 
+from zap.reliability import keys as K
 from zap.reliability import outages as ox
 
 GEN_COLUMNS = ["name", "bus", "p_nom", "carrier"]
@@ -39,12 +38,8 @@ DEFAULT_STORAGE = [
 ]
 
 
-def write_static(
-    root: Path,
-    generators=DEFAULT_GENERATORS,
-    storage=DEFAULT_STORAGE,
-) -> Path:
-    """Write the two static tables `build_unit_pool` reads."""
+def write_static(root: Path, generators=DEFAULT_GENERATORS, storage=DEFAULT_STORAGE) -> Path:
+    """Write the two static tables ``row_specs`` reads."""
     static = Path(root) / "static"
     static.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(generators, columns=GEN_COLUMNS).to_csv(static / "generators.csv", index=False)
@@ -54,11 +49,8 @@ def write_static(
 
 def params_dict(**overrides) -> dict:
     base = {
-        "version": 1,
+        "version": 2,
         "reviewed": False,
-        "pool_multiplier": 3.0,
-        "min_units_per_row": 3,
-        "min_pool_capacity_mw": 0.0,
         "excluded_carriers": ["solar", "onwind", "offwind_floating", "unspecified_imports"],
         "carriers": {
             "CCGT": {
@@ -101,19 +93,34 @@ class OutageTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="zap_outages_"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(ox.unit_cache_clear)
+        ox.unit_cache_clear()
         self.dataset = write_static(self.tmp / "ds")
         self.params = make_params(self.tmp)
+        self.rows, _ = ox.dataset_row_specs(self.dataset, self.params)
+        self.by_name = {r.name: r for r in self.rows}
+
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
 
 
 class TestParams(OutageTestCase):
-    def test_shipped_params_load(self):
-        """The checked-in parameter file parses and is still unreviewed."""
+    def test_shipped_params_load_at_version_2(self):
         p = ox.load_outage_params()
-        self.assertEqual(p.version, 1)
+        self.assertEqual(p.version, 2)
         self.assertFalse(p.reviewed)
         self.assertEqual(len(p.sha256), 64)
         for name, cp in p.carriers.items():
             self.assertTrue(cp.source, f"{name} has no source")
+
+    def test_version_1_pool_keys_are_refused(self):
+        """`pool_multiplier` et al. are gone; a v1 file must fail loudly."""
+        raw = params_dict(pool_multiplier=3.0, min_units_per_row=3, min_pool_capacity_mw=1e4)
+        with self.assertRaises(KeyError) as ctx:
+            ox.OutageParams.from_dict(raw)
+        self.assertIn("pool_multiplier", str(ctx.exception))
 
     def test_mttf_and_stationary_probability(self):
         for cp in list(self.params.carriers.values()) + list(
@@ -122,616 +129,523 @@ class TestParams(OutageTestCase):
             f = cp.forced_outage_rate
             self.assertAlmostEqual(cp.mttf_h, cp.mttr_h * (1 - f) / f, places=12)
             self.assertAlmostEqual(cp.mttf_h / (cp.mttf_h + cp.mttr_h), 1 - f, places=12)
-            self.assertGreater(cp.p_fail, 0.0)
-            self.assertLess(cp.p_fail, 1.0)
-            self.assertGreater(cp.p_repair, 0.0)
-            self.assertLessEqual(cp.p_repair, 1.0)
             # The chain's stationary unavailability must be *exactly* the FOR.
-            # `1 - exp(-1/MTTF)` fails this by ~1 % of FOR; linear rates do not.
             self.assertAlmostEqual(cp.p_fail / (cp.p_fail + cp.p_repair), f, places=12)
             self.assertAlmostEqual(cp.p_fail, 1.0 / cp.mttf_h, places=15)
             self.assertAlmostEqual(cp.p_repair, 1.0 / cp.mttr_h, places=15)
 
     def test_missing_carrier_raises(self):
-        """A dataset carrier in neither list is a hard error."""
         params = make_params(self.tmp, excluded_carriers=["solar", "onwind"])
         with self.assertRaises(KeyError) as ctx:
-            ox.build_unit_pool(self.dataset, params)
+            ox.dataset_row_specs(self.dataset, params)
         self.assertIn("unspecified_imports", str(ctx.exception))
 
+    def test_fingerprint_is_the_canonical_artefact(self):
+        fp = ox.params_fingerprint(self.params, "slot-v1", 20260908)
+        self.assertEqual(fp["scheme"], "slot-v1")
+        self.assertEqual(fp["base_seed"], 20260908)
+        self.assertEqual(fp["params_sha256"], self.params.sha256)
 
-class TestUnitPool(OutageTestCase):
-    def test_pool_sizing_and_offsets(self):
-        pool = ox.build_unit_pool(self.dataset, self.params)
-        # 1000 MW CCGT at 250 MW/unit, x3 -> 12 units; 250 -> 3; 0 -> min 3
-        self.assertEqual(pool.row_units["z1 CCGT"], 12)
-        self.assertEqual(pool.row_units["z2 CCGT"], 3)
-        self.assertEqual(pool.row_units["z1 OCGT"], 3)  # min_units_per_row for p_nom == 0
-        self.assertEqual(pool.row_units["z1 battery"], math.ceil(3 * 400 / 50))
-        self.assertEqual(pool.row_units["z2 PHS"], math.ceil(3 * 1200 / 200))
 
-        # Offsets are the running cumulative sum, slices are disjoint and cover the axis.
-        offset = 0
-        for row, n in pool.row_units.items():
-            self.assertEqual(pool.row_offset[row], offset)
-            offset += n
-        self.assertEqual(offset, pool.n_units)
-        self.assertEqual(len(pool.table), sum(pool.row_units.values()))
-        self.assertEqual(list(pool.table.columns), ox.UNIT_TABLE_COLUMNS)
-        self.assertEqual(pool.table["unit_id"].iloc[0], "z1 CCGT#0")
-        self.assertEqual(pool.table["unit_id"].nunique(), pool.n_units)
+# ---------------------------------------------------------------------------
+# Slot arithmetic
+# ---------------------------------------------------------------------------
 
-    def test_sidecar_follows_the_store_not_the_dataset(self):
-        """A sensitivity store built with --out must not clobber the canonical sidecar."""
-        canonical = ox.default_units_csv(self.dataset / "outages.zarr")
-        self.assertEqual(canonical.name, "outage_units.csv")
-        alt = self.tmp / "elsewhere" / "sensitivity.zarr"
-        alt.parent.mkdir(parents=True, exist_ok=True)
-        ox.init_store(
-            self.dataset,
-            out_path=alt,
-            years=[2020],
-            draws=1,
-            base_seed=1,
-            params=self.params,
-            hours_per_year=24,
+
+class TestSlotArithmetic(OutageTestCase):
+    def test_slot_count(self):
+        self.assertEqual(ox.slot_count(0.0, 250.0), 0)
+        self.assertEqual(ox.slot_count(1.0, 250.0), 1)
+        self.assertEqual(ox.slot_count(250.0, 250.0), 1)  # exact multiple, no extra unit
+        self.assertEqual(ox.slot_count(250.1, 250.0), 2)
+        self.assertEqual(ox.slot_count(1000.0, 250.0), 4)
+
+    def test_row_weights_partial_last_slot(self):
+        w = ox._row_weights(300.0, 250.0)
+        np.testing.assert_allclose(w, [1.0, 0.2])
+        self.assertAlmostEqual(float(w.sum()), 300.0 / 250.0)
+
+    def test_row_weights_zero_capacity(self):
+        self.assertEqual(ox._row_weights(0.0, 250.0).size, 0)
+
+    def test_no_pool_bound(self):
+        """Nothing can overflow: a 30 GW row simply asks for 120 slots."""
+        self.assertEqual(ox._row_weights(30_000.0, 250.0).size, 120)
+
+
+# ---------------------------------------------------------------------------
+# sample_units
+# ---------------------------------------------------------------------------
+
+
+class TestSampleUnits(OutageTestCase):
+    def _ids(self, n=6):
+        return K.SlotV1().unit_ids(self.by_name["z1 CCGT"], n)
+
+    def test_shape_dtype_and_values(self):
+        cp = self.params.carriers["CCGT"]
+        up = ox.sample_units(
+            self._ids(6),
+            cp.p_fail,
+            cp.p_repair,
+            cp.forced_outage_rate,
+            year=2020,
+            draw=0,
+            base_seed=123,
+            n_hours=24,
         )
-        self.assertFalse(canonical.exists())
-        self.assertTrue((alt.parent / "sensitivity_units.csv").exists())
+        self.assertEqual(up.shape, (6, 24))
+        self.assertEqual(up.dtype, np.uint8)
+        self.assertTrue(set(np.unique(up)).issubset({0, 1}))
 
-    def test_pool_covers_storage_and_excludes_vre(self):
-        pool = ox.build_unit_pool(self.dataset, self.params)
-        rows = set(pool.row_offset)
-        self.assertIn("z1 battery", rows)
-        self.assertIn("z2 PHS", rows)
-        for absent in ["z1 solar", "z2 onwind", "z1_imports unspecified_imports"]:
-            self.assertNotIn(absent, rows)
-        comps = set(pool.table["component"])
-        self.assertEqual(comps, {"Generator", "StorageUnit"})
-
-
-class TestLifetimes(OutageTestCase):
-    """Pool sizing honours `build_year + lifetime` (see `wy_store.retired_mask`)."""
-
-    def _dataset_with_lifetimes(self) -> Path:
-        ds = write_static(self.tmp / "life")
-        for filename, rows in [
-            ("generators.csv", DEFAULT_GENERATORS),
-            ("storage_units.csv", DEFAULT_STORAGE),
-        ]:
-            path = ds / "static" / filename
-            df = pd.read_csv(path)
-            # `z1 CCGT` retires by 2040 (1990 + 30); everything else outlives it,
-            # and `z2 PHS` has an infinite lifetime.
-            df["active"] = True
-            df["build_year"] = [1990 if n == "z1 CCGT" else 2030 for n in df["name"]]
-            df["lifetime"] = [
-                np.inf if n == "z2 PHS" else (30.0 if n == "z1 CCGT" else 40.0) for n in df["name"]
-            ]
-            df.to_csv(path, index=False)
-        return ds
-
-    def test_retired_row_gets_the_minimum_pool(self):
-        ds = self._dataset_with_lifetimes()
-        pool = ox.build_unit_pool(ds, self.params, model_year=2040)
-        # 1000 MW at 250 MW/unit x3 would be 12 units; retired -> the minimum.
-        self.assertEqual(pool.row_units["z1 CCGT"], self.params.min_units_per_row)
-        # Untouched rows keep their sizing, including the infinite-lifetime one.
-        self.assertEqual(pool.row_units["z2 CCGT"], 3)
-        self.assertEqual(pool.row_units["z2 PHS"], math.ceil(3 * 1200 / 200))
-
-        # The row keeps its slot and its position on the unit axis.
-        full = ox.build_unit_pool(ds, self.params, model_year=1999)
-        self.assertEqual(list(pool.row_offset), list(full.row_offset))
-        self.assertEqual(pool.row_offset["z1 CCGT"], 0)
-        offset = 0
-        for row, n in pool.row_units.items():
-            self.assertEqual(pool.row_offset[row], offset)
-            offset += n
-        self.assertEqual(offset, pool.n_units)
-
-    def test_datasets_without_lifetime_columns_are_unchanged(self):
-        """The hermetic fixtures have no build_year/lifetime: nothing retires."""
-        self.assertIsNone(ox.resolve_model_year(self.dataset, None))
-        bare = ox.build_unit_pool(self.dataset, self.params)
-        explicit = ox.build_unit_pool(self.dataset, self.params, model_year=2040)
-        self.assertEqual(dict(bare.row_units), dict(explicit.row_units))
-
-    def test_store_records_the_model_year_and_ucap_zeroes_retired_rows(self):
-        ds = self._dataset_with_lifetimes()
-        ox.generate(
-            ds,
-            years=[2020],
-            draws=1,
-            base_seed=7,
-            params=self.params,
-            init=True,
-            hours_per_year=24,
-            chunk_hours=24,
-            verbose=False,
-            model_year=2040,
-        )
-        root = zarr.open_group(str(ds / "outages.zarr"), mode="r")
-        self.assertEqual(int(root.attrs["model_year"]), 2040)
-        self.assertEqual(
-            int(root.attrs["n_units"]), self.params.min_units_per_row + 3 + 3 + 24 + 18
-        )
-
-        table = ox.write_ucap(ds).set_index("row")
-        # The retired row is carried at 0 MW, so its empirical UCAP falls back
-        # to the analytic value instead of derating a capacity that is gone.
-        self.assertEqual(table.loc["z1 CCGT", "p_nom_mw"], 0.0)
-        self.assertEqual(table.loc["z1 CCGT", "n_samples"], 0)
-        self.assertAlmostEqual(
-            table.loc["z1 CCGT", "ucap_empirical"],
-            table.loc["z1 CCGT", "ucap_analytic"],
-            places=12,
-        )
-        self.assertEqual(table.loc["z2 CCGT", "p_nom_mw"], 250.0)
-        self.assertGreater(table.loc["z2 CCGT", "n_samples"], 0)
-
-
-class TestSampling(OutageTestCase):
-    def _uniform_pool(self, n_units: int, forced_outage_rate=0.05, mttr_h=50.0):
-        ds = write_static(
-            self.tmp / f"uni{n_units}",
-            generators=[("g", "z1", float(n_units), "CCGT")],
-            storage=[],
-        )
-        params = make_params(
-            self.tmp / f"uni{n_units}",
-            pool_multiplier=1.0,
-            min_units_per_row=1,
-            carriers={
-                "CCGT": {
-                    "unit_size_mw": 1.0,
-                    "forced_outage_rate": forced_outage_rate,
-                    "mttr_h": mttr_h,
-                    "source": "test",
-                }
-            },
-            excluded_carriers=[],
-        )
-        pool = ox.build_unit_pool(ds, params)
-        self.assertEqual(pool.n_units, n_units)
-        return pool, params
-
-    def test_initial_state_is_stationary(self):
-        """Hour 0 alone must already sit at 1 - FOR (catches a flipped comparison)."""
-        n_units, forced_outage_rate = 20_000, 0.05
-        pool, params = self._uniform_pool(n_units, forced_outage_rate=forced_outage_rate)
-        hour0 = np.concatenate(
-            [
-                ox.sample_chunk(pool, params, year=2020, draw=d, n_hours=1, base_seed=555)[:, 0]
-                for d in range(3)
-            ]
-        )
-        n = hour0.size
-        expected = 1.0 - forced_outage_rate
-        sigma = math.sqrt(expected * forced_outage_rate / n)
-        self.assertLess(abs(hour0.mean() - expected), 3.0 * sigma)
-
-    def test_long_run_availability_matches_for(self):
-        n_units, forced_outage_rate, mttr_h = 300, 0.05, 50.0
-        n_hours = 8760
-        pool, params = self._uniform_pool(
-            n_units, forced_outage_rate=forced_outage_rate, mttr_h=mttr_h
-        )
-        up = ox.sample_chunk(pool, params, year=2020, draw=0, n_hours=n_hours, base_seed=12345)
-        self.assertEqual(up.shape, (n_units, n_hours))
-
-        # Standard error of the mean of an AR(1)-like two-state chain: the
-        # independent-sample variance inflated by the integrated autocorrelation
-        # time 2 / (p_fail + p_repair) - 1.
-        cp = params.carriers["CCGT"]
-        expected = 1.0 - forced_outage_rate
-        tau = 2.0 / (cp.p_fail + cp.p_repair) - 1.0
-        sigma = math.sqrt(expected * forced_outage_rate * tau / (n_units * n_hours))
-        self.assertLess(abs(up.mean() - expected), 4.0 * sigma)
-        self.assertLess(4.0 * sigma, 0.01, "tolerance is no longer tight")
-
-    def test_transition_rates(self):
-        pool, params = self._uniform_pool(300, forced_outage_rate=0.05)
-        cp = params.carriers["CCGT"]
-        up = ox.sample_chunk(pool, params, year=2020, draw=0, n_hours=8760, base_seed=12345)
-        prev, nxt = up[:, :-1].astype(bool), up[:, 1:].astype(bool)
-        p_fail = (prev & ~nxt).sum() / prev.sum()
-        p_repair = (~prev & nxt).sum() / (~prev).sum()
-        self.assertLess(abs(p_fail - cp.p_fail) / cp.p_fail, 0.15)
-        self.assertLess(abs(p_repair - cp.p_repair) / cp.p_repair, 0.15)
-
-    def test_chunk_is_reproducible_in_isolation(self):
-        pool = ox.build_unit_pool(self.dataset, self.params)
-        a = ox.sample_chunk(pool, self.params, year=2020, draw=3, n_hours=48, base_seed=7)
-        b = ox.sample_chunk(pool, self.params, year=2020, draw=3, n_hours=48, base_seed=7)
-        np.testing.assert_array_equal(a, b)
-        # Different (year, draw) and different seeds give different chunks.
-        c = ox.sample_chunk(pool, self.params, year=2021, draw=3, n_hours=48, base_seed=7)
-        d = ox.sample_chunk(pool, self.params, year=2020, draw=4, n_hours=48, base_seed=7)
-        e = ox.sample_chunk(pool, self.params, year=2020, draw=3, n_hours=48, base_seed=8)
-        self.assertFalse(np.array_equal(a, c))
-        self.assertFalse(np.array_equal(a, d))
-        self.assertFalse(np.array_equal(a, e))
-
-    def test_store_draw_slices_are_independent_of_batching(self):
-        """Generating draws 0-3 together == generating draw 3 alone."""
-        kw = {
-            "years": [2020],
-            "draws": 4,
-            "base_seed": 11,
-            "params": self.params,
-            "hours_per_year": 48,
+    def test_slot_realisation_does_not_depend_on_n(self):
+        """The D1.3 property, end to end: n = 3 is a prefix of n = 300."""
+        cp = self.params.carriers["CCGT"]
+        kwargs = {
+            "p_fail": cp.p_fail,
+            "p_repair": cp.p_repair,
+            "fo_rate": cp.forced_outage_rate,
+            "year": 2020,
+            "draw": 1,
+            "base_seed": 77,
+            "n_hours": 48,
         }
-        all_at_once = ox.generate(
-            self.dataset, out_path=self.tmp / "all.zarr", init=True, verbose=False, **kw
-        )
-        single = self.tmp / "one.zarr"
-        ox.init_store(self.dataset, out_path=single, **kw)
-        # Shard the four jobs into four shards and run only the last one.
-        ox.generate(self.dataset, out_path=single, chunk=(4, 4), init=False, verbose=False, **kw)
-        a = zarr.open_group(str(all_at_once), mode="r")["available"][0, 3]
-        b = zarr.open_group(str(single), mode="r")["available"][0, 3]
-        np.testing.assert_array_equal(a, b)
-        # Un-generated slices keep the "not generated" fill value.
-        self.assertTrue(np.all(zarr.open_group(str(single), mode="r")["available"][0, 0] == 255))
+        small = ox.sample_units(self._ids(3), **kwargs)
+        big = ox.sample_units(self._ids(300), **kwargs)
+        np.testing.assert_array_equal(small, big[:3])
 
-    def test_pool_growth_preserves_streams(self):
-        pool = ox.build_unit_pool(self.dataset, self.params)
-        base = ox.sample_chunk(pool, self.params, year=2020, draw=1, n_hours=48, base_seed=99)
+    def test_realisation_does_not_depend_on_the_batch_it_was_asked_in(self):
+        """A unit's stream is seeded on its own key, not on its position."""
+        cp = self.params.carriers["CCGT"]
+        ids = self._ids(4)
+        kwargs = {
+            "p_fail": cp.p_fail,
+            "p_repair": cp.p_repair,
+            "fo_rate": cp.forced_outage_rate,
+            "year": 2020,
+            "draw": 0,
+            "base_seed": 5,
+            "n_hours": 24,
+        }
+        together = ox.sample_units(ids, **kwargs)
+        reversed_order = ox.sample_units(ids[::-1], **kwargs)
+        np.testing.assert_array_equal(together, reversed_order[::-1])
+        alone = ox.sample_units(ids[2:3], **kwargs)
+        np.testing.assert_array_equal(together[2], alone[0])
 
-        grown_dir = write_static(
-            self.tmp / "grown",
-            generators=DEFAULT_GENERATORS,
-            storage=DEFAULT_STORAGE + [("z2 battery new", "z2", 830.0, "battery", 4.0)],
+    def test_short_horizon_is_a_prefix_of_the_long_one(self):
+        """A 168 h block is the first 168 hours of the full-year realisation."""
+        cp = self.params.carriers["CCGT"]
+        kwargs = {
+            "p_fail": cp.p_fail,
+            "p_repair": cp.p_repair,
+            "fo_rate": cp.forced_outage_rate,
+            "year": 2020,
+            "draw": 0,
+            "base_seed": 11,
+        }
+        short = ox.sample_units(self._ids(2), n_hours=24, **kwargs)
+        long = ox.sample_units(self._ids(2), n_hours=168, **kwargs)
+        np.testing.assert_array_equal(short, long[:, :24])
+
+    def test_different_year_or_draw_decorrelates(self):
+        """Independence is tested per unit-hour, not on the fleet-mean series.
+
+        The fleet-mean availability series is autocorrelated with an integrated
+        time of ~95 h, so over 168 h it carries ~2 independent samples and the
+        sample correlation of two *independent* fleets is routinely +-0.6. The
+        per-unit-hour agreement rate has 200 x 168 nearly-independent terms
+        across units and is the sharp test: for independent chains it is
+        ``(1-FOR)^2 + FOR^2``, against 1.0 for identical ones.
+        """
+        cp = self.params.carriers["CCGT"]
+        f = cp.forced_outage_rate
+        ids = self._ids(200)
+        common = {
+            "p_fail": cp.p_fail,
+            "p_repair": cp.p_repair,
+            "fo_rate": f,
+            "base_seed": 99,
+            "n_hours": 168,
+        }
+        a = ox.sample_units(ids, year=2020, draw=0, **common)
+        b = ox.sample_units(ids, year=2020, draw=1, **common)
+        c = ox.sample_units(ids, year=2021, draw=0, **common)
+        independent = (1.0 - f) ** 2 + f**2
+        for other in (b, c):
+            self.assertFalse(np.array_equal(a, other))
+            agreement = float((a == other).mean())
+            self.assertAlmostEqual(agreement, independent, delta=0.05)
+            self.assertLess(agreement, 0.99)
+
+    def test_empty_unit_list(self):
+        up = ox.sample_units(
+            np.zeros(0, dtype=np.uint64), 0.1, 0.1, 0.1,
+            year=2020, draw=0, base_seed=1, n_hours=24,
         )
-        grown = ox.build_unit_pool(grown_dir, self.params)
-        self.assertEqual(grown.n_units, pool.n_units + 50)
-        grown_up = ox.sample_chunk(grown, self.params, year=2020, draw=1, n_hours=48, base_seed=99)
-        np.testing.assert_array_equal(grown_up[: pool.n_units], base)
+        self.assertEqual(up.shape, (0, 24))
+
+    def test_zero_hours_raises(self):
+        with self.assertRaises(ValueError):
+            ox.sample_units(self._ids(1), 0.1, 0.1, 0.1, year=2020, draw=0, base_seed=1, n_hours=0)
+
+
+# ---------------------------------------------------------------------------
+# row_availability
+# ---------------------------------------------------------------------------
 
 
 class TestRowAvailability(OutageTestCase):
-    def _pool_with(self, unit_size, p_nom, n_units):
-        ds = write_static(self.tmp / "rm", generators=[("g", "z1", p_nom, "CCGT")], storage=[])
-        params = make_params(
-            self.tmp / "rm",
-            pool_multiplier=1.0,
-            min_units_per_row=n_units,
-            excluded_carriers=[],
-            carriers={
-                "CCGT": {
-                    "unit_size_mw": unit_size,
-                    "forced_outage_rate": 0.05,
-                    "mttr_h": 50,
-                    "source": "test",
-                }
-            },
+    def _avail(self, caps, window=(0, 48), **kwargs):
+        return ox.row_availability(
+            self.rows,
+            caps,
+            self.params,
+            year=2020,
+            draw=0,
+            base_seed=4242,
+            scheme="slot-v1",
+            window=window,
+            hours_per_year=168,
+            **kwargs,
         )
-        pool = ox.build_unit_pool(ds, params)
-        self.assertEqual(pool.n_units, n_units)
-        return pool
-
-    def test_capacity_mapping_with_remainder(self):
-        pool = self._pool_with(unit_size=100.0, p_nom=250.0, n_units=5)
-        caps = pd.Series({"g": 250.0})
-
-        up = np.zeros((5, 1), dtype=np.uint8)
-        up[[0, 1], 0] = 1  # weights [1, 1, 0.5] -> (1 + 1 + 0) / 2.5
-        self.assertAlmostEqual(ox.row_availability(up, pool, caps, ["g"])[0, 0], 0.8, places=12)
-
-        up = np.zeros((5, 1), dtype=np.uint8)
-        up[[1, 2], 0] = 1  # (0 + 1 + 0.5) / 2.5
-        self.assertAlmostEqual(ox.row_availability(up, pool, caps, ["g"])[0, 0], 0.6, places=12)
-
-        # Exact multiples give unit weights.
-        self.assertAlmostEqual(
-            ox.row_availability(
-                np.ones((5, 1), dtype=np.uint8), pool, pd.Series({"g": 200.0}), ["g"]
-            )[0, 0],
-            1.0,
-            places=12,
-        )
-
-        # Zero capacity contributes nothing and reads as fully available.
-        zero = ox.row_availability(
-            np.zeros((5, 1), dtype=np.uint8), pool, pd.Series({"g": 0.0}), ["g"]
-        )
-        self.assertEqual(zero[0, 0], 1.0)
-
-        # A capacity too small to fill one unit still maps onto that one unit.
-        tiny = ox.row_availability(
-            np.ones((5, 1), dtype=np.uint8), pool, pd.Series({"g": 1e-12}), ["g"]
-        )
-        self.assertAlmostEqual(tiny[0, 0], 1.0, places=12)
-        tiny_down = ox.row_availability(
-            np.zeros((5, 1), dtype=np.uint8), pool, pd.Series({"g": 1e-12}), ["g"]
-        )
-        self.assertAlmostEqual(tiny_down[0, 0], 0.0, places=12)
-
-        # A design that outgrew the pool is an error, not a silent clip.
-        with self.assertRaises(ValueError):
-            ox.row_availability(up, pool, pd.Series({"g": 10_000.0}), ["g"])
-
-    def test_rows_absent_from_pool_are_available(self):
-        pool = ox.build_unit_pool(self.dataset, self.params)
-        up = np.zeros((pool.n_units, 3), dtype=np.uint8)
-        avail = ox.row_availability(up, pool, pd.Series(dtype=float), ["z1 solar"])
-        np.testing.assert_array_equal(avail, np.ones((3, 1)))
 
     def test_shape_and_range(self):
-        pool = ox.build_unit_pool(self.dataset, self.params)
-        up = ox.sample_chunk(pool, self.params, year=2020, draw=0, n_hours=24, base_seed=3)
-        rows = ["z1 CCGT", "z2 CCGT", "z1 battery", "z1 solar"]
-        caps = pd.Series({"z1 CCGT": 1000.0, "z2 CCGT": 250.0, "z1 battery": 400.0})
-        avail = ox.row_availability(up, pool, caps, rows)
-        self.assertEqual(avail.shape, (24, 4))
+        caps = {r.name: 1000.0 for r in self.rows}
+        avail = self._avail(caps)
+        self.assertEqual(avail.shape, (48, len(self.rows)))
         self.assertTrue(np.all(avail >= 0.0) and np.all(avail <= 1.0))
-        np.testing.assert_array_equal(avail[:, 3], 1.0)
 
+    def test_zero_capacity_row_is_fully_available(self):
+        caps = {r.name: 0.0 for r in self.rows}
+        avail = self._avail(caps)
+        np.testing.assert_allclose(avail, 1.0)
 
-class TestStore(OutageTestCase):
-    def _gen(self, path=None, draws=2, chunk=(1, 1), **kw):
-        kwargs = {
-            "years": [2020, 2021],
-            "draws": draws,
-            "base_seed": 4242,
-            "params": self.params,
-            "hours_per_year": 48,
-            "verbose": False,
-        }
-        kwargs.update(kw)
-        return ox.generate(
-            self.dataset, out_path=path or (self.tmp / "o.zarr"), chunk=chunk, **kwargs
-        )
+    def test_partial_last_slot_weighting_against_a_hand_value(self):
+        """A 300 MW CCGT row is 1 full slot + a 0.2-weight slot."""
+        row = self.by_name["z1 CCGT"]
+        cp = self.params.carriers["CCGT"]
+        caps = {r.name: 0.0 for r in self.rows}
+        caps["z1 CCGT"] = 300.0
+        avail = self._avail(caps)[:, self.rows.index(row)]
 
-    def test_store_schema(self):
-        path = self._gen(init=True)
-        root = zarr.open_group(str(path), mode="r")
-        pool = ox.build_unit_pool(self.dataset, self.params)
-
-        self.assertEqual(root["available"].shape, (2, 2, 48, pool.n_units))
-        self.assertEqual(root["available"].dtype, np.uint8)
-        self.assertEqual(root["available"].chunks, (1, 1, 48, pool.n_units))
-        self.assertEqual(root["available"].fill_value, 255)
-        comp = root["available"].compressor
-        self.assertEqual(comp.cname, "zstd")
-        self.assertEqual(comp.clevel, 5)
-        self.assertEqual(comp.shuffle, numcodecs.Blosc.BITSHUFFLE)
-
-        for key in [
-            "generator_version",
-            "dataset",
-            "created_utc",
-            "zap_commit",
-            "base_seed",
-            "params_sha256",
-            "params",
-            "pool_multiplier",
-            "min_units_per_row",
-            "min_pool_capacity_mw",
-            "weather_years",
-            "n_draws",
-            "hours_per_year",
-            "completed",
-        ]:
-            self.assertIn(key, root.attrs, key)
-        self.assertEqual(root.attrs["base_seed"], 4242)
-        self.assertEqual(root.attrs["weather_years"], [2020, 2021])
-
-        np.testing.assert_array_equal(root["weather_year"][:], [2020, 2021])
-        np.testing.assert_array_equal(root["draw"][:], [0, 1])
-        np.testing.assert_array_equal(root["hour"][:], np.arange(48))
-        for name in ["unit_id", "unit_row", "unit_carrier", "unit_bus", "unit_component"]:
-            self.assertEqual(len(root[name]), pool.n_units)
-        np.testing.assert_array_equal(root["unit_slot"][:], pool.table["slot"].to_numpy())
-
-        sidecar = pd.read_csv(ox.default_units_csv(path))
-        self.assertEqual(list(sidecar["unit_id"]), list(np.asarray(root["unit_id"][:])))
-        self.assertEqual(list(sidecar["carrier"]), list(np.asarray(root["unit_carrier"][:])))
-        self.assertEqual(len(sidecar), pool.n_units)
-
-        # Everything was generated; no fill values left.
-        self.assertFalse(np.any(np.asarray(root["available"][:]) == 255))
-        self.assertEqual(
-            sorted(map(tuple, root.attrs["completed"])),
-            [(2020, 0), (2020, 1), (2021, 0), (2021, 1)],
-        )
-
-    def test_shards_compose(self):
-        whole = self._gen(path=self.tmp / "whole.zarr", init=True, chunk=(1, 1))
-        sharded = self.tmp / "sharded.zarr"
-        ox.init_store(
-            self.dataset,
-            out_path=sharded,
-            years=[2020, 2021],
-            draws=2,
+        ids = K.SlotV1().unit_ids(row, 2)
+        up = ox.sample_units(
+            ids,
+            cp.p_fail,
+            cp.p_repair,
+            cp.forced_outage_rate,
+            year=2020,
+            draw=0,
             base_seed=4242,
-            params=self.params,
-            hours_per_year=48,
-        )
-        self._gen(path=sharded, chunk=(1, 2))
-        self._gen(path=sharded, chunk=(2, 2))
+            n_hours=168,
+        ).astype(float)[:, :48]
+        expected = (1.0 * up[0] + 0.2 * up[1]) / 1.2
+        np.testing.assert_allclose(avail, expected, rtol=1e-12)
+        # And the realised values really are the three possible weighted means.
+        self.assertTrue(set(np.round(np.unique(avail), 12)).issubset({0.0, 1.0, 1 / 1.2, 0.2 / 1.2}))
 
-        a = np.asarray(zarr.open_group(str(whole), mode="r")["available"][:])
-        b = np.asarray(zarr.open_group(str(sharded), mode="r")["available"][:])
-        np.testing.assert_array_equal(a, b)
-        self.assertEqual(
-            sorted(map(tuple, zarr.open_group(str(sharded), mode="r").attrs["completed"])),
-            [(2020, 0), (2020, 1), (2021, 0), (2021, 1)],
-        )
+    def test_growing_a_row_leaves_the_other_rows_bit_identical(self):
+        """The property the accreditation perturbation loop is built on."""
+        caps = {r.name: 500.0 for r in self.rows}
+        base = self._avail(caps)
+        grown = dict(caps)
+        grown["z1 CCGT"] = 11_000.0
+        after = self._avail(grown)
+        j = self.rows.index(self.by_name["z1 CCGT"])
+        others = [i for i in range(len(self.rows)) if i != j]
+        np.testing.assert_array_equal(base[:, others], after[:, others])
 
-    def test_shards_partition_jobs(self):
-        jobs = ox._shard_jobs([2020, 2021], 3, (1, 1))
-        self.assertEqual(len(jobs), 6)
-        union = []
-        for k in range(1, 4):
-            union += ox._shard_jobs([2020, 2021], 3, (k, 3))
-        self.assertEqual(sorted(union), sorted(jobs))
-        self.assertEqual(len(set(union)), len(union))
+    def test_growing_a_row_keeps_its_own_first_slots(self):
+        row = self.by_name["z1 CCGT"]
+        cp = self.params.carriers["CCGT"]
+        ids_small = K.SlotV1().unit_ids(row, 2)
+        ids_big = K.SlotV1().unit_ids(row, 44)
+        np.testing.assert_array_equal(ids_small, ids_big[:2])
+        del cp
 
-    def test_generate_refuses_overwrite(self):
-        path = self._gen(init=True)
-        with self.assertRaises(FileExistsError):
-            self._gen(path=path, init=True)
-        # ... but --overwrite recreates it.
-        self._gen(path=path, init=True, overwrite=True)
+    def test_window_slicing_matches_the_full_year(self):
+        caps = {r.name: 800.0 for r in self.rows}
+        full = self._avail(caps, window=(0, 168))
+        sliced = self._avail(caps, window=(100, 168))
+        np.testing.assert_array_equal(full[100:168], sliced)
 
-    def test_generate_requires_init(self):
-        with self.assertRaises(FileNotFoundError):
-            self._gen(path=self.tmp / "missing.zarr", init=False)
-
-    def test_resume_skips_completed(self):
-        path = self.tmp / "resume.zarr"
-        ox.init_store(
-            self.dataset,
-            out_path=path,
-            years=[2020, 2021],
-            draws=2,
-            base_seed=4242,
-            params=self.params,
-            hours_per_year=48,
-        )
-        self._gen(path=path, chunk=(1, 2))
-        first = np.asarray(zarr.open_group(str(path), mode="r")["available"][0, 0]).copy()
-
-        calls = []
-        real = ox.sample_chunk
-
-        def counting(*args, **kwargs):
-            calls.append((kwargs["year"], kwargs["draw"]))
-            return real(*args, **kwargs)
-
-        ox.sample_chunk = counting
-        try:
-            self._gen(path=path, chunk=(1, 1))
-        finally:
-            ox.sample_chunk = real
-
-        self.assertEqual(sorted(calls), [(2021, 0), (2021, 1)])
-        np.testing.assert_array_equal(
-            np.asarray(zarr.open_group(str(path), mode="r")["available"][0, 0]), first
-        )
-
-    def test_seed_mismatch_is_rejected(self):
-        path = self._gen(init=True)
+    def test_bad_window_raises(self):
+        caps = {r.name: 100.0 for r in self.rows}
         with self.assertRaises(ValueError):
-            self._gen(path=path, base_seed=1)
+            self._avail(caps, window=(0, 400))
+        with self.assertRaises(ValueError):
+            self._avail(caps, window=(50, 50))
+
+    def test_unknown_scheme_raises(self):
+        caps = {r.name: 100.0 for r in self.rows}
+        with self.assertRaises(KeyError):
+            ox.row_availability(
+                self.rows, caps, self.params,
+                year=2020, draw=0, scheme="nope", window=(0, 24), hours_per_year=168,
+            )
+
+    def test_slot_counts(self):
+        caps = {"z1 CCGT": 1000.0, "z1 battery": 0.0, "z2 PHS": 300.0}
+        counts = ox.slot_counts(self.rows, caps, self.params)
+        self.assertEqual(counts["z1 CCGT"], 4)
+        self.assertEqual(counts["z1 battery"], 0)
+        self.assertEqual(counts["z2 PHS"], 2)
+
+
+# ---------------------------------------------------------------------------
+# The in-process slot cache (spec D3.2)
+# ---------------------------------------------------------------------------
+
+
+class TestUnitCache(OutageTestCase):
+    def _avail(self, caps, *, draw=0):
+        return ox.row_availability(
+            self.rows, caps, self.params,
+            year=2020, draw=draw, base_seed=7, scheme="slot-v1",
+            window=(0, 24), hours_per_year=168,
+        )
+
+    def test_hits_and_misses(self):
+        caps = {r.name: 500.0 for r in self.rows}
+        ox.unit_cache_clear()
+        self.assertEqual(ox.unit_cache_info()["misses"], 0)
+
+        self._avail(caps)
+        first = ox.unit_cache_info()
+        self.assertGreater(first["misses"], 0)
+        self.assertEqual(first["hits"], 0)
+        self.assertEqual(first["units"], first["misses"])
+
+        self._avail(caps)  # same (scheme, seed, year, draw): every slot is a hit
+        second = ox.unit_cache_info()
+        self.assertEqual(second["misses"], first["misses"])
+        self.assertEqual(second["hits"], first["misses"])
+
+    def test_a_perturbed_design_misses_only_on_its_extra_slots(self):
+        caps = {r.name: 0.0 for r in self.rows}
+        caps["z1 CCGT"] = 1000.0  # 4 slots
+        ox.unit_cache_clear()
+        self._avail(caps)
+        self.assertEqual(ox.unit_cache_info()["misses"], 4)
+
+        grown = dict(caps)
+        grown["z1 CCGT"] = 1250.0  # 5 slots: 4 hits, 1 miss
+        self._avail(grown)
+        info = ox.unit_cache_info()
+        self.assertEqual(info["misses"], 5)
+        self.assertEqual(info["hits"], 4)
+
+    def test_changing_year_or_draw_drops_the_cache(self):
+        caps = {r.name: 500.0 for r in self.rows}
+        ox.unit_cache_clear()
+        self._avail(caps, draw=0)
+        units = ox.unit_cache_info()["units"]
+        self._avail(caps, draw=1)
+        info = ox.unit_cache_info()
+        self.assertEqual(info["units"], units)  # dropped wholesale, refilled
+        self.assertEqual(info["hits"], 0)
+        self.assertEqual(info["key"][3], 1)  # (scheme, seed, year, draw, hours)
+
+    def test_cache_capacity_is_configurable(self):
+        import os
+
+        os.environ[ox.CACHE_UNITS_ENV] = "2"
+        self.addCleanup(os.environ.pop, ox.CACHE_UNITS_ENV, None)
+        self.assertEqual(ox.cache_capacity(), 2)
+        caps = {r.name: 0.0 for r in self.rows}
+        caps["z1 CCGT"] = 1000.0  # 4 slots > capacity 2
+        ox.unit_cache_clear()
+        self._avail(caps)
+        self.assertLessEqual(ox.unit_cache_info()["units"], 2)
+
+    def test_cached_rows_are_read_only(self):
+        caps = {r.name: 500.0 for r in self.rows}
+        ox.unit_cache_clear()
+        self._avail(caps)
+        row = next(iter(ox._UNIT_CACHE.values()))
+        with self.assertRaises(ValueError):
+            row[0] = 1
+
+
+# ---------------------------------------------------------------------------
+# E1: the marginal law is unchanged by construction -- tested anyway
+# ---------------------------------------------------------------------------
+
+
+class TestMarginalLaw(unittest.TestCase):
+    """Spec D5 E1: mean availability and lag-1 autocorrelation of one carrier."""
+
+    N_SLOTS = 2000
+    N_HOURS = 8760
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="zap_outage_law_"))
+        params = make_params(cls.tmp)
+        cls.cp = params.carriers["CCGT"]
+        row = K.RowSpec("law", "Generator", "CCGT", "z1", 0)
+        ids = K.SlotV1().unit_ids(row, cls.N_SLOTS)
+        cls.up = ox.sample_units(
+            ids,
+            cls.cp.p_fail,
+            cls.cp.p_repair,
+            cls.cp.forced_outage_rate,
+            year=2020,
+            draw=0,
+            base_seed=20260908,
+            n_hours=cls.N_HOURS,
+        ).astype(np.float64)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_mean_availability_is_one_minus_for(self):
+        target = 1.0 - self.cp.forced_outage_rate
+        per_slot = self.up.mean(axis=1)
+        mean = float(per_slot.mean())
+        # SE over slots: the hours of one slot are correlated, so the slot mean
+        # is the independent replicate, not the hour.
+        se = float(per_slot.std(ddof=1) / math.sqrt(self.N_SLOTS))
+        self.assertLess(abs(mean - target), 3 * se, f"mean {mean} vs {target} (SE {se})")
+
+    def test_lag_one_autocorrelation_matches_the_chain(self):
+        """The chain's memory, ``rho_1 = 1 - p_fail - p_repair``.
+
+        Estimated from the realised transition counts rather than from the
+        sample autocorrelation: with a demeaned series of 8,760 hours and an
+        integrated autocorrelation time of ~95 h, the sample ACF1 is biased low
+        by ~4e-3 (measured), which is ~12 SE here and would make a 3-SE test
+        fail on correct draws. ``1 - p_hat_fail - p_hat_repair`` is the same
+        quantity with a clean binomial error.
+        """
+        up = self.up.astype(bool)
+        prev, nxt = up[:, :-1], up[:, 1:]
+        n_up = int(prev.sum())
+        n_down = int((~prev).sum())
+        fails = int((prev & ~nxt).sum())
+        repairs = int((~prev & nxt).sum())
+
+        p_fail = fails / n_up
+        p_repair = repairs / n_down
+        se_fail = math.sqrt(p_fail * (1 - p_fail) / n_up)
+        se_repair = math.sqrt(p_repair * (1 - p_repair) / n_down)
+        self.assertLess(
+            abs(p_fail - self.cp.p_fail), 3 * se_fail, f"p_fail {p_fail} vs {self.cp.p_fail}"
+        )
+        self.assertLess(
+            abs(p_repair - self.cp.p_repair),
+            3 * se_repair,
+            f"p_repair {p_repair} vs {self.cp.p_repair}",
+        )
+
+        rho = 1.0 - p_fail - p_repair
+        target = 1.0 - self.cp.p_fail - self.cp.p_repair
+        se = math.hypot(se_fail, se_repair)
+        self.assertLess(abs(rho - target), 3 * se, f"rho {rho} vs {target} (SE {se})")
+
+
+# ---------------------------------------------------------------------------
+# UCAP
+# ---------------------------------------------------------------------------
 
 
 class TestUcap(OutageTestCase):
-    def test_ucap_csv(self):
-        # A big row (many units) so the empirical mean concentrates on 1 - FOR.
-        ds = write_static(
-            self.tmp / "ucap",
-            generators=[
-                ("big CCGT a", "z1", 10_000.0, "CCGT"),
-                ("big CCGT b", "z1", 5_000.0, "CCGT"),
-                ("empty OCGT", "z1", 0.0, "OCGT"),
-            ],
-            storage=[("z1 battery", "z1", 400.0, "battery", 4.0)],
-        )
-        path = ox.generate(
-            ds,
-            out_path=ds / "outages.zarr",
+    def test_write_ucap(self):
+        out = self.tmp / "ucap.csv"
+        df = ox.write_ucap(
+            self.dataset,
             years=[2020],
-            draws=2,
-            base_seed=2024,
+            draws=3,
+            base_seed=31337,
+            scheme="slot-v1",
+            hours_per_year=168,
+            out_csv=out,
             params=self.params,
-            hours_per_year=8760,
-            init=True,
+            model_year=None,
             verbose=False,
         )
-        df = ox.write_ucap(ds, store_path=path)
+        self.assertTrue(out.exists())
+        self.assertEqual(list(df.columns), ox.UCAP_COLUMNS)
+        self.assertEqual(set(df["row"]), {r.name for r in self.rows})
+        self.assertTrue((df["outage_scheme"] == "slot-v1").all())
+        self.assertTrue((df["base_seed"] == 31337).all())
+        self.assertTrue((df["n_draws"] == 3).all())
+        self.assertTrue(((df["ucap_empirical"] >= 0.0) & (df["ucap_empirical"] <= 1.0)).all())
 
-        self.assertEqual(
-            list(df.columns),
-            [
-                "component",
-                "row",
-                "carrier",
-                "bus",
-                "p_nom_mw",
-                "unit_size_mw",
-                "n_units_row",
-                "forced_outage_rate",
-                "ucap_analytic",
-                "ucap_empirical",
-                "n_samples",
-                "ucap_carrier_bus_empirical",
-            ],
-        )
-        self.assertTrue((ds / "ucap.csv").exists())
+        # A zero-capacity row derates nothing and falls back to the analytic value.
+        zero = df[df["row"] == "z1 OCGT"].iloc[0]
+        self.assertEqual(zero["n_units_row"], 0)
+        self.assertEqual(zero["n_samples"], 0)
+        self.assertAlmostEqual(zero["ucap_empirical"], zero["ucap_analytic"])
 
-        big = df.set_index("row").loc["big CCGT a"]
-        self.assertLess(abs(big["ucap_empirical"] - (1 - 0.045)), 0.03)
-        self.assertEqual(big["n_samples"], 2 * 8760)
+        # The analytic column is scheme-independent.
+        ccgt = df[df["row"] == "z1 CCGT"].iloc[0]
+        self.assertAlmostEqual(ccgt["ucap_analytic"], 1 - 0.045)
+        self.assertEqual(ccgt["n_units_row"], 4)
 
-        # A zero-capacity row falls back to the analytic value with no samples.
-        empty = df.set_index("row").loc["empty OCGT"]
-        self.assertEqual(empty["n_samples"], 0)
-        self.assertAlmostEqual(empty["ucap_empirical"], 1 - 0.040, places=12)
+    def test_ucap_is_reproducible(self):
+        kwargs = {
+            "years": [2020],
+            "draws": 2,
+            "base_seed": 5,
+            "scheme": "slot-v1",
+            "hours_per_year": 168,
+            "params": self.params,
+            "verbose": False,
+        }
+        a = ox.write_ucap(self.dataset, out_csv=self.tmp / "a.csv", **kwargs)
+        ox.unit_cache_clear()
+        b = ox.write_ucap(self.dataset, out_csv=self.tmp / "b.csv", **kwargs)
+        np.testing.assert_allclose(a["ucap_empirical"], b["ucap_empirical"], rtol=0, atol=0)
 
-        # The (carrier, bus) aggregate is the capacity-weighted mean of its rows.
-        ccgt = df[df["carrier"] == "CCGT"]
-        expected = (ccgt["p_nom_mw"] * ccgt["ucap_empirical"]).sum() / ccgt["p_nom_mw"].sum()
-        for v in ccgt["ucap_carrier_bus_empirical"]:
-            self.assertAlmostEqual(v, expected, places=12)
+    def test_ucap_rejects_empty_years_or_draws(self):
+        with self.assertRaises(ValueError):
+            ox.write_ucap(self.dataset, years=[], draws=1, params=self.params, verbose=False)
+        with self.assertRaises(ValueError):
+            ox.write_ucap(self.dataset, years=[2020], draws=0, params=self.params, verbose=False)
 
-        # The zero-capacity OCGT is alone in its (carrier, bus) group.
-        self.assertAlmostEqual(
-            empty["ucap_carrier_bus_empirical"], empty["ucap_empirical"], places=12
-        )
 
-    def test_ucap_requires_a_generated_store(self):
-        with self.assertRaises(FileNotFoundError):
-            ox.write_ucap(self.dataset, store_path=self.tmp / "nope.zarr")
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 class TestCli(OutageTestCase):
-    def test_dry_run_writes_nothing(self):
-        store = self.tmp / "cli.zarr"
-        params_path = self.tmp / "params.yaml"
+    def test_rows_command(self):
         rc = ox.main(
             [
-                "init",
+                "rows",
                 "--dataset-dir",
                 str(self.dataset),
                 "--params",
-                str(params_path),
-                "--out",
-                str(store),
-                "--years",
-                "2020",
-                "--draws",
-                "2",
-                "--seed",
-                "5",
-                "--hours-per-year",
-                "48",
-                "--dry-run",
+                str(self.tmp / "params.yaml"),
             ]
         )
         self.assertEqual(rc, 0)
-        self.assertFalse(store.exists())
 
-    def test_init_generate_ucap_roundtrip(self):
-        store = self.tmp / "cli.zarr"
-        params_path = self.tmp / "params.yaml"
-        common = ["--dataset-dir", str(self.dataset), "--params", str(params_path)]
-        self.assertEqual(
-            ox.main(
-                ["init", *common, "--out", str(store)]
-                + ["--years", "2020", "--draws", "2", "--seed", "5", "--hours-per-year", "48"]
-            ),
-            0,
+    def test_ucap_command(self):
+        rc = ox.main(
+            [
+                "ucap",
+                "--dataset-dir",
+                str(self.dataset),
+                "--params",
+                str(self.tmp / "params.yaml"),
+                "--years",
+                "2020",
+                "--draws",
+                "1",
+                "--hours-per-year",
+                "168",
+                "--out-csv",
+                str(self.tmp / "cli_ucap.csv"),
+            ]
         )
-        self.assertEqual(ox.main(["generate", *common, "--out", str(store), "--chunk", "1/1"]), 0)
-        self.assertEqual(
-            ox.main(["ucap", *common, "--out", str(store), "--out-csv", str(self.tmp / "u.csv")]),
-            0,
-        )
-        self.assertTrue((self.tmp / "u.csv").exists())
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.tmp / "cli_ucap.csv").exists())
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     unittest.main()

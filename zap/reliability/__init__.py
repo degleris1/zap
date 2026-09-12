@@ -1,8 +1,9 @@
 """Reliability modelling for capacity expansion planning (CH3).
 
-Currently holds the thermal / storage forced-outage machinery: a virtual unit
-pool derived from the static component tables, a two-state Markov sampler, an
-on-disk outage store, and the UCAP table derived from it.
+Holds the thermal / storage forced-outage machinery: a versioned unit-key scheme
+(``keys``), an on-demand two-state Markov sampler with an in-process slot cache
+(``outages``), and the UCAP table derived from it. There is no outage store:
+draws are a pure function of ``(base_seed, scheme, year, draw, key)``.
 
 Import the submodule directly (``from zap.reliability import outages``); this
 package deliberately does not re-export its contents so that

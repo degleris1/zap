@@ -30,7 +30,6 @@ Key modelling decisions implemented here (see ``memory/plans/2026-09-08-phase1-s
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import json
 import logging
@@ -70,7 +69,6 @@ except ImportError:  # pragma: no cover
 CONVERTER_VERSION = 1
 STORE_NAME = "weather.zarr"
 UCAP_NAME = "ucap.csv"
-OUTAGE_STORE_NAME = "outages.zarr"
 
 DEFAULT_HOURS_PER_YEAR = 365 * 24
 DEFAULT_CHUNK_HOURS = 168
@@ -532,6 +530,13 @@ class LoadOptions:
     clip_scale_to_one: bool = True
     ucap_derate: bool = False
     outage_draw: Optional[int] = None
+    #: Unit-key scheme of the forced-outage sampler (``zap.reliability.keys.SCHEMES``).
+    #: Carried on the run card and refused on mismatch: draws are only
+    #: *statistically* equivalent across schemes, never bit-reproducible.
+    outage_scheme: str = "slot-v1"
+    #: Base seed of the outage sampler. The scheme version, not the seed, marks a
+    #: change of draw definition (spec section 5.3).
+    outage_seed: int = 20260908
     #: Investment year the system represents.  ``None`` -> :func:`detect_model_year`.
     model_year: Optional[int] = None
     #: Zero the as-built capacity of rows whose ``build_year + lifetime <= model_year``.
@@ -851,27 +856,6 @@ def apply_design_capacity(
     return out, summary
 
 
-#: Signature of ``zap.reliability.outages._row_weights``'s pool-overflow error.
-#: Only that failure is re-labelled with the design; every other ``ValueError``
-#: (a fill-valued chunk, a bad window, ...) propagates untouched.
-POOL_OVERFLOW_MARKER = "pool only holds"
-
-
-@contextlib.contextmanager
-def _design_context(options: LoadOptions, cls_name: str):
-    """Re-raise a *pool-capacity* failure naming the design that caused it."""
-    try:
-        yield
-    except ValueError as exc:
-        designed = bool(options.design_capacity) and cls_name in options.design_capacity
-        if not designed or POOL_OVERFLOW_MARKER not in str(exc):
-            raise
-        raise ValueError(
-            f"design {options.design_id or '<unnamed>'!r} exceeds the outage pool on "
-            f"{cls_name}: {exc}"
-        ) from exc
-
-
 def _thermal_carriers() -> frozenset[str]:
     """Carriers covered by the outage pool (WP2), with a static fallback."""
     try:  # pragma: no cover - depends on WP2 landing
@@ -977,156 +961,84 @@ def _ucap_factors(dataset_dir: Path, component: str, rows: pd.Index) -> tuple[np
     return np.where(np.isnan(values), 1.0, values), sha256_file(path)
 
 
-def _open_outage_store(dataset_dir: Path):
-    path = Path(dataset_dir) / OUTAGE_STORE_NAME
-    if not path.exists():
-        raise FileNotFoundError(
-            f"outage_draw was requested but {path} does not exist. Build it with "
-            f"`python -m zap.reliability.outages generate --dataset-dir {dataset_dir}`."
-        )
-    return path, zarr.open_group(str(path), mode="r")
 
+def _outage_row_specs(static: dict[str, pd.DataFrame]):
+    """``(row specs, params)`` of the dataset's pooled rows, cached per dataset.
 
-def _unit_pool_from_store(root) -> Any:
-    """Rebuild WP2's ``UnitPool`` from the outage store's coordinate arrays."""
-    from zap.reliability.outages import UnitPool
-
-    table = pd.DataFrame(
-        {
-            "unit_id": [str(v) for v in root["unit_id"][:]],
-            "component": [str(v) for v in root["unit_component"][:]],
-            "row": [str(v) for v in root["unit_row"][:]],
-            "carrier": [str(v) for v in root["unit_carrier"][:]],
-            "bus": [str(v) for v in root["unit_bus"][:]],
-            "slot": np.asarray(root["unit_slot"][:], dtype=int),
-            "unit_size_mw": np.asarray(root["unit_size_mw"][:], dtype=float),
-            "row_offset": np.asarray(root["unit_row_offset"][:], dtype=int),
-            "row_units": np.asarray(root["unit_row_units"][:], dtype=int),
-        }
-    )
-    first = table.drop_duplicates("row").set_index("row")
-    if first.index.has_duplicates:  # pragma: no cover - defensive
-        raise ValueError("Outage pool row names are not unique")
-    return UnitPool(
-        table=table,
-        row_offset=first["row_offset"].astype(int).to_dict(),
-        row_units=first["row_units"].astype(int).to_dict(),
-        row_size=first["unit_size_mw"].astype(float).to_dict(),
-    )
-
-
-#: One decompressed ``(n_units, n_hours)`` uptime slice, keyed
-#: ``(store path, year, draw, window start, window stop)``.  Size **one**: the
-#: slice is ~344 MB of uint8 for the full ca2040_z4 pool at 8,736 h x 39,225
-#: units, and holding two would double the peak working set of a shard for no
-#: gain -- every caller within one case asks for the same (year, draw)
-#: (WP-E0 / spec E5).  `load_system` reads it twice per build (generators, then
-#: storage) and the evaluation enumerates *design-inner*, so consecutive cases
-#: that differ only in the design reuse it as well.
-_UNIT_SLICE_CACHE: dict[tuple, np.ndarray] = {}
-
-#: Hit / miss counters and the live key, so a test can assert the cache is
-#: actually reused (spec section 5.8) without timing anything.
-_UNIT_SLICE_STATS: dict[str, Any] = {"hits": 0, "misses": 0, "key": None}
-
-
-def clear_unit_slice_cache() -> None:
-    """Drop the cached uptime slice and reset its counters (tests, long runs)."""
-    _UNIT_SLICE_CACHE.clear()
-    _UNIT_SLICE_STATS.update({"hits": 0, "misses": 0, "key": None})
-
-
-def unit_slice_cache_info() -> dict:
-    """``{"hits", "misses", "key", "size"}`` of the unit-slice cache."""
-    return {**_UNIT_SLICE_STATS, "size": len(_UNIT_SLICE_CACHE)}
-
-
-def _unit_slice(
-    path: Path,
-    root,
-    year_index: int,
-    draw_index: int,
-    year: int,
-    draw: int,
-    start: int,
-    stop: int,
-) -> np.ndarray:
-    """The ``(n_units, n_hours)`` uptime matrix of one (year, draw) window.
-
-    Cached (size 1) on ``(path, year, draw, start, stop)``.  The returned array
-    is marked read-only: it is shared with every other caller holding the same
-    key, and a caller that mutated it would corrupt the next design's
-    availability rather than fail.
+    The specs are structural -- component, carrier, bus and the per-group ordinal
+    -- so they are a property of the static tables alone and never of a design,
+    a capacity or a draw.  They are derived from the *post-design* tables only
+    because those are the ones in hand; the design moves ``p_nom``, which the
+    specs do not read.
     """
-    key = (str(path), int(year), int(draw), int(start), int(stop))
-    cached = _UNIT_SLICE_CACHE.get(key)
-    if cached is not None:
-        _UNIT_SLICE_STATS["hits"] += 1
-        return cached
+    from zap.reliability.keys import row_specs
+    from zap.reliability.outages import load_outage_params
 
-    up = np.asarray(root["available"][year_index, draw_index, start:stop, :], dtype=np.uint8).T
-    if up.size and up.max() > 1:
-        raise ValueError(
-            f"Outage store {path} holds fill values (>1) for year={year}, draw={draw} "
-            f"in hours [{start}, {stop}); the chunk is incomplete."
-        )
-    up.flags.writeable = False
-    _UNIT_SLICE_CACHE.clear()  # size one: these slices are hundreds of MB
-    _UNIT_SLICE_CACHE[key] = up
-    _UNIT_SLICE_STATS["misses"] += 1
-    _UNIT_SLICE_STATS["key"] = key
-    return up
+    params = load_outage_params()
+    return row_specs(static, params), params
 
 
 def _outage_availability(
-    dataset_dir: Path,
-    draw: int,
+    static: dict[str, pd.DataFrame],
+    options: LoadOptions,
     component: str,
     rows: pd.Index,
     capacities: pd.Series,
     years: Sequence[int],
     window: HourWindow,
 ) -> tuple[np.ndarray, dict]:
-    """``(n_rows, n_hours)`` availability from ``outages.zarr`` via WP2."""
-    from zap.reliability.outages import row_availability
+    """``(n_rows, n_hours)`` availability, sampled on demand (outage-pool spec D3).
 
-    path, root = _open_outage_store(dataset_dir)
-    attrs = dict(root.attrs)
-    pool = _unit_pool_from_store(root)
+    The capacities handed in are the *designed* ones, so the availability of a
+    row is weighted over the slots backing the capacity it actually carries: a
+    greenfield or rebuilt row draws outages instead of being outage-free
+    (WP-E1), and this is now structural rather than a weighting trick, because
+    slot ``k``'s realisation does not depend on how many slots the row uses.
+    """
+    from zap.reliability.outages import row_availability, slot_count, unit_cache_info
 
-    store_years = [int(y) for y in np.asarray(root["weather_year"][:])]
-    draws = [int(d) for d in np.asarray(root["draw"][:])]
-    if draw not in draws:
-        raise KeyError(f"Draw {draw} is not in {path} (have {draws})")
-    di = draws.index(draw)
+    specs, params = _outage_row_specs(static)
+    by_component = [s for s in specs if s.component == component]
+    known = {s.name: s for s in by_component}
+    wanted = [known[r] for r in rows if r in known]
 
-    known = set(pool.row_offset)
+    caps = {name: float(capacities[name]) for name in (s.name for s in wanted)}
     blocks = []
     for year in years:
-        if int(year) not in store_years:
-            raise KeyError(f"Weather year {year} is not in {path} (have {store_years})")
-        yi = store_years.index(int(year))
-        if "done" in root and not bool(np.asarray(root["done"][yi, di])):
-            raise ValueError(
-                f"Outage chunk (year={year}, draw={draw}) was never generated in {path}; "
-                "run the outage generator for it before loading."
-            )
-        # (n_units, n_hours), decompressed once per (year, draw, window) and
-        # shared with the next lookup (WP-E0).
-        up = _unit_slice(
-            path, root, yi, di, int(year), int(draw), window.start, window.stop
-        )
-        pooled = [r for r in rows if r in known]
         avail = np.ones((len(window), len(rows)), dtype=np.float64)
-        if pooled:
-            sub = row_availability(up, pool, capacities.loc[pooled], pooled)
-            positions = [rows.get_loc(r) for r in pooled]
+        if wanted:
+            sub = row_availability(
+                wanted,
+                caps,
+                params,
+                year=int(year),
+                draw=int(options.outage_draw),
+                base_seed=int(options.outage_seed),
+                scheme=str(options.outage_scheme),
+                window=window,
+            )
+            positions = [rows.get_loc(s.name) for s in wanted]
             avail[:, positions] = sub
         blocks.append(avail)
 
     stacked = np.concatenate(blocks, axis=0).T  # (n_rows, n_hours)
-    del component  # component is implicit in the row names; kept for signature clarity
-    return stacked, attrs
+    info = {
+        "scheme": str(options.outage_scheme),
+        "base_seed": int(options.outage_seed),
+        "params_sha256": params.sha256,
+        "params_version": int(params.version),
+        "params_reviewed": bool(params.reviewed),
+        "n_units": int(
+            sum(
+                slot_count(caps[s.name], params.carriers[s.carrier].unit_size_mw)
+                for s in wanted
+            )
+        ),
+        "cache": unit_cache_info(),
+    }
+    return stacked, info
+
+
 
 
 # ===========================================================================
@@ -1654,28 +1566,27 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         storage_ucap, _ = _ucap_factors(dataset_dir, "StorageUnit", static["storage_units"].index)
     elif options.outage_draw is not None:
         # The capacities handed to `_outage_availability` are the *designed*
-        # ones (`static` is post-design): a row that outgrows its slice of the
-        # pool raises here rather than being silently under-derated.
-        with _design_context(options, "Generator"):
-            gen_outage, outage_attrs = _outage_availability(
-                dataset_dir,
-                options.outage_draw,
-                "Generator",
-                static["generators"].index,
-                static["generators"]["p_nom"],
-                years,
-                window,
-            )
-        with _design_context(options, "StorageUnit"):
-            storage_outage, _ = _outage_availability(
-                dataset_dir,
-                options.outage_draw,
-                "StorageUnit",
-                static["storage_units"].index,
-                static["storage_units"]["p_nom"],
-                years,
-                window,
-            )
+        # ones (`static` is post-design): every row is derated over the slots
+        # backing the capacity it actually carries.  Nothing can overflow -- the
+        # virtual pool is unbounded (outage-pool spec D3.1).
+        gen_outage, outage_attrs = _outage_availability(
+            static,
+            options,
+            "Generator",
+            static["generators"].index,
+            static["generators"]["p_nom"],
+            years,
+            window,
+        )
+        storage_outage, _ = _outage_availability(
+            static,
+            options,
+            "StorageUnit",
+            static["storage_units"].index,
+            static["storage_units"]["p_nom"],
+            years,
+            window,
+        )
 
     # ---- Demand scaling (D9) ---------------------------------------------
     # As-built capacities on purpose: the peak-available denominator (and hence
@@ -1765,6 +1676,8 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "voll": float(options.voll),
         "ucap_derate": bool(options.ucap_derate),
         "outage_draw": options.outage_draw,
+        "outage_scheme": str(options.outage_scheme),
+        "outage_seed": int(options.outage_seed),
         "model_year": model_year,
         "model_year_source": model_year_source,
         "apply_lifetimes": bool(options.apply_lifetimes),
@@ -1788,7 +1701,10 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "cost_unit": float(options.cost_unit),
         "weather_store_attrs": store.attrs,
         "ucap_csv_sha256": ucap_sha,
-        "outage_store_attrs": outage_attrs,
+        # `{scheme, base_seed, params_sha256, n_units, cache}` -- the forty bytes
+        # that replaced `outages.zarr` as the canonical artefact (spec D2/D3.1).
+        # None when the system carries no draw.
+        "outages": outage_attrs,
     }
 
     return LoadedSystem(network=network, devices=devices, index=index, meta=meta)
