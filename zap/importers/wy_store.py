@@ -1035,10 +1035,51 @@ def _outage_availability(
             )
         ),
         "cache": unit_cache_info(),
+        # Which component this snapshot counted, so a merged record can say so.
+        "components": [str(component)],
     }
     return stacked, info
 
 
+def merge_outage_info(*infos: Optional[dict]) -> Optional[dict]:
+    """Combine the per-component records of :func:`_outage_availability`.
+
+    ``load_system`` samples generators and storage in two calls, and a system's
+    slot count is the sum of the two -- reporting only the first under-counted
+    every run card and every ``meta["outages"]`` reader (verifier, 2026-09-12:
+    640 of 1,138 slots on ``ca2040_z4`` draw 3).
+
+    The RNG identity (scheme, seed, parameters) must agree across the calls --
+    they come from one ``LoadOptions`` and one parameter file -- and a
+    disagreement is a bug, so it raises rather than being silently reconciled.
+    The cache block is taken from the **last** record: ``unit_cache_info``'s
+    hit/miss counters are cumulative over the process, so the later snapshot
+    already contains the earlier call's activity, and ``units`` is the live
+    size of the one shared cache, not a per-call quantity.
+    """
+    present = [dict(i) for i in infos if i]
+    if not present:
+        return None
+    identity_keys = ("scheme", "base_seed", "params_sha256", "params_version")
+    first = present[0]
+    for other in present[1:]:
+        for key in identity_keys:
+            if other.get(key) != first.get(key):
+                raise ValueError(
+                    f"outage info disagrees on {key!r} between components "
+                    f"({first.get('components')} vs {other.get('components')}): "
+                    f"{first.get(key)!r} != {other.get(key)!r}"
+                )
+    merged = dict(first)
+    merged["n_units"] = int(sum(int(i.get("n_units", 0)) for i in present))
+    merged["cache"] = present[-1].get("cache")
+    merged["components"] = [c for i in present for c in (i.get("components") or [])]
+    merged["n_units_by_component"] = {
+        component: int(i.get("n_units", 0))
+        for i in present
+        for component in (i.get("components") or ["?"])
+    }
+    return merged
 
 
 # ===========================================================================
@@ -1569,7 +1610,7 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         # ones (`static` is post-design): every row is derated over the slots
         # backing the capacity it actually carries.  Nothing can overflow -- the
         # virtual pool is unbounded (outage-pool spec D3.1).
-        gen_outage, outage_attrs = _outage_availability(
+        gen_outage, gen_outage_attrs = _outage_availability(
             static,
             options,
             "Generator",
@@ -1578,7 +1619,7 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
             years,
             window,
         )
-        storage_outage, _ = _outage_availability(
+        storage_outage, storage_outage_attrs = _outage_availability(
             static,
             options,
             "StorageUnit",
@@ -1587,6 +1628,10 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
             years,
             window,
         )
+        # Both components, or the card under-reports the case: keeping only the
+        # generator call's info reported 640 of 1,138 slots on z4 draw 3
+        # (verifier, 2026-09-12).
+        outage_attrs = merge_outage_info(gen_outage_attrs, storage_outage_attrs)
 
     # ---- Demand scaling (D9) ---------------------------------------------
     # As-built capacities on purpose: the peak-available denominator (and hence

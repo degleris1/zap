@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 import os
 import sys
@@ -175,6 +176,19 @@ class OutageParams:
             "excluded_carriers": sorted(self.excluded_carriers),
             "carriers": {k: v.to_dict() for k, v in sorted(self.carriers.items())},
         }
+
+    def content_hash(self) -> str:
+        """Digest of the *values* that drive the chain, not of the file they came from.
+
+        ``sha256`` is the sha of ``outage_params.yaml``'s bytes: the right label
+        for provenance, but only as good as whoever populated it --
+        :meth:`from_dict` defaults it to ``"unknown"`` and callers (tests, a
+        store's recorded attributes) pass literals. The slot cache keys on this
+        instead, because two parameter sets that disagree on a single forced
+        outage rate must never share a cached realisation.
+        """
+        payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @classmethod
     def from_dict(cls, raw: Mapping, sha256: str = "unknown") -> OutageParams:
@@ -411,9 +425,10 @@ def sample_units(
 # ---------------------------------------------------------------------------
 
 #: ``uid -> (n_hours,) uint8``, valid for exactly one
-#: ``(scheme, base_seed, year, draw, n_hours)`` and dropped wholesale when that
-#: tuple changes.  The evaluation enumerates design-inner, so consecutive cases
-#: share it and a perturbed design misses only on the slots it added.
+#: ``(scheme, base_seed, year, draw, n_hours, params content hash)`` and dropped
+#: wholesale when that tuple changes.  The evaluation enumerates design-inner, so
+#: consecutive cases share it and a perturbed design misses only on the slots it
+#: added.
 _UNIT_CACHE: OrderedDict[int, np.ndarray] = OrderedDict()
 _UNIT_CACHE_KEY: tuple | None = None
 _UNIT_CACHE_STATS: dict[str, Any] = {"hits": 0, "misses": 0}
@@ -461,9 +476,24 @@ def _cached_uptime(
     draw: int,
     n_hours: int,
 ) -> dict[int, np.ndarray]:
-    """Uptime rows for ``ids``, generating (in one batched call) only the misses."""
+    """Uptime rows for ``ids``, generating (in one batched call) only the misses.
+
+    The cache key carries ``params.content_hash()`` as well as the RNG tuple: the
+    uniforms depend only on ``(scheme, seed, year, draw, uid)``, but the *chain*
+    they are pushed through depends on the carrier's ``p_fail`` / ``p_repair`` /
+    FOR, so two parameter sets at the same ``(scheme, seed, year, draw)`` would
+    otherwise serve each other's availability (verifier, 2026-09-12: a x5 forced
+    outage rate read back 0.9769 instead of 0.8805).
+    """
     global _UNIT_CACHE_KEY
-    key = (str(scheme), int(base_seed), int(year), int(draw), int(n_hours))
+    key = (
+        str(scheme),
+        int(base_seed),
+        int(year),
+        int(draw),
+        int(n_hours),
+        params.content_hash(),
+    )
     if _UNIT_CACHE_KEY != key:
         _UNIT_CACHE.clear()
         _UNIT_CACHE_KEY = key

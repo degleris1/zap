@@ -399,9 +399,9 @@ class TestRowAvailability(OutageTestCase):
 
 
 class TestUnitCache(OutageTestCase):
-    def _avail(self, caps, *, draw=0):
+    def _avail(self, caps, *, draw=0, params=None):
         return ox.row_availability(
-            self.rows, caps, self.params,
+            self.rows, caps, params if params is not None else self.params,
             year=2020, draw=draw, base_seed=7, scheme="slot-v1",
             window=(0, 24), hours_per_year=168,
         )
@@ -445,7 +445,70 @@ class TestUnitCache(OutageTestCase):
         info = ox.unit_cache_info()
         self.assertEqual(info["units"], units)  # dropped wholesale, refilled
         self.assertEqual(info["hits"], 0)
-        self.assertEqual(info["key"][3], 1)  # (scheme, seed, year, draw, hours)
+        # (scheme, seed, year, draw, hours, params content hash)
+        self.assertEqual(info["key"][3], 1)
+
+    def test_changing_the_parameters_drops_the_cache(self):
+        """Verifier 2026-09-12: the chain depends on the parameters, so the key must.
+
+        The uniforms are a function of ``(scheme, seed, year, draw, uid)`` alone,
+        so without the parameter hash a five-fold forced outage rate was served
+        the *base* availability out of the cache (0.9769 instead of 0.8805).
+        """
+        caps = {r.name: 0.0 for r in self.rows}
+        caps["z1 CCGT"] = 2000.0  # 8 slots
+        harsh_dir = self.tmp / "harsh"
+        harsh_dir.mkdir()
+        # FOR 0.5 with MTTR 2 h makes the chain iid Bernoulli(0.5), so "the
+        # numbers moved" is a statement about 192 nearly-independent slot-hours
+        # rather than a coin flip on whether anything failed at all.
+        harsh = make_params(
+            harsh_dir,
+            carriers={
+                **params_dict()["carriers"],
+                "CCGT": {
+                    "unit_size_mw": 250,
+                    "forced_outage_rate": 0.5,
+                    "mttr_h": 2,
+                    "source": "test",
+                },
+            },
+        )
+        self.assertNotEqual(self.params.content_hash(), harsh.content_hash())
+
+        # Only the CCGT column moves; the other rows are at zero capacity and
+        # sit at 1.0, which would dilute a mean over the whole array.
+        column = self.rows.index(self.by_name["z1 CCGT"])
+
+        ox.unit_cache_clear()
+        base_avail = self._avail(caps)
+        base = float(base_avail[:, column].mean())
+        cached_units = ox.unit_cache_info()["units"]
+
+        derated_avail = self._avail(caps, params=harsh)
+        derated = float(derated_avail[:, column].mean())
+        info = ox.unit_cache_info()
+        self.assertEqual(info["hits"], 0, "a parameter change must be a cache miss")
+        self.assertEqual(info["units"], cached_units)  # dropped wholesale, refilled
+        self.assertEqual(info["key"][5], harsh.content_hash())
+        self.assertFalse(np.array_equal(base_avail, derated_avail))
+        # ~0.96 base vs ~0.5 derated over 8 slots x 24 h: far outside the noise.
+        self.assertLess(derated, base - 0.2, f"{derated} vs {base}")
+
+        # Switching back is a miss again, and reproduces the first answer exactly.
+        again = self._avail(caps)
+        np.testing.assert_array_equal(again, base_avail)
+
+    def test_content_hash_ignores_nothing_that_drives_the_chain(self):
+        """A file sha256 is not enough: `from_dict` defaults it to 'unknown'."""
+        raw = params_dict()
+        a = ox.OutageParams.from_dict(raw)
+        bumped = params_dict()
+        bumped["carriers"]["CCGT"]["mttr_h"] = 51
+        b = ox.OutageParams.from_dict(bumped)
+        self.assertEqual(a.sha256, b.sha256)  # both "unknown" -- the defect
+        self.assertNotEqual(a.content_hash(), b.content_hash())
+        self.assertEqual(a.content_hash(), ox.OutageParams.from_dict(raw).content_hash())
 
     def test_cache_capacity_is_configurable(self):
         import os

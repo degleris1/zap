@@ -414,6 +414,62 @@ def test_arbitrarily_large_storage_design_is_derated(dataset):
 # ---------------------------------------------------------------------------
 
 
+def test_meta_outages_counts_both_components(dataset, draw):
+    """`meta["outages"]` covers generators *and* storage (verifier, 2026-09-12).
+
+    `load_system` samples the two component classes in separate calls; keeping
+    only the first record under-reported every run card's "Slots sampled" (640
+    of 1,138 on `ca2040_z4` draw 3).
+    """
+    from zap.reliability.keys import row_specs
+    from zap.reliability.outages import (
+        load_outage_params,
+        read_static_tables,
+        slot_counts,
+    )
+
+    system = _load(dataset, outage_draw=draw)
+    info = system.meta["outages"]
+
+    params = load_outage_params()
+    static = read_static_tables(dataset)
+    specs = row_specs(static, params)
+    caps: dict[str, float] = {}
+    for cls_name, key in (("Generator", "generators"), ("StorageUnit", "storage_units")):
+        names = list(system.index.names[cls_name])
+        device = system.index.get(system.devices, cls_name)
+        values = np.asarray(
+            device.nominal_capacity if cls_name == "Generator" else device.power_capacity,
+            dtype=float,
+        ).reshape(-1)
+        caps.update(dict(zip(names, values, strict=True)))
+        del key
+    counts = slot_counts(specs, caps, params)
+
+    by_component: dict[str, int] = {"Generator": 0, "StorageUnit": 0}
+    for spec in specs:
+        by_component[spec.component] += counts.get(spec.name, 0)
+
+    assert by_component["Generator"] > 0 and by_component["StorageUnit"] > 0
+    assert info["n_units"] == sum(by_component.values())
+    assert info["n_units"] > by_component["Generator"], "storage must be counted too"
+    assert info["n_units_by_component"] == by_component
+    assert info["components"] == ["Generator", "StorageUnit"]
+    # The cache block is the later snapshot, so it already covers both calls.
+    assert info["cache"]["units"] >= info["n_units"]
+
+
+def test_merge_outage_info_refuses_a_mixed_identity():
+    from zap.importers.wy_store import merge_outage_info
+
+    a = {"scheme": "slot-v1", "base_seed": 1, "n_units": 2, "components": ["Generator"]}
+    b = {"scheme": "other", "base_seed": 1, "n_units": 3, "components": ["StorageUnit"]}
+    assert merge_outage_info(a, None)["n_units"] == 2
+    assert merge_outage_info(None, None) is None
+    with pytest.raises(ValueError, match="scheme"):
+        merge_outage_info(a, b)
+
+
 def test_no_design_is_unchanged(dataset):
     """Regression: the as-built numbers with no design are what they always were."""
     gens = read_static(dataset)["generators"]
