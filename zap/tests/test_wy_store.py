@@ -21,9 +21,11 @@ from zap.importers.wy_store import (
     LoadOptions,
     WeatherStore,
     available_capacity,
+    bus_peak_shares,
     chunk_hours_for,
     convert_dataset,
     detect_model_year,
+    firm_load_allocation,
     import_bus_mask,
     load_system,
     peak_available_mw,
@@ -342,6 +344,80 @@ def test_demand_scaling_clips(dataset):
     np.testing.assert_allclose(
         fixed.index.get(fixed.devices, "Load").load, unscaled * 0.5, rtol=1e-12
     )
+
+
+def test_firm_load_raises_every_hour_pro_rata_to_bus_peak(dataset):
+    """Accreditation spec D15: a constant MW, split pro-rata to window peak.
+
+    Two claims, both exact: the *system* demand rises by exactly ``firm_load_mw``
+    in every hour of the window, and bus ``n`` rises by ``f_n * firm_load_mw``
+    with ``f_n`` its share of the system's window-peak demand.  The increment
+    goes on after demand scaling, so it is an absolute MW and the meta's
+    ``peak_load_mw`` (which feeds `peak_fraction` scaling) does not move with it.
+    """
+    firm = 250.0
+    baseline = _load(dataset)
+    probed = _load(dataset, firm_load_mw=firm)
+
+    base_load = baseline.index.get(baseline.devices, "Load")
+    probe_load = probed.index.get(probed.devices, "Load")
+    base_profile = base_load.load * base_load.nominal_capacity
+    probe_profile = probe_load.load * probe_load.nominal_capacity
+
+    # (i) the system total rises by exactly `firm` in every hour.
+    np.testing.assert_allclose(
+        probe_profile.sum(axis=0) - base_profile.sum(axis=0),
+        np.full(base_profile.shape[1], firm),
+        rtol=0,
+        atol=1e-9,
+    )
+
+    # (ii) bus n rises by f_n * firm, with f_n the bus's share of window peak.
+    n_nodes = baseline.network.num_nodes
+    terminal = np.asarray(base_load.terminal).ravel().astype(int)
+    shares = bus_peak_shares(base_profile, terminal, n_nodes)
+    assert shares.sum() == pytest.approx(1.0)
+    for node in range(n_nodes):
+        rows = terminal == node
+        if not rows.any():
+            continue
+        delta = (probe_profile[rows] - base_profile[rows]).sum(axis=0)
+        np.testing.assert_allclose(
+            delta, np.full(base_profile.shape[1], shares[node] * firm), rtol=0, atol=1e-9
+        )
+
+    # The increment is recorded and is not a demand-scaling factor.
+    assert probed.meta["firm_load_mw"] == pytest.approx(firm)
+    assert baseline.meta["firm_load_mw"] == 0.0
+    assert probed.meta["peak_load_mw"] == pytest.approx(baseline.meta["peak_load_mw"])
+    assert probed.meta["applied_scale"] == baseline.meta["applied_scale"]
+
+
+def test_firm_load_is_absolute_mw_on_top_of_demand_scaling(dataset):
+    """Scaling multiplies the profile; the firm increment is added afterwards."""
+    firm = 100.0
+    scaled = _load(dataset, demand_scaling="fixed", scale_load=0.5)
+    probed = _load(dataset, demand_scaling="fixed", scale_load=0.5, firm_load_mw=firm)
+    base = scaled.index.get(scaled.devices, "Load")
+    probe = probed.index.get(probed.devices, "Load")
+    total = (probe.load * probe.nominal_capacity).sum(axis=0) - (
+        base.load * base.nominal_capacity
+    ).sum(axis=0)
+    np.testing.assert_allclose(total, np.full(total.shape, firm), rtol=0, atol=1e-9)
+
+
+def test_firm_load_allocation_splits_one_bus_across_its_rows(dataset):
+    """Two rows on one bus share that bus's increment pro-rata to their own peaks."""
+    profile = np.array([[10.0, 30.0], [10.0, 10.0], [40.0, 20.0]])
+    terminal = np.array([0, 0, 1])
+    # Bus 0 peaks at 40 (hour 1: 30 + 10), bus 1 at 40 -> f = (0.5, 0.5).
+    shares = bus_peak_shares(profile, terminal, 2)
+    np.testing.assert_allclose(shares, [0.5, 0.5])
+    alloc = firm_load_allocation(profile, terminal, 2, 100.0)
+    # Bus 0's 50 MW splits 30:10 between its two rows by row peak.
+    np.testing.assert_allclose(alloc, [37.5, 12.5, 50.0])
+    assert alloc.sum() == pytest.approx(100.0)
+    np.testing.assert_allclose(firm_load_allocation(profile, terminal, 2, 0.0), np.zeros(3))
 
 
 def test_peak_available_excludes_storage_and_imports(dataset):

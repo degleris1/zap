@@ -563,6 +563,13 @@ class LoadOptions:
     #: ``storage_init_soc`` / ``storage_final_soc``; ``"cyclic_free"`` only ties
     #: them together (``energy[0] == energy[T]``) and ignores both levels.
     storage_soc_mode: Literal["fixed", "cyclic_free"] = "cyclic_free"  # default by decision 2026-09-09
+    #: A constant MW of **firm load** added to demand in every hour of the window,
+    #: split across load buses pro-rata to each bus's window-peak demand
+    #: (accreditation spec D15).  This is the denominator direction of a marginal
+    #: ELCC: an ELCC point is "the perturbed design, evaluated with `firm_load_mw`
+    #: of extra firm demand".  It is applied *after* demand scaling, so it is an
+    #: absolute MW increment and not a fraction of anything.
+    firm_load_mw: float = 0.0
     dtype: str = "float64"
 
 
@@ -1146,6 +1153,62 @@ def _build_generators(
     return dev, weather, emission_rates
 
 
+def bus_peak_shares(profile: np.ndarray, terminal: np.ndarray, n_nodes: int) -> np.ndarray:
+    """``f_n``: each bus's share of the system's window-peak demand.
+
+    The spatial direction of a firm-load increment (accreditation spec D15) and,
+    by D5, the denominator direction of every accreditation factor.  A bus's peak
+    is the maximum over the window of the **summed** demand of the load rows
+    sitting on it, so two rows at one bus count once; the shares are normalised
+    over buses, not rows.  Returns zeros when the system carries no load.
+    """
+    profile = np.atleast_2d(np.asarray(profile, dtype=np.float64))
+    terminal = np.asarray(terminal).ravel().astype(int)
+    by_bus = np.zeros((n_nodes, profile.shape[1]))
+    for row, node in enumerate(terminal):
+        by_bus[node, :] += profile[row, :]
+    peaks = by_bus.max(axis=1) if profile.shape[1] else np.zeros(n_nodes)
+    peaks = np.maximum(peaks, 0.0)
+    total = float(peaks.sum())
+    if total <= 0.0:
+        return np.zeros(n_nodes)
+    return peaks / total
+
+
+def firm_load_allocation(
+    profile: np.ndarray, terminal: np.ndarray, n_nodes: int, firm_load_mw: float
+) -> np.ndarray:
+    """Per-**row** MW of a ``firm_load_mw`` increment (accreditation spec D15).
+
+    The increment is split across *buses* pro-rata to :func:`bus_peak_shares`, and
+    a bus's share is then split across the load rows sitting on it pro-rata to
+    their own window peaks.  With one load row per bus -- which is every CA2040
+    dataset -- the second step is the identity and row ``r`` at bus ``n`` simply
+    receives ``f_n * firm_load_mw``.
+    """
+    firm_load_mw = float(firm_load_mw)
+    profile = np.atleast_2d(np.asarray(profile, dtype=np.float64))
+    terminal = np.asarray(terminal).ravel().astype(int)
+    if firm_load_mw == 0.0:
+        return np.zeros(profile.shape[0])
+    shares = bus_peak_shares(profile, terminal, n_nodes)
+    if not shares.any():
+        raise ValueError(
+            f"LoadOptions.firm_load_mw is {firm_load_mw} but the system carries no load, "
+            "so there is no window peak to split the increment over"
+        )
+    row_peaks = profile.max(axis=1) if profile.shape[1] else np.zeros(profile.shape[0])
+    row_peaks = np.maximum(row_peaks, 0.0)
+    bus_peaks = np.zeros(n_nodes)
+    np.add.at(bus_peaks, terminal, row_peaks)
+    out = np.zeros(profile.shape[0])
+    for row, node in enumerate(terminal):
+        if bus_peaks[node] <= 0.0:
+            continue
+        out[row] = firm_load_mw * shares[node] * row_peaks[row] / bus_peaks[node]
+    return out
+
+
 def _build_loads(
     static: dict[str, pd.DataFrame],
     store: WeatherStore,
@@ -1163,11 +1226,18 @@ def _build_loads(
         options.window,
         "load",
     )
+    terminal = _terminals(loads["bus"], bus_index, "loads.csv")
+    profile = profile * applied_scale
+    # The firm-load increment is absolute MW and goes on *after* demand scaling:
+    # scaling is a property of the scenario, the increment is the ELCC probe.
+    increment = firm_load_allocation(profile, terminal, len(bus_index), options.firm_load_mw)
+    if increment.any():
+        profile = profile + increment[:, None]
     return Load(
         num_nodes=len(bus_index),
         name=loads.index,
-        terminal=_terminals(loads["bus"], bus_index, "loads.csv"),
-        load=profile * applied_scale,
+        terminal=terminal,
+        load=profile,
         linear_cost=np.full(len(loads), float(options.voll)),
         quadratic_cost=None,
     )
@@ -1718,6 +1788,10 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "annual_demand_mwh": peaks["annual_demand_mwh"],
         "implied_scale": implied_scale,
         "applied_scale": applied_scale,
+        # Constant MW of firm load added in every hour, split across load buses
+        # pro-rata to window peak (accreditation spec D15). 0.0 on every ordinary
+        # run; non-zero only on an ELCC probe.
+        "firm_load_mw": float(options.firm_load_mw),
         "voll": float(options.voll),
         "ucap_derate": bool(options.ucap_derate),
         "outage_draw": options.outage_draw,
