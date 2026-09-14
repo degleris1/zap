@@ -108,7 +108,9 @@ class PlanningProblemCVX(AbstractPlanningProblem):
 
         return dtheta
 
-    def backward_objective(self, objective, *, return_adjoint: bool = True):
+    def backward_objective(
+        self, objective, *, return_adjoint: bool = True, return_value: bool = False
+    ):
         """A second VJP on the forward solve already in ``self.state``.
 
         ``objective`` is any :class:`AbstractOperationObjective`; it is
@@ -121,8 +123,16 @@ class PlanningProblemCVX(AbstractPlanningProblem):
         Returns ``(dtheta, adjoint)`` -- ``dtheta[param]`` is
         ``d objective / d param`` including the direct dependence of the
         objective on the parameters, and ``adjoint`` is the layer's adjoint
-        state (``adjoint.prices`` = d objective / d injection).  With
-        ``return_adjoint=False`` only ``dtheta`` is returned.
+        state.  **Sign convention** (measured against finite differences on
+        2026-09-13, accreditation spec implementation note 29):
+        ``adjoint.prices[n, t]`` is ``+d objective / d D_{n,t}``, the
+        sensitivity to a marginal unit of *demand* at that node and hour --
+        equivalently ``-d objective / d injection``.  With
+        ``return_adjoint=False`` only ``dtheta`` is returned; with
+        ``return_value=True`` the objective's own value on this forward pass is
+        appended to whatever is returned (``(dtheta, adjoint, value)``, or
+        ``(dtheta, value)``), which is how a caller can tell "no shortfall
+        anywhere" from "a ratio of two rounding errors".
 
         Requires a ``forward(requires_grad=True)`` and a :meth:`backward` (or
         at least a forward) since the last parameter change: the graph it
@@ -131,6 +141,15 @@ class PlanningProblemCVX(AbstractPlanningProblem):
         if getattr(self, "torch_state", None) is None:
             raise RuntimeError(
                 "backward_objective needs a forward(requires_grad=True) pass first"
+            )
+        if self.torch_state is self.state or not _is_torch_state(self.torch_state):
+            # `forward(requires_grad=False)` leaves `torch_state is state`, a
+            # DispatchOutcome of numpy arrays, and the autograd graph the second
+            # adjoint differentiates never existed.  Say so here rather than
+            # letting `.requires_grad` fail on an ndarray several frames down.
+            raise RuntimeError(
+                "backward_objective needs a forward(requires_grad=True) pass; "
+                "the retained state is numpy"
             )
 
         value = objective(self.torch_state, parameters=self.params, la=torch)
@@ -195,9 +214,22 @@ class PlanningProblemCVX(AbstractPlanningProblem):
         )
         dtheta = {k: v + dtheta_op[k] for k, v in dtheta_direct.items()}
 
+        scalar = float(value.detach()) if isinstance(value, torch.Tensor) else float(value)
         if return_adjoint:
-            return dtheta, adjoint
-        return dtheta
+            return (dtheta, adjoint, scalar) if return_value else (dtheta, adjoint)
+        return (dtheta, scalar) if return_value else dtheta
+
+
+def _is_torch_state(state: DispatchOutcome) -> bool:
+    """True when every leaf of ``state`` is a torch tensor.
+
+    ``forward(requires_grad=False)`` stores the numpy outcome as
+    ``torch_state``; there is then no graph to differentiate.
+    """
+    leaves, _layout = _tensor_leaves(state)
+    if not leaves:
+        return False
+    return all(torch.is_tensor(leaf) for leaf in leaves)
 
 
 def _tensor_leaves(state: DispatchOutcome):

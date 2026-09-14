@@ -134,7 +134,9 @@ class AbstractPlanningProblem:
     def backward(self):
         raise NotImplementedError
 
-    def backward_objective(self, objective, *, return_adjoint: bool = True):
+    def backward_objective(
+        self, objective, *, return_adjoint: bool = True, return_value: bool = False
+    ):
         """A second VJP of another objective on the *same* forward solve.
 
         Implemented on the cvxpy path only (``PlanningProblemCVX``): the ADMM
@@ -713,7 +715,9 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
             for k in grads[0].keys()
         }
 
-    def backward_objective(self, objective, *, return_adjoint: bool = True):
+    def backward_objective(
+        self, objective, *, return_adjoint: bool = True, return_value: bool = False
+    ):
         """A second VJP of ``objective`` on the subproblems of the last batch.
 
         ``objective`` is either one :class:`AbstractOperationObjective` shared by
@@ -727,12 +731,18 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
         over the batch, exactly as :meth:`backward` weights the planning
         gradient, and ``adjoints`` is the per-subproblem adjoint state in batch
         order.  The weights that pair with them are :meth:`batch_weights`.
+
+        ``return_value=True`` appends the **batch-weighted sum of the
+        objective's own values** -- the same extrapolation ``dtheta`` carries,
+        so a caller can read "this iterate sheds nothing" off the value it
+        divided by.
         """
         batch = list(self.batch)
         results = [
             self.subproblems[b].backward_objective(
                 _subproblem_objective(objective, b, self.subproblems[b]),
                 return_adjoint=True,
+                return_value=True,
             )
             for b in batch
         ]
@@ -742,9 +752,10 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
         dtheta = {
             k: sum([w * g[k] for w, g in zip(weights, grads)]) for k in grads[0].keys()
         }
+        value = float(sum(w * r[2] for w, r in zip(weights, results)))
         if return_adjoint:
-            return dtheta, adjoints
-        return dtheta
+            return (dtheta, adjoints, value) if return_value else (dtheta, adjoints)
+        return (dtheta, value) if return_value else dtheta
 
     def batch_weights(self, batch=None):
         """The weights :meth:`backward` applies to one batch's subproblems."""

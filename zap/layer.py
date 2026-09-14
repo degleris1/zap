@@ -80,10 +80,13 @@ class DispatchLayer:
         With ``return_adjoint=True`` the adjoint state itself is returned
         alongside ``dtheta`` as ``(dtheta, dz_bar)``, where
         ``dz_bar = inv(JK_z.T) @ dz`` is packaged into a
-        :class:`~zap.network.DispatchOutcome`.  Its ``prices`` entry is the
-        sensitivity of the seed objective to a marginal *injection* at each
-        (node, hour) -- the quantity the accreditation work (planner-side MRI,
-        ``plans/2026-09-11-accreditation-spec.md`` D9) needs and which is
+        :class:`~zap.network.DispatchOutcome`.  Its ``prices`` entry is
+        ``+d objective / d demand`` at each (node, hour) -- equivalently
+        ``-d objective / d injection``, the same convention as
+        ``DispatchOutcome.prices`` itself.  Measured against one-sided finite
+        differences of the re-solved dispatch on 2026-09-13 (accreditation spec
+        implementation note 29); it is the quantity the planner-side MRI
+        (``plans/2026-09-11-accreditation-spec.md`` D9) needs and which is
         otherwise thrown away.  ``return_adjoint=False`` returns exactly what
         this method always returned.
         """
