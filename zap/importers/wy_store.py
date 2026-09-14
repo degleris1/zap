@@ -23,7 +23,10 @@ Key modelling decisions implemented here (see ``memory/plans/2026-09-08-phase1-s
 * D4 -- ``zap.devices.store.Store`` is not used; export stores become ``Injector`` sinks.
 * D5 -- links become ``DirectedLine`` (directional, signed linear cost, efficiency).
 * D9 -- ``peak_fraction`` demand scaling is clipped at 1.0 by default.
-* D10 -- ``p_min_pu`` (minimum stable level) is ignored.
+* D10 -- ``p_min_pu`` (minimum stable level) is ignored unless
+  ``LoadOptions.commitment == "minimal"``, which builds the linearised
+  unit-commitment device of ``memory/plans/2026-09-14-uc-minimal-impl-spec.md``
+  (start-up cost + minimum stable level on the file's ``committable`` rows).
 * D12 -- the converter refuses to overwrite an existing store and records provenance.
 """
 
@@ -552,7 +555,19 @@ class LoadOptions:
     #: Provenance only: the ``design_id`` the capacities came from.
     design_id: Optional[str] = None
     link_losses: bool = True
+    #: Retired by the minimal unit-commitment device (2026-09-14).  Kept for key
+    #: stability and now inert; ``False`` is a ``ValueError`` pointing at
+    #: :attr:`commitment`.
     ignore_min_power: bool = True
+    #: ``"minimal"`` builds the LP-relaxed unit-commitment device: a start-up
+    #: cost and a minimum stable level on the ``committable`` rows of
+    #: ``static/generators.csv``.  ``"off"`` is the historical device.
+    commitment: Literal["off", "minimal"] = "off"
+    #: Boundary condition on the commitment of the *first* hour of a block.
+    #: ``"cyclic_free"`` wraps (``c_{-1} = c_{T-1}``); ``"pypsa"`` starts the
+    #: block uncommitted (``c_{-1} = 0``), which is what PyPSA's linearised UC
+    #: does when ``up_time_before == 0`` and is only used for the acceptance test.
+    commitment_mode: Literal["cyclic_free", "pypsa"] = "cyclic_free"
     export_mode: Literal["sink", "drop"] = "sink"
     carbon_tax: float = 0.0
     power_unit: float = 1.0
@@ -1094,6 +1109,52 @@ def merge_outage_info(*infos: Optional[dict]) -> Optional[dict]:
 # ===========================================================================
 
 
+def commitment_fields(
+    gens: pd.DataFrame, file_p_nom: np.ndarray
+) -> dict[str, np.ndarray]:
+    """``committable`` / ``min_power_fraction`` / ``start_up_cost_per_mw`` (spec 3).
+
+    ``k_g = start_up_cost_g / p_nom_file_g`` in **$ per MW started**, from the
+    *file's* ``p_nom`` -- before the lifetime rule and before
+    :func:`apply_design_capacity` -- so it is a constant of the row rather than a
+    function of the fleet year or of the design being scored.  PyPSA charges a
+    flat ``$`` per start; the two coincide whenever the row is committed at its
+    file capacity, which is every operational run and (on ca2040_z4) every
+    planning cell, since all eight committable+extendable rows have
+    ``p_nom_max == p_nom``.
+
+    ``p_min_pu`` on a **non-committable** row is deliberately ignored: zap's
+    ``Generator.min_power`` is identically zero and PyPSA's
+    ``p >= p_min_pu * p_nom`` agrees with it at ``p_nom == 0``, which is every
+    such row on ca2040_z4.  It would diverge on an expansion run that built one,
+    and that is a documented limitation.
+    """
+    committable = np.asarray(gens["committable"], dtype=bool)
+    p_min_pu = gens["p_min_pu"].to_numpy(dtype=np.float64)
+    start_up_cost = gens["start_up_cost"].to_numpy(dtype=np.float64)
+    file_p_nom = np.asarray(file_p_nom, dtype=np.float64)
+
+    # `p_nom_file == 0` => `k_g = 0`; the guard below catches the one case where
+    # that would be a silent modelling error rather than a harmless zero.
+    denominator = np.where(file_p_nom > 0.0, file_p_nom, 1.0)
+    k = np.where(file_p_nom > 0.0, start_up_cost / denominator, 0.0)
+    # A buildable committable row with `p_nom_file == 0` has no defined
+    # $/MW-started.  Defensive: no ca2040_z4 committable row is like this.
+    extendable = np.asarray(gens.get("p_nom_extendable", False), dtype=bool)
+    bad = committable & extendable & (file_p_nom <= 0.0) & (start_up_cost > 0.0)
+    if bad.any():
+        raise ValueError(
+            "committable, extendable generator rows with p_nom == 0 in the file and a "
+            f"positive start_up_cost have no defined $/MW-started cost: {list(gens.index[bad])}"
+        )
+
+    return {
+        "committable": committable,
+        "min_power_fraction": np.where(committable, p_min_pu, 0.0),
+        "start_up_cost_per_mw": np.where(committable, k, 0.0),
+    }
+
+
 def _build_generators(
     static: dict[str, pd.DataFrame],
     store: WeatherStore,
@@ -1101,6 +1162,7 @@ def _build_generators(
     options: LoadOptions,
     outage_factor: Optional[np.ndarray],
     ucap_factor: Optional[np.ndarray],
+    file_p_nom: Optional[np.ndarray] = None,
 ) -> tuple[Generator, np.ndarray, np.ndarray]:
     gens = static["generators"]
     carriers = static["carriers"]
@@ -1137,6 +1199,16 @@ def _build_generators(
     )
     p_nom = gens["p_nom"].to_numpy(dtype=np.float64)
 
+    commitment: dict[str, Any] = {}
+    if options.commitment == "minimal":
+        if file_p_nom is None:
+            raise ValueError(
+                "commitment='minimal' needs the file's p_nom (before retirements and "
+                "before the design) to form the $/MW-started cost"
+            )
+        commitment = commitment_fields(gens, file_p_nom)
+        commitment["commitment_mode"] = str(options.commitment_mode)
+
     dev = Generator(
         num_nodes=len(bus_index),
         name=gens.index,
@@ -1148,6 +1220,7 @@ def _build_generators(
         min_nominal_capacity=p_nom.copy(),
         max_nominal_capacity=p_nom.copy(),
         emission_rates=emission_rates,
+        **commitment,
     )
     dev.fuel_type = gens["carrier"].to_numpy()
     return dev, weather, emission_rates
@@ -1585,9 +1658,17 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
             "frozen approximation of the outage draws."
         )
     if not options.ignore_min_power:
-        raise NotImplementedError(
-            "ignore_min_power=False (unit-commitment minimum stable levels) is not "
-            "implemented; see decision D10."
+        raise ValueError(
+            "LoadOptions.ignore_min_power is inert since the minimal unit-commitment "
+            "device landed (2026-09-14); ask for minimum stable levels with "
+            "commitment='minimal' instead."
+        )
+    if options.commitment not in ("off", "minimal"):
+        raise ValueError(f"Unknown commitment {options.commitment!r}; expected 'off' or 'minimal'")
+    if options.commitment_mode not in ("cyclic_free", "pypsa"):
+        raise ValueError(
+            f"Unknown commitment_mode {options.commitment_mode!r}; "
+            "expected 'cyclic_free' or 'pypsa'"
         )
     if options.export_mode not in ("sink", "drop"):
         raise ValueError(f"Unknown export_mode {options.export_mode!r}")
@@ -1596,6 +1677,16 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
 
     store = WeatherStore.open(dataset_dir)
     static = _read_static(dataset_dir)
+    # The `$/MW started` denominator is the *file's* p_nom, taken here: before the
+    # lifetime rule below and before `apply_design_capacity` (spec 1.4).
+    file_generator_p_nom = static["generators"]["p_nom"].to_numpy(dtype=np.float64).copy()
+    if options.commitment == "minimal":
+        dynamic_p_min_pu = dataset_dir / "timeseries" / "generators_t_p_min_pu.parquet"
+        if dynamic_p_min_pu.exists():
+            raise NotImplementedError(
+                f"{dynamic_p_min_pu} exists: `p_min_pu` is static in these exports and the "
+                "minimal unit-commitment device reads it from static/generators.csv only"
+            )
 
     # ---- Asset lifetimes -------------------------------------------------
     # pypsa-usa exports carry `active == True` on every row because PyPSA
@@ -1714,7 +1805,7 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
 
     # ---- Devices, in the D2 order ----------------------------------------
     generator, _, emission_rates = _build_generators(
-        static, store, bus_index, options, gen_outage, gen_ucap
+        static, store, bus_index, options, gen_outage, gen_ucap, file_generator_p_nom
     )
     load = _build_loads(static, store, bus_index, options, applied_scale)
     line = _build_links(static, store, bus_index, options)
@@ -1814,6 +1905,8 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "peaks_at": "as_built",
         "link_losses": bool(options.link_losses),
         "storage_soc_mode": str(options.storage_soc_mode),
+        "commitment": str(options.commitment),
+        "commitment_mode": str(options.commitment_mode),
         "storage_init_soc": float(options.storage_init_soc),
         "storage_final_soc": float(options.storage_final_soc),
         "power_unit": float(options.power_unit),

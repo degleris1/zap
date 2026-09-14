@@ -500,8 +500,30 @@ def test_ucap_and_outage_draw_are_exclusive(dataset):
 
 
 def test_ignore_min_power_false_raises(dataset):
-    with pytest.raises(NotImplementedError):
+    """``ignore_min_power`` is inert since the minimal UC device landed.
+
+    It used to be ``NotImplementedError`` ("decision D10"); minimum stable
+    levels now exist behind ``commitment="minimal"``, so the flag is a
+    ``ValueError`` that points at the real knob and the key stays only for
+    config stability.
+    """
+    with pytest.raises(ValueError, match="commitment='minimal'"):
         _load(dataset, ignore_min_power=False)
+
+
+def test_commitment_defaults_to_off(dataset):
+    """The tiny dataset has no ``committable`` column, and does not need one."""
+    system = _load(dataset)
+    assert system.meta["commitment"] == "off"
+    assert system.meta["commitment_mode"] == "cyclic_free"
+    assert system.devices[0].is_committable is False
+
+
+def test_unknown_commitment_values_are_refused(dataset):
+    with pytest.raises(ValueError, match="Unknown commitment "):
+        _load(dataset, commitment="full")
+    with pytest.raises(ValueError, match="Unknown commitment_mode"):
+        _load(dataset, commitment_mode="free")
 
 
 # ---------------------------------------------------------------------------
