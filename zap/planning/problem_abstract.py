@@ -134,6 +134,17 @@ class AbstractPlanningProblem:
     def backward(self):
         raise NotImplementedError
 
+    def backward_objective(self, objective, *, return_adjoint: bool = True):
+        """A second VJP of another objective on the *same* forward solve.
+
+        Implemented on the cvxpy path only (``PlanningProblemCVX``): the ADMM
+        path has no KKT factorization to re-solve and its 168 h duals are
+        biased anyway.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support a second adjoint solve"
+        )
+
     def forward_and_back(self, batch=None, **kwargs):
         J = self.forward(requires_grad=True, batch=batch, **kwargs)
         grad = self.backward()
@@ -702,10 +713,61 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
             for k in grads[0].keys()
         }
 
+    def backward_objective(self, objective, *, return_adjoint: bool = True):
+        """A second VJP of ``objective`` on the subproblems of the last batch.
+
+        ``objective`` is either one :class:`AbstractOperationObjective` shared by
+        every subproblem, a sequence indexed by subproblem, or a factory called
+        as ``objective(devices)``.  The sequence / factory forms exist because a
+        subproblem's devices are ``sample_time`` slices of the window's: an
+        objective that reads a device attribute alongside the dispatch outcome
+        (``UnservedEnergyObjective`` reads ``Load.load``) cannot be shared.
+
+        Returns ``(dtheta, adjoints)``: ``dtheta`` is the batch-weighted sum
+        over the batch, exactly as :meth:`backward` weights the planning
+        gradient, and ``adjoints`` is the per-subproblem adjoint state in batch
+        order.  The weights that pair with them are :meth:`batch_weights`.
+        """
+        batch = list(self.batch)
+        results = [
+            self.subproblems[b].backward_objective(
+                _subproblem_objective(objective, b, self.subproblems[b]),
+                return_adjoint=True,
+            )
+            for b in batch
+        ]
+        grads = [r[0] for r in results]
+        adjoints = [r[1] for r in results]
+        weights = self.batch_weights(batch)
+        dtheta = {
+            k: sum([w * g[k] for w, g in zip(weights, grads)]) for k in grads[0].keys()
+        }
+        if return_adjoint:
+            return dtheta, adjoints
+        return dtheta
+
+    def batch_weights(self, batch=None):
+        """The weights :meth:`backward` applies to one batch's subproblems."""
+        return self._get_batch_weights(list(self.batch if batch is None else batch))
+
     def _get_batch_weights(self, batch):
         total_batch_weight = sum([self.weights[b] for b in batch])
         total_weight = sum(self.weights)
         return (total_weight / total_batch_weight) * np.array(self.weights)[batch]
+
+
+def _subproblem_objective(objective, index: int, subproblem):
+    """Resolve the ``objective`` argument of ``backward_objective`` for one subproblem."""
+    if isinstance(objective, AbstractOperationObjective):
+        return objective
+    if isinstance(objective, (list, tuple)):
+        return objective[index]
+    if callable(objective):
+        return objective(subproblem.layer.devices)
+    raise TypeError(
+        "objective must be an AbstractOperationObjective, a sequence of them, "
+        f"or a factory taking a device list; got {type(objective)!r}"
+    )
 
 
 def weighted_subproblems(problem):

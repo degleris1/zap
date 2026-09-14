@@ -67,7 +67,26 @@ class DispatchLayer:
             contingency_mask=self.contingency_mask,
         )
 
-    def backward(self, z: DispatchOutcome, dz: DispatchOutcome, regularize=1e-8, **kwargs):
+    def backward(
+        self,
+        z: DispatchOutcome,
+        dz: DispatchOutcome,
+        regularize=1e-8,
+        return_adjoint: bool = False,
+        **kwargs,
+    ):
+        """VJP of the dispatch map: ``dtheta = dz^T (dz/dtheta)``.
+
+        With ``return_adjoint=True`` the adjoint state itself is returned
+        alongside ``dtheta`` as ``(dtheta, dz_bar)``, where
+        ``dz_bar = inv(JK_z.T) @ dz`` is packaged into a
+        :class:`~zap.network.DispatchOutcome`.  Its ``prices`` entry is the
+        sensitivity of the seed objective to a marginal *injection* at each
+        (node, hour) -- the quantity the accreditation work (planner-side MRI,
+        ``plans/2026-09-11-accreditation-spec.md`` D9) needs and which is
+        otherwise thrown away.  ``return_adjoint=False`` returns exactly what
+        this method always returned.
+        """
         parameters = self.setup_parameters(**kwargs)
 
         # dtheta = -JK_theta.T @ inv(JK_z.T) @ dz
@@ -91,6 +110,9 @@ class DispatchLayer:
                 param_name=name,
             ).numpy()
         # print("J_theta.T @ x: ", time.time() - start)
+
+        if return_adjoint:
+            return dtheta, dz_bar
 
         return dtheta
 
