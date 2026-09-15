@@ -37,7 +37,13 @@ OPENING_MWH = np.array([20.0, 10.0])
 EMAX_MWH = np.array([40.0, 20.0])
 
 
-def rolling_fixture(kind, soc_mode="rolling", soc_anchor_index=0, storage_cls=StorageUnit):
+def rolling_fixture(
+    kind,
+    soc_mode="rolling",
+    soc_anchor_index=0,
+    storage_cls=StorageUnit,
+    soc_terminal_value=None,
+):
     """A 2-bus, 6-hour toy with two storage rows, in one of two temporal shapes.
 
     ``kind == "drain"`` -- cheap generation early (hours 0-2, 0.5 $/MWh), only an
@@ -105,20 +111,29 @@ def rolling_fixture(kind, soc_mode="rolling", soc_anchor_index=0, storage_cls=St
         initial_soc=np.array([0.5, 0.5]),
         final_soc=np.array([0.5, 0.5]),
         soc_mode=soc_mode,
-        **({} if storage_cls is not StorageUnit else {"soc_anchor_index": soc_anchor_index}),
+        **(
+            {}
+            if storage_cls is not StorageUnit
+            else {
+                "soc_anchor_index": soc_anchor_index,
+                "soc_terminal_value": soc_terminal_value,
+            }
+        ),
     )
     return net, [generators, load, line, battery], T
 
 
-def solve(kind, soc_mode="rolling", soc_anchor_index=0):
-    net, devices, horizon = rolling_fixture(kind, soc_mode, soc_anchor_index)
+def solve(kind, soc_mode="rolling", soc_anchor_index=0, soc_terminal_value=None):
+    net, devices, horizon = rolling_fixture(
+        kind, soc_mode, soc_anchor_index, soc_terminal_value=soc_terminal_value
+    )
     outcome = net.dispatch(devices, time_horizon=horizon, solver=cp.HIGHS, add_ground=False)
     assert outcome.problem.status == cp.OPTIMAL, outcome.problem.status
     energy = np.asarray(outcome.local_variables[STORAGE][0])
     return float(outcome.problem.value), energy
 
 
-def toy_storage(soc_mode="rolling", soc_anchor_index=0, num_rows=2):
+def toy_storage(soc_mode="rolling", soc_anchor_index=0, num_rows=2, soc_terminal_value=None):
     """A bare `StorageUnit`, no network, for the constraint-structure tests."""
     return StorageUnit(
         num_nodes=1,
@@ -133,6 +148,7 @@ def toy_storage(soc_mode="rolling", soc_anchor_index=0, num_rows=2):
         final_soc=np.full(num_rows, 0.6),
         soc_mode=soc_mode,
         soc_anchor_index=soc_anchor_index,
+        soc_terminal_value=soc_terminal_value,
     )
 
 
@@ -398,6 +414,170 @@ class TestRollingDispatch(unittest.TestCase):
         for anchor in (0, 3):
             obj, _ = solve("drain", "rolling", anchor)
             self.assertGreaterEqual(obj, free_obj - 1e-6)
+
+
+# =====
+# The terminal *value* (WP-R1c): a price on stored energy instead of a rule
+# =====
+
+
+class TestTerminalValueStructure(unittest.TestCase):
+    """`soc_terminal_value` replaces inequality block 6; it does not join it."""
+
+    def test_a_terminal_value_suppresses_inequality_block_six(self):
+        priced = toy_storage("rolling", soc_anchor_index=3, soc_terminal_value=np.array([7.0, 7.0]))
+        ruled = toy_storage("rolling", soc_anchor_index=3)
+        power, state = numeric_state(ruled, T)
+
+        self.assertEqual(len(ruled.inequality_constraints(power, None, state, la=np)), 7)
+        priced_blocks = priced.inequality_constraints(power, None, state, la=np)
+        self.assertEqual(len(priced_blocks), 6)
+
+        # ... and the six that remain are the ones `fixed` has, entry by entry,
+        # so ch3's accreditation indices (blocks 1 / 3 / 5) are unmoved.
+        baseline = toy_storage("fixed").inequality_constraints(power, None, state, la=np)
+        for i in range(6):
+            np.testing.assert_array_equal(np.asarray(priced_blocks[i]), np.asarray(baseline[i]))
+
+    def test_the_value_is_stored_as_a_column(self):
+        device = toy_storage("rolling", soc_terminal_value=np.array([3.0, 4.0]))
+        self.assertEqual(device.soc_terminal_value.shape, (2, 1))
+        self.assertIsNone(toy_storage("rolling").soc_terminal_value)
+
+    def test_the_objective_term_has_the_documented_sign(self):
+        device = toy_storage("rolling", soc_terminal_value=np.array([3.0, 4.0]))
+        power, state = numeric_state(device, T)
+        priced = device.operation_cost(power, None, state, la=np)
+        plain = toy_storage("rolling").operation_cost(power, None, state, la=np)
+        expected = float(3.0 * state.energy[0, T] + 4.0 * state.energy[1, T])
+        self.assertAlmostEqual(float(priced), float(plain) - expected, places=9)
+
+    def test_only_rolling_reads_it(self):
+        power, state = numeric_state(toy_storage("fixed"), T)
+        for mode in ("fixed", "cyclic_free"):
+            with self.subTest(mode=mode):
+                priced = toy_storage(mode, soc_terminal_value=np.array([9.0, 9.0]))
+                plain = toy_storage(mode)
+                self.assertAlmostEqual(
+                    float(priced.operation_cost(power, None, state, la=np)),
+                    float(plain.operation_cost(power, None, state, la=np)),
+                    places=9,
+                )
+                self.assertEqual(
+                    len(priced.inequality_constraints(power, None, state, la=np)), 6
+                )
+
+    def test_it_is_registered_for_parametrisation_and_not_for_slicing(self):
+        from zap.network import PARAMETRIZABLE_ATTRS
+
+        self.assertIn("soc_terminal_value", PARAMETRIZABLE_ATTRS[StorageUnit])
+
+        # One price per row per *window*: `sample_time` must leave it alone, or
+        # a 48 h window would be handed a 48-column price.
+        device = toy_storage("rolling", soc_terminal_value=np.array([3.0, 4.0]))
+        sampled = device.sample_time(np.arange(4), 8)
+        np.testing.assert_allclose(sampled.soc_terminal_value, np.array([[3.0], [4.0]]))
+
+    def test_it_survives_the_copy_paths_and_scales_like_a_price(self):
+        device = toy_storage("rolling", soc_terminal_value=np.array([3.0, 4.0]))
+
+        torched = device.torchify(machine="cpu", dtype=torch.float64)
+        np.testing.assert_allclose(
+            torched.soc_terminal_value.numpy(), np.array([[3.0], [4.0]])
+        )
+
+        scaled = device.sample_time(np.arange(T), T)
+        scaled.scale_power(10.0)  # a power unit must not touch a $/MWh price
+        np.testing.assert_allclose(scaled.soc_terminal_value, np.array([[3.0], [4.0]]))
+        scaled.scale_costs(2.0)
+        np.testing.assert_allclose(scaled.soc_terminal_value, np.array([[1.5], [2.0]]))
+
+        # ... and the source array is not mutated in place.
+        np.testing.assert_allclose(device.soc_terminal_value, np.array([[3.0], [4.0]]))
+
+    def test_the_differentiation_gate_still_refuses_rolling(self):
+        device = toy_storage("rolling", soc_terminal_value=np.array([1.0, 1.0]))
+        with self.assertRaises(NotImplementedError):
+            device._equality_matrices([])
+        with self.assertRaises(NotImplementedError):
+            device._inequality_matrices([])
+
+
+class TestTerminalValueDispatch(unittest.TestCase):
+    def test_zero_reproduces_the_free_window(self):
+        free_obj, free_energy = solve("drain", "rolling", soc_anchor_index=T)
+        zero_obj, zero_energy = solve(
+            "drain", "rolling", soc_anchor_index=T, soc_terminal_value=np.zeros(2)
+        )
+        self.assertAlmostEqual(zero_obj, free_obj, places=6)
+        # The closing level, not the whole trajectory: dropping the (trivial)
+        # inequality row changes which of the tied vertices HiGHS returns -- on
+        # this fixture row 1 charges an hour earlier for the same 0.5 $/MWh.
+        np.testing.assert_allclose(zero_energy[:, T], free_energy[:, T], atol=1e-8)
+
+    def test_a_higher_value_ends_the_window_fuller(self):
+        levels = []
+        for price in (0.0, 50.0, 150.0, 400.0):
+            _obj, energy = solve(
+                "drain", "rolling", soc_anchor_index=T, soc_terminal_value=np.full(2, price)
+            )
+            levels.append(float(np.sum(energy[:, T])))
+        for lower, higher in zip(levels[:-1], levels[1:]):
+            self.assertGreaterEqual(higher, lower - 1e-6)
+        # The fixture is not degenerate: a free end empties the fleet and a price
+        # above the peaker's 200 $/MWh fills it.
+        self.assertAlmostEqual(levels[0], 0.0, delta=1e-6)
+        self.assertGreater(levels[-1], 1.0)
+
+    def test_the_price_beats_the_window_on_its_own_unpriced_cost(self):
+        """The sign is right: the priced window pays *more* fuel to hold energy."""
+        price = 400.0
+        free_obj, free_energy = solve("drain", "rolling", soc_anchor_index=T)
+        priced_obj, priced_energy = solve(
+            "drain", "rolling", soc_anchor_index=T, soc_terminal_value=np.full(2, price)
+        )
+        free_terminal = float(np.sum(free_energy[:, T]))
+        priced_terminal = float(np.sum(priced_energy[:, T]))
+
+        # (a) the priced objective beats the free trajectory *priced*, ...
+        self.assertLessEqual(priced_obj, free_obj - price * free_terminal + 1e-6)
+        # (b) ... and the free objective beats the priced trajectory *unpriced*:
+        # together these bracket the term and fix its sign.
+        self.assertLessEqual(free_obj, priced_obj + price * priced_terminal + 1e-6)
+
+    def test_it_never_constrains_the_window(self):
+        """A value can shift the optimum but can never make a window infeasible."""
+        for price in (0.0, 1e4):
+            with self.subTest(price=price):
+                obj, energy = solve(
+                    "refill", "rolling", soc_anchor_index=T, soc_terminal_value=np.full(2, price)
+                )
+                self.assertTrue(np.isfinite(obj))
+                np.testing.assert_allclose(energy[:, 0], OPENING_MWH, atol=1e-9)
+
+
+class TerminalValueUnitScalingTests(unittest.TestCase):
+    """LESSONS 2026-09-14: a $/MWh coefficient is scaled by `scale_costs` only."""
+
+    PRICE = np.array([120.0, 80.0])
+
+    def _objective(self, power_unit=1.0, cost_unit=1.0):
+        net, devices, horizon = rolling_fixture(
+            "drain", "rolling", soc_anchor_index=T, soc_terminal_value=self.PRICE
+        )
+        for device in devices:
+            device.scale_costs(cost_unit)
+            device.scale_power(power_unit)
+        outcome = net.dispatch(devices, time_horizon=horizon, solver=cp.HIGHS, add_ground=False)
+        return float(outcome.problem.value) * power_unit * cost_unit
+
+    def test_objective_is_invariant_to_power_and_cost_units(self):
+        reference = self._objective()
+        for power_unit, cost_unit in ((10.0, 1.0), (1.0, 100.0), (10.0, 100.0)):
+            with self.subTest(power_unit=power_unit, cost_unit=cost_unit):
+                self.assertAlmostEqual(
+                    self._objective(power_unit, cost_unit) / reference, 1.0, places=9
+                )
 
 
 # =====

@@ -52,11 +52,18 @@ ParamKey = tuple[int, str]
 #: ``linear_cost`` *and* its capacity/load attribute in the same problem is a
 #: parameter-times-parameter product and :class:`DispatchProblem` refuses it.
 #: The rolling-horizon set -- ``Load.load``, ``Generator.dynamic_capacity``,
-#: ``StorageUnit.power_availability``, ``StorageUnit.initial_soc`` -- is DPP.
+#: ``StorageUnit.power_availability``, ``StorageUnit.initial_soc``,
+#: ``StorageUnit.soc_terminal_value`` -- is DPP.
+#:
+#: ``StorageUnit.soc_terminal_value`` is here for the same reason as
+#: ``initial_soc``: it is ``(N, 1)`` per **window**, not per hour (so it is not a
+#: ``TIME_VARYING_ATTRS`` entry and ``sample_time`` must not slice it), and it is
+#: the other quantity the rolling loop rewrites between windows.  It meets only
+#: ``state.energy``, a Variable, in ``StorageUnit.operation_cost``.
 PARAMETRIZABLE_ATTRS: dict[type, list[str]] = {
     Generator: ["dynamic_capacity", "linear_cost"],
     Load: ["load"],
-    StorageUnit: ["power_availability", "initial_soc"],
+    StorageUnit: ["power_availability", "initial_soc", "soc_terminal_value"],
     DirectedLine: ["max_power", "min_power", "linear_cost"],
 }
 

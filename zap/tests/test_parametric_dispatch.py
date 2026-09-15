@@ -46,7 +46,7 @@ ROLLING_PARAMETRIZE = {
 
 
 def small_system(*, hours=6, load=None, gen_availability=None, storage_availability=None,
-                 initial_soc=None):
+                 initial_soc=None, soc_mode="fixed", soc_terminal_value=None):
     """A 4-bus system: two loads, three generators, two batteries, six directed lines.
 
     Bus 0 carries the big load and the cheap generator; bus 1 the expensive one
@@ -108,7 +108,10 @@ def small_system(*, hours=6, load=None, gen_availability=None, storage_availabil
         power_availability=np.asarray(storage_availability, dtype=float),
         # `fixed` so that `initial_soc` actually enters the problem: under
         # `cyclic_free` it is ignored and the parameter would be inert.
-        soc_mode="fixed",
+        # `rolling` (WP-R1c) also pins the opening level, and is what the
+        # `soc_terminal_value` parameter needs.
+        soc_mode=soc_mode,
+        soc_terminal_value=soc_terminal_value,
     )
     lines = DirectedLine(
         num_nodes=4,
@@ -500,13 +503,92 @@ class DPPTests(unittest.TestCase):
         self.assertEqual(PARAMETRIZABLE_ATTRS[Load], ["load"])
         self.assertIn("dynamic_capacity", PARAMETRIZABLE_ATTRS[Generator])
         self.assertEqual(
-            PARAMETRIZABLE_ATTRS[StorageUnit], ["power_availability", "initial_soc"]
+            PARAMETRIZABLE_ATTRS[StorageUnit],
+            ["power_availability", "initial_soc", "soc_terminal_value"],
         )
         # One dict, two import paths: `multi_year` re-exports the definition.
         self.assertIs(REEXPORTED_ATTRS, PARAMETRIZABLE_ATTRS)
-        # `initial_soc` is (N, 1), not time-varying, so it stays out of the
-        # weather-year concatenation registry.
+        # `initial_soc` and `soc_terminal_value` are (N, 1) per window, not
+        # time-varying, so they stay out of the weather-year concatenation
+        # registry (and out of `sample_time`'s slicing).
         self.assertNotIn("initial_soc", TIME_VARYING_ATTRS[StorageUnit])
+        self.assertNotIn("soc_terminal_value", TIME_VARYING_ATTRS[StorageUnit])
+
+
+# ---------------------------------------------------------------------------
+# WP-R1c -- `StorageUnit.soc_terminal_value` as a per-window parameter
+# ---------------------------------------------------------------------------
+
+
+#: The rolling set once the terminal *value* replaces the terminal *rule*.
+TERMINAL_VALUE_PARAMETRIZE = {
+    GENERATORS: ["dynamic_capacity"],
+    LOADS: ["load"],
+    STORAGE: ["power_availability", "initial_soc", "soc_terminal_value"],
+}
+
+
+class TerminalValueParameterTests(unittest.TestCase):
+    """Section 5.4: the price on stored energy changes per window, so it is a Parameter."""
+
+    TOL = 1e-9
+    HOURS = 6
+    BASE_PRICE = np.array([[30.0], [20.0]])
+
+    def _system(self, **setting):
+        price = setting.pop("soc_terminal_value", self.BASE_PRICE)
+        return small_system(
+            hours=self.HOURS, soc_mode="rolling", soc_terminal_value=price, **setting
+        )
+
+    def test_the_parametrised_problem_is_dpp_and_uses_every_parameter(self):
+        network, devices = self._system()
+        problem = network.build_dispatch(
+            devices,
+            time_horizon=self.HOURS,
+            add_ground=False,
+            parametrize=TERMINAL_VALUE_PARAMETRIZE,
+        )
+        self.assertTrue(problem.is_dpp())
+        self.assertEqual(problem.unused_parameters, ())
+
+    def test_three_settings_in_a_row_equal_a_rebuild(self):
+        network, devices = self._system()
+        problem = network.build_dispatch(
+            devices,
+            time_horizon=self.HOURS,
+            add_ground=False,
+            parametrize=TERMINAL_VALUE_PARAMETRIZE,
+        )
+
+        prices = [np.array([[0.0], [0.0]]), np.array([[30.0], [20.0]]), np.array([[900.0], [5.0]])]
+        terminal_levels = []
+        for k, setting in enumerate(rolling_settings(self.HOURS)):
+            with self.subTest(setting=k):
+                values = parameter_values(setting)
+                values[(STORAGE, "soc_terminal_value")] = prices[k]
+                problem.set_parameters(values)
+                got = problem.solve(solver=SOLVER)
+
+                ref_network, ref_devices = self._system(soc_terminal_value=prices[k], **setting)
+                want = ref_network.dispatch(
+                    ref_devices, time_horizon=self.HOURS, solver=SOLVER, add_ground=False
+                )
+                scale = max(1.0, abs(want.problem.value))
+                self.assertAlmostEqual(
+                    got.problem.value, want.problem.value, delta=self.TOL * scale
+                )
+                for field in ("power", "prices", "local_variables"):
+                    got_leaves = _flatten(getattr(got, field))
+                    want_leaves = _flatten(getattr(want, field))
+                    for a, b in zip(got_leaves, want_leaves):
+                        np.testing.assert_allclose(a, b, atol=self.TOL, rtol=0.0, err_msg=field)
+                energy = np.asarray(got.local_variables[STORAGE][0], dtype=float)
+                terminal_levels.append(float(energy[0, self.HOURS]))
+
+        # The parameter is not inert: row 0's 900 $/MWh setting ends fuller than
+        # its 0 $/MWh one, through the same problem object.
+        self.assertGreater(terminal_levels[2], terminal_levels[0] + 1e-6)
 
 
 # ---------------------------------------------------------------------------

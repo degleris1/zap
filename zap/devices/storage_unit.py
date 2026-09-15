@@ -64,10 +64,33 @@ class StorageUnit(AbstractDevice):
           nothing), so it can never make a window infeasible or itself cause
           shed, and it never constrains the committed hours.
 
+          The terminal rule is the *fallback*, emitted only when
+          ``soc_terminal_value`` is None.  With a terminal value the window is
+          steered by a price on stored energy instead and inequality block 6 is
+          not built at all, so the device keeps the same six blocks as ``fixed``
+          and ``cyclic_free``.
+
           ``"rolling"`` is **dispatch-only**: the implicit-differentiation path
           (``_equality_matrices`` / ``_inequality_matrices``) and the ADMM prox
           raise ``NotImplementedError``, and it is incompatible with the
           windowed-SoC ADMM layout (``num_soc_windows > 1``).
+    soc_terminal_value : Optional[NDArray]
+        Marginal value of energy still stored at the *end* of the window, in
+        $/MWh, of shape ``(N,)`` or ``(N, 1)`` -- one price per row per window,
+        not per hour.  Read **only** under ``soc_mode = "rolling"``, where it
+        adds ``- sum(soc_terminal_value * energy[:, T])`` to
+        :meth:`operation_cost`: holding energy past the horizon is then worth
+        something, which is what restores the incentive to pre-charge that a
+        cost-minimising window with a free end otherwise destroys.  Nothing is
+        constrained, so it can never make a window infeasible and can never
+        itself cause shed.
+
+        It is a **price**, handled exactly like ``linear_cost``: ``scale_costs``
+        divides it by the cost unit and ``scale_power`` leaves it alone (a $/MWh
+        coefficient multiplying an already-scaled energy variable is in the
+        scaled objective's own units -- see the 2026-09-14 lesson on
+        ``scale_power`` and $/MW coefficients).  Default ``None``, which keeps
+        the terminal *inequality* of ``soc_mode = "rolling"``.
 
         A plain attribute, not a per-device array: the whole fleet shares one
         mode.  It is set at construction and survives ``sample_time``,
@@ -113,6 +136,7 @@ class StorageUnit(AbstractDevice):
         power_availability: Optional[NDArray] = None,
         soc_mode: Literal["fixed", "cyclic_free", "rolling"] = "fixed",
         soc_anchor_index: int = 0,
+        soc_terminal_value: Optional[NDArray] = None,
     ):
         if linear_cost is None:
             linear_cost = np.zeros(power_capacity.shape)
@@ -159,6 +183,12 @@ class StorageUnit(AbstractDevice):
         self.power_availability = make_dynamic(power_availability)
         self.soc_mode = str(soc_mode)
         self.soc_anchor_index = int(soc_anchor_index)
+        # `None` and an `(N, 1)` column are the only two states: `make_dynamic`
+        # would turn None into None anyway, but being explicit keeps the
+        # "is None" test in `inequality_constraints` readable.
+        self.soc_terminal_value = (
+            None if soc_terminal_value is None else make_dynamic(soc_terminal_value)
+        )
 
         self.has_changed = True
         self.rho = -1.0
@@ -184,6 +214,10 @@ class StorageUnit(AbstractDevice):
             self.quadratic_cost /= scale
         if self.capital_cost is not None:
             self.capital_cost /= scale
+        # A $/MWh price, exactly like `linear_cost` -- and deliberately absent
+        # from `scale_power`, which divides powers and leaves money alone.
+        if self.soc_terminal_value is not None:
+            self.soc_terminal_value = self.soc_terminal_value / scale
 
     def scale_power(self, scale):
         # NOTE: power_availability is dimensionless and is deliberately not scaled.
@@ -397,10 +431,15 @@ class StorageUnit(AbstractDevice):
             state.discharge - p_eff,
         ]
 
-        if self.soc_mode == "rolling":
+        if self.soc_mode == "rolling" and getattr(self, "soc_terminal_value", None) is None:
             # Terminal rule, APPENDED as block 6 and never inserted: blocks 1 / 3 / 5
             # are the SoC-upper, charge-upper and discharge-upper multipliers that
             # ch3 `accreditation.py` reads by index, so their positions are frozen.
+            #
+            # With a `soc_terminal_value` the window is steered by a price on
+            # stored energy (`operation_cost`) and the block is not built at all:
+            # a trivially-zero cvxpy row would be a dual nobody can read and a
+            # constraint the ADMM prox would still have to carry.
             T = power[0].shape[1]
             self._reject_rolling_in_windows(self.num_soc_windows(state.energy.shape[1], T))
             k = self._rolling_anchor_index(T)
@@ -428,6 +467,16 @@ class StorageUnit(AbstractDevice):
         cost = la.sum(la.multiply(self.linear_cost, state.discharge))
         if self.quadratic_cost is not None:
             cost += la.sum(la.multiply(self.quadratic_cost, la.square(state.discharge)))
+
+        # The rolling-horizon terminal value: energy still stored at the end of
+        # the window is worth `soc_terminal_value` per MWh. zap minimises, and
+        # the sibling term above is `+linear_cost * discharge`, so the minus
+        # sign is what makes *more* terminal energy cheaper. Parameter x
+        # Variable, hence affine and DPP.
+        terminal_value = getattr(self, "soc_terminal_value", None)
+        if self.soc_mode == "rolling" and terminal_value is not None:
+            T = power[0].shape[1]
+            cost = cost - la.sum(la.multiply(terminal_value, state.energy[:, T : (T + 1)]))
 
         return cost
 
