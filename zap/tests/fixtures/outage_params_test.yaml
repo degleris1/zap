@@ -1,0 +1,52 @@
+# Test-only outage parameter table for zap's own suite.
+#
+# zap ships no parameter table: the numbers are CH3 policy and live at
+# `ch3/ra/configs/outage_params.yaml` in the brain repository. This file exists
+# so the library's expected-value tests have a table of their own that does not
+# move when chapter policy moves (spec D8,
+# `memory/plans/2026-09-14-outage-params-in-ch3-spec.md`).
+#
+# The values are the *old* CH3 version-2 placeholders, unchanged, so the
+# constants the design tests assert (CCGT FOR 0.045 at 250 MW, battery 50 MW)
+# stay put. Do not update them to track CH3 policy: this is a fixture, not a
+# source. The carrier set is the full v2 one -- the tiny fixture only uses CCGT,
+# hydro, battery and PHS, but the opt-in `ca2040_z4` integration tests need
+# every carrier that dataset carries, and zap must never read ch3's table.
+
+version: 2
+reviewed: false
+
+excluded_carriers: [solar, onwind, offwind_floating, unspecified_imports, AC, DC,
+                    imports, exports, demand_response, AC_exp]
+
+carriers:
+  CCGT:        {unit_size_mw: 250, forced_outage_rate: 0.045, mttr_h: 50,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  CCGT-95CCS:  {unit_size_mw: 250, forced_outage_rate: 0.055, mttr_h: 60,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  OCGT:        {unit_size_mw: 100, forced_outage_rate: 0.040, mttr_h: 40,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  hydrogen_ct: {unit_size_mw: 100, forced_outage_rate: 0.050, mttr_h: 40,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  coal:        {unit_size_mw: 400, forced_outage_rate: 0.070, mttr_h: 70,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  oil:         {unit_size_mw:  50, forced_outage_rate: 0.080, mttr_h: 60,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  nuclear:     {unit_size_mw: 1000, forced_outage_rate: 0.020, mttr_h: 200,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  biomass:     {unit_size_mw:  40, forced_outage_rate: 0.080, mttr_h: 60,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  waste:       {unit_size_mw:  30, forced_outage_rate: 0.080, mttr_h: 60,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  geothermal:  {unit_size_mw:  30, forced_outage_rate: 0.050, mttr_h: 50,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  hydro:       {unit_size_mw:  50, forced_outage_rate: 0.035, mttr_h: 40,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  PHS:         {unit_size_mw: 200, forced_outage_rate: 0.050, mttr_h: 60,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  battery:               {unit_size_mw: 50, forced_outage_rate: 0.020, mttr_h: 24,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  4hr_battery_storage:   {unit_size_mw: 50, forced_outage_rate: 0.020, mttr_h: 24,
+                source: "zap test fixture (CH3 v2 placeholder)"}
+  8hr_battery_storage:   {unit_size_mw: 50, forced_outage_rate: 0.020, mttr_h: 24,
+                source: "zap test fixture (CH3 v2 placeholder)"}

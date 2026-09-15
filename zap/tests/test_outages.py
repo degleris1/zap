@@ -18,6 +18,7 @@ import yaml
 
 from zap.reliability import keys as K
 from zap.reliability import outages as ox
+from zap.tests.fixtures.tiny_dataset import tiny_params_path
 
 GEN_COLUMNS = ["name", "bus", "p_nom", "carrier"]
 SU_COLUMNS = ["name", "bus", "p_nom", "carrier", "max_hours"]
@@ -107,13 +108,70 @@ class OutageTestCase(unittest.TestCase):
 
 
 class TestParams(OutageTestCase):
-    def test_shipped_params_load_at_version_2(self):
-        p = ox.load_outage_params()
+    def test_fixture_params_load_at_version_2(self):
+        """zap's *own* table -- the shipped CH3 one lives in the brain repo."""
+        p = ox.load_outage_params(tiny_params_path())
         self.assertEqual(p.version, 2)
         self.assertFalse(p.reviewed)
         self.assertEqual(len(p.sha256), 64)
         for name, cp in p.carriers.items():
             self.assertTrue(cp.source, f"{name} has no source")
+
+    def test_loading_without_a_path_is_a_type_error(self):
+        """zap ships no default table: the path is required (spec D2)."""
+        with self.assertRaises(TypeError):
+            ox.load_outage_params()
+
+    def test_draw_digest_ignores_source_and_reviewed(self):
+        """A provenance string or a `reviewed` flip must not renumber a run (D4)."""
+        base = make_params(self.tmp).draw_digest()
+
+        carriers = params_dict()["carriers"]
+        carriers["CCGT"] = dict(carriers["CCGT"], source="a different citation")
+        self.assertEqual(make_params(self.tmp, carriers=carriers).draw_digest(), base)
+        self.assertEqual(make_params(self.tmp, reviewed=True).draw_digest(), base)
+
+        # ... while the file's bytes -- hence `sha256` -- do move.
+        self.assertNotEqual(make_params(self.tmp, reviewed=True).sha256,
+                            make_params(self.tmp).sha256)
+
+    def test_draw_digest_moves_with_every_draw_relevant_field(self):
+        base = make_params(self.tmp).draw_digest()
+        self.assertEqual(len(base), 64)
+
+        for field, value in (
+            ("unit_size_mw", 300),
+            ("forced_outage_rate", 0.046),
+            ("mttr_h", 51),
+        ):
+            carriers = params_dict()["carriers"]
+            carriers["CCGT"] = dict(carriers["CCGT"], **{field: value})
+            self.assertNotEqual(
+                make_params(self.tmp, carriers=carriers).draw_digest(), base, field
+            )
+
+        excluded = params_dict()["excluded_carriers"] + ["geothermal"]
+        self.assertNotEqual(
+            make_params(self.tmp, excluded_carriers=excluded).draw_digest(), base
+        )
+        self.assertNotEqual(make_params(self.tmp, version=3).draw_digest(), base)
+
+    def test_the_fixture_table_still_hashes_to_the_table_zap_used_to_ship(self):
+        """Bit-for-bit pin: the fixture *is* the v2 table zap shipped until 2026-09-14.
+
+        Every expected availability in this suite and in the wy_store suites is
+        computed from it, so if it ever drifts the drift is silent. This is the
+        one place the drift is loud. The same 12 hex live in ch3 as
+        ``ch3.ra.outage_params.LEGACY_V2_DIGEST`` (zap does not import ch3).
+        """
+        params = ox.load_outage_params(tiny_params_path())
+        self.assertEqual(params.draw_digest()[:12], "8312bb05f722")
+
+    def test_params_fingerprint_carries_the_draw_digest(self):
+        params = make_params(self.tmp)
+        fp = ox.params_fingerprint(params, "slot-v1", 1234)
+        self.assertEqual(fp["params_digest"], params.draw_digest()[:12])
+        self.assertEqual(len(fp["params_digest"]), 12)
 
     def test_version_1_pool_keys_are_refused(self):
         """`pool_multiplier` et al. are gone; a v1 file must fail loudly."""
@@ -124,7 +182,7 @@ class TestParams(OutageTestCase):
 
     def test_mttf_and_stationary_probability(self):
         for cp in list(self.params.carriers.values()) + list(
-            ox.load_outage_params().carriers.values()
+            ox.load_outage_params(tiny_params_path()).carriers.values()
         ):
             f = cp.forced_outage_rate
             self.assertAlmostEqual(cp.mttf_h, cp.mttr_h * (1 - f) / f, places=12)
@@ -648,6 +706,15 @@ class TestUcap(OutageTestCase):
         self.assertAlmostEqual(ccgt["ucap_analytic"], 1 - 0.045)
         self.assertEqual(ccgt["n_units_row"], 4)
 
+        # Provenance of the parameter table these factors came from (spec D7).
+        self.assertTrue((df["params_digest"] == self.params.draw_digest()[:12]).all())
+        self.assertTrue((df["params_version"] == self.params.version).all())
+        written = pd.read_csv(out)
+        self.assertIn("params_digest", written.columns)
+        self.assertEqual(
+            sorted(written["params_digest"].unique()), [self.params.draw_digest()[:12]]
+        )
+
     def test_ucap_is_reproducible(self):
         kwargs = {
             "years": [2020],
@@ -662,6 +729,11 @@ class TestUcap(OutageTestCase):
         ox.unit_cache_clear()
         b = ox.write_ucap(self.dataset, out_csv=self.tmp / "b.csv", **kwargs)
         np.testing.assert_allclose(a["ucap_empirical"], b["ucap_empirical"], rtol=0, atol=0)
+
+    def test_ucap_requires_params(self):
+        """zap has no default table, so ``params`` is a required keyword (D2)."""
+        with self.assertRaises(TypeError):
+            ox.write_ucap(self.dataset, years=[2020], draws=1, verbose=False)
 
     def test_ucap_rejects_empty_years_or_draws(self):
         with self.assertRaises(ValueError):

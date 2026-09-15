@@ -1,8 +1,14 @@
 """Thermal / storage forced-outage sampling and the UCAP table.
 
 This module is deliberately independent of the rest of the CH3 harness: it reads
-only ``<dataset_dir>/static/*.csv`` and ``outage_params.yaml``, and writes only
-``ucap.csv``.
+only ``<dataset_dir>/static/*.csv`` and the parameter table its caller hands it,
+and writes only ``ucap.csv``.
+
+The parameter *table* is not part of this library.  The numbers are CH3 policy
+and live at ``ch3/ra/configs/outage_params.yaml`` in the brain repository;
+:func:`load_outage_params` takes a **required** path and there is no default.
+zap's own tests read ``zap/tests/fixtures/outage_params_test.yaml`` instead, so
+the library's expected values never move when chapter policy moves.
 
 Model
 -----
@@ -42,10 +48,10 @@ Caveats
 * Storage outages derate **power only**; the energy cap is untouched (spec D8).
 * Hydro carries outage draws even though its ``p_max_pu`` profile already encodes
   availability, so the two derates compound (issue #16). ``excluded_carriers`` in
-  ``outage_params.yaml`` makes a no-hydro sensitivity a one-line change.
+  the parameter table makes a no-hydro sensitivity a one-line change.
 * The storage UCAP produced here is a forced-outage derate, **not** an
   accreditation (ELCC). Label it that way on run cards.
-* ``outage_params.yaml`` is still ``reviewed: false`` (issue #7).
+* The shipped CH3 table is still ``reviewed: false`` (issue #7).
 """
 
 from __future__ import annotations
@@ -78,7 +84,6 @@ from zap.reliability.keys import (
 GENERATOR_VERSION = 2
 HOURS_PER_YEAR = 8760
 DEFAULT_BASE_SEED = 20260908
-DEFAULT_PARAMS_PATH = Path(__file__).parent / "outage_params.yaml"
 
 #: Units whose uniforms are materialised in one go. 512 x 8760 float64 is ~36 MB;
 #: the recursion is vectorised across the chunk, so this is a memory knob only.
@@ -153,7 +158,7 @@ class CarrierOutageParams:
 
 @dataclass(frozen=True)
 class OutageParams:
-    """The full resolved contents of ``outage_params.yaml`` (version 2).
+    """The full resolved contents of a parameter table (schema version >= 2).
 
     Version 2 dropped ``pool_multiplier`` / ``min_units_per_row`` /
     ``min_pool_capacity_mw``: with on-demand, slot-keyed generation there is no
@@ -190,6 +195,39 @@ class OutageParams:
         payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def draw_digest(self) -> str:
+        """Digest of exactly what changes a *draw*, and of nothing else.
+
+        Covers ``version``, ``excluded_carriers`` and each carrier's
+        ``unit_size_mw / forced_outage_rate / mttr_h``.  Deliberately excludes
+        ``source`` and ``reviewed``: a provenance string or a claim that a human
+        has checked the numbers must not renumber a run (spec D4,
+        ``memory/plans/2026-09-14-outage-params-in-ch3-spec.md``).  ``version``
+        is in because a schema bump is the explicit "the meaning changed"
+        signal.
+
+        Returned in full; callers truncate (the run id uses 12 hex).  This is
+        strictly coarser than :meth:`content_hash`, which stays the slot-cache
+        key, so the cache remains sound.
+        """
+        payload = json.dumps(
+            {
+                "version": int(self.version),
+                "excluded_carriers": sorted(self.excluded_carriers),
+                "carriers": {
+                    name: {
+                        "unit_size_mw": float(cp.unit_size_mw),
+                        "forced_outage_rate": float(cp.forced_outage_rate),
+                        "mttr_h": float(cp.mttr_h),
+                    }
+                    for name, cp in sorted(self.carriers.items())
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     @classmethod
     def from_dict(cls, raw: Mapping, sha256: str = "unknown") -> OutageParams:
         missing = {"version", "reviewed", "excluded_carriers", "carriers"} - set(raw)
@@ -220,9 +258,15 @@ class OutageParams:
         )
 
 
-def load_outage_params(path: Path | None = None) -> OutageParams:
-    """Load and validate ``outage_params.yaml`` (defaults to the checked-in file)."""
-    path = Path(path) if path is not None else DEFAULT_PARAMS_PATH
+def load_outage_params(path: Path) -> OutageParams:
+    """Load and validate a parameter table.
+
+    ``path`` is **required**: zap ships no table.  CH3 callers pass
+    ``ch3.ra.paths.outage_params_path()``
+    (``ch3/ra/configs/outage_params.yaml``); zap's own tests pass
+    ``zap/tests/fixtures/outage_params_test.yaml``.
+    """
+    path = Path(path)
     raw_bytes = path.read_bytes()
     raw = yaml.safe_load(raw_bytes)
     return OutageParams.from_dict(raw, sha256=hashlib.sha256(raw_bytes).hexdigest())
@@ -234,6 +278,7 @@ def params_fingerprint(params: OutageParams, scheme: str, base_seed: int) -> dic
         "scheme": str(scheme),
         "base_seed": int(base_seed),
         "params_sha256": str(params.sha256),
+        "params_digest": params.draw_digest()[:12],
         "params_version": int(params.version),
         "reviewed": bool(params.reviewed),
     }
@@ -665,6 +710,11 @@ UCAP_COLUMNS = [
     "base_seed",
     "n_years",
     "n_draws",
+    # Provenance of the parameter table these factors were sampled under, so a
+    # `ucap.csv` left behind by an older table is detected instead of silently
+    # applying the wrong derate (spec D7).
+    "params_digest",
+    "params_version",
 ]
 
 
@@ -677,7 +727,7 @@ def write_ucap(
     scheme: str = DEFAULT_SCHEME,
     hours_per_year: int = HOURS_PER_YEAR,
     out_csv: Path | None = None,
-    params: OutageParams | None = None,
+    params: OutageParams,
     model_year: int | None = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -690,7 +740,8 @@ def write_ucap(
     Monte-Carlo error (spec D4).
     """
     dataset_dir = Path(dataset_dir)
-    params = params if params is not None else load_outage_params()
+    if params is None:
+        raise TypeError("write_ucap requires `params`: zap ships no parameter table")
     out_csv = Path(out_csv) if out_csv is not None else default_ucap_csv(dataset_dir)
     years = [int(y) for y in years]
     draws = int(draws)
@@ -727,6 +778,7 @@ def write_ucap(
     empirical = total / n_cases
     n_samples = n_cases * hours_per_year
 
+    params_digest = params.draw_digest()[:12]
     records = []
     for j, row in enumerate(rows):
         cp = params.carriers[row.carrier]
@@ -752,6 +804,8 @@ def write_ucap(
                 "base_seed": int(base_seed),
                 "n_years": len(years),
                 "n_draws": draws,
+                "params_digest": params_digest,
+                "params_version": int(params.version),
             }
         )
 
@@ -807,7 +861,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common(sp):
         sp.add_argument("--dataset-dir", type=Path, required=True)
-        sp.add_argument("--params", type=Path, default=None, help="outage_params.yaml override")
+        sp.add_argument(
+            "--params",
+            type=Path,
+            required=True,
+            help="path to the outage parameter table (CH3: ch3/ra/configs/outage_params.yaml)",
+        )
         sp.add_argument(
             "--scheme", type=str, default=DEFAULT_SCHEME, help="outage key scheme"
         )
@@ -837,7 +896,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     params = load_outage_params(args.params)
     if not params.reviewed:
         print(
-            "WARNING: outage_params.yaml has `reviewed: false` -- the numbers are "
+            f"WARNING: {args.params} has `reviewed: false` -- the numbers are "
             "placeholders and must not be cited in a reported run.",
             file=sys.stderr,
         )

@@ -39,6 +39,7 @@ from zap.tests.fixtures.tiny_dataset import (
     TINY_MODEL_YEAR,
     TINY_RETIRED_GENERATORS,
     real_z4_dir,
+    tiny_params_path,
     write_tiny_dataset,
     write_tiny_ucap_csv,
 )
@@ -155,6 +156,8 @@ def _load(dataset: Path, **kwargs):
     options = LoadOptions(
         years=kwargs.pop("years", (2020,)),
         window=kwargs.pop("window", HourWindow(0, 24)),
+        # zap ships no parameter table; every draw/UCAP path needs the caller's.
+        outage_params_path=kwargs.pop("outage_params_path", str(tiny_params_path())),
         **kwargs,
     )
     return load_system(dataset, options)
@@ -489,6 +492,48 @@ def test_ucap_derate_applies(dataset):
     )
 
 
+def test_ucap_derate_records_the_parameter_digest(dataset):
+    """`meta` says which parameter table the derate came from (spec D7)."""
+    from zap.tests.fixtures.tiny_dataset import tiny_params_digest
+
+    write_tiny_ucap_csv(dataset, generator_factors={"z1 CCGT": 0.9})
+    derated = _load(dataset, ucap_derate=True)
+    assert derated.meta["outage_params_digest"] == tiny_params_digest()
+
+
+def test_ucap_from_another_parameter_table_is_refused(dataset):
+    """A `ucap.csv` sampled under different numbers is a silently wrong derate."""
+    write_tiny_ucap_csv(
+        dataset, generator_factors={"z1 CCGT": 0.9}, params_digest="0123456789ab"
+    )
+    with pytest.raises(ValueError, match="sampled under outage parameters"):
+        _load(dataset, ucap_derate=True)
+
+
+def test_ucap_without_the_provenance_columns_is_refused(dataset):
+    """A pre-2026-09-14 `ucap.csv` cannot prove which table it came from."""
+    import pandas as pd
+
+    path = write_tiny_ucap_csv(dataset, generator_factors={"z1 CCGT": 0.9})
+    table = pd.read_csv(path).drop(columns=["params_digest", "params_version"])
+    table.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="provenance columns"):
+        _load(dataset, ucap_derate=True)
+
+
+def test_ucap_derate_needs_the_parameter_table(dataset):
+    write_tiny_ucap_csv(dataset, generator_factors={"z1 CCGT": 0.9})
+    with pytest.raises(ValueError, match="outage_params_path"):
+        _load(dataset, ucap_derate=True, outage_params_path=None)
+
+
+def test_outage_draw_needs_the_parameter_table(dataset):
+    """zap ships none, and the error must say where CH3's lives (spec D2)."""
+    with pytest.raises(ValueError) as excinfo:
+        _load(dataset, window=HourWindow(0, N_HOURS), outage_draw=0, outage_params_path=None)
+    assert "ch3/ra/configs/outage_params.yaml" in str(excinfo.value)
+
+
 def test_ucap_missing_csv_raises(dataset):
     with pytest.raises(FileNotFoundError):
         _load(dataset, ucap_derate=True)
@@ -537,7 +582,7 @@ def _expected_row_availability(dataset: Path, row_name: str, capacity: float, *,
     from zap.reliability.keys import row_specs
     from zap.reliability.outages import load_outage_params, read_static_tables, row_availability
 
-    params = load_outage_params()
+    params = load_outage_params(tiny_params_path())
     spec = next(
         s for s in row_specs(read_static_tables(dataset), params) if s.name == row_name
     )
@@ -825,7 +870,7 @@ def test_retired_row_keeps_its_slot_keys(dataset):
     """
     keys = pytest.importorskip("zap.reliability.keys")
     ox = pytest.importorskip("zap.reliability.outages")
-    params = ox.load_outage_params()
+    params = ox.load_outage_params(tiny_params_path())
     retired = TINY_RETIRED_GENERATORS[0]
 
     specs = {s.name: s for s in keys.row_specs(ox.read_static_tables(dataset), params)}

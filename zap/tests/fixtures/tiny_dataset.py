@@ -331,15 +331,43 @@ def write_tiny_dataset(
     return root
 
 
+def tiny_params_path() -> Path:
+    """zap's own outage parameter table (spec D8).
+
+    zap ships no table: the numbers are CH3 policy and live at
+    ``ch3/ra/configs/outage_params.yaml``.  Every zap test that needs
+    parameters passes this fixture instead, so the library's expected values
+    never move when chapter policy moves -- and zap never reads ch3.
+    """
+    return Path(__file__).resolve().parent / "outage_params_test.yaml"
+
+
+def tiny_params_digest() -> str:
+    """12-hex ``draw_digest`` of :func:`tiny_params_path`'s table."""
+    from zap.reliability.outages import load_outage_params
+
+    return load_outage_params(tiny_params_path()).draw_digest()[:12]
+
+
 def write_tiny_ucap_csv(
     root: Path,
     *,
     generator_factors: Optional[dict] = None,
     storage_factors: Optional[dict] = None,
+    params_digest: Optional[str] = None,
+    params_version: int = 2,
 ) -> Path:
-    """Hand-written ``ucap.csv`` with WP2's schema, for the WP1 join tests."""
+    """Hand-written ``ucap.csv`` with WP2's schema, for the WP1 join tests.
+
+    The provenance columns (spec D7) default to the fixture table's digest, so
+    ``load_system(..., ucap_derate=True, outage_params_path=tiny_params_path())``
+    passes the staleness guard.  Pass ``params_digest`` explicitly to exercise
+    the mismatch.
+    """
     generator_factors = generator_factors or {}
     storage_factors = storage_factors or {}
+    if params_digest is None:
+        params_digest = tiny_params_digest()
 
     rows = []
     for name, bus, carrier, p_nom, *_ in TINY_GENERATORS:
@@ -360,6 +388,8 @@ def write_tiny_ucap_csv(
                 "ucap_empirical": factor,
                 "n_samples": 100,
                 "ucap_carrier_bus_empirical": factor,
+                "params_digest": params_digest,
+                "params_version": int(params_version),
             }
         )
     for name, bus, carrier, p_nom, *_ in TINY_STORAGE:
@@ -380,6 +410,8 @@ def write_tiny_ucap_csv(
                 "ucap_empirical": factor,
                 "n_samples": 100,
                 "ucap_carrier_bus_empirical": factor,
+                "params_digest": params_digest,
+                "params_version": int(params_version),
             }
         )
 

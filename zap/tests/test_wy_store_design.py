@@ -9,8 +9,9 @@ imposes the design on the static tables *before* the outage lookup, so the
 loaded system is the designed system.
 
 Everything here runs on the hermetic tiny fixture; outage draws are generated on
-demand from the shipped ``outage_params.yaml`` (there is no store any more,
-issue #18).  The one integration check against ``data/ca2040_z4`` skips when the
+demand from zap's own test parameter table
+(``zap/tests/fixtures/outage_params_test.yaml``; there is no store any more,
+issue #18, and zap ships no parameter table).  The one integration check against ``data/ca2040_z4`` skips when the
 dataset is not present.
 """
 
@@ -33,19 +34,41 @@ from zap.importers.wy_store import (
     load_system,
     read_static,
 )
-from zap.tests.fixtures.tiny_dataset import real_z4_dir, write_tiny_dataset, write_tiny_ucap_csv
+from zap.tests.fixtures.tiny_dataset import (
+    real_z4_dir,
+    tiny_params_path,
+    write_tiny_dataset,
+    write_tiny_ucap_csv,
+)
 
 N_HOURS = 168
 YEARS = (2020,)
 DRAWS = (0, 1)
 
-#: Forced-outage rates of the shipped ``outage_params.yaml``, which is what the
-#: sampler reads. The tiny fixture's pooled carriers are CCGT, hydro, battery
+#: Forced-outage rates of ``fixtures/outage_params_test.yaml``, which is what the
+#: sampler reads here -- zap ships no table, and these constants describe the
+#: fixture, not CH3 policy (asserted against the fixture below so they cannot
+#: drift). The tiny fixture's pooled carriers are CCGT, hydro, battery
 #: and PHS; ``z2 old CCGT`` is retired by the fixture's lifetime rule, so its
 #: as-built capacity is 0 -- the row the E1 defect exempted entirely.
 CCGT_FOR = 0.045
 CCGT_UNIT_MW = 250.0
 BATTERY_UNIT_MW = 50.0
+
+
+def test_the_fixture_table_matches_the_constants_these_tests_assume():
+    """The constants above describe ``fixtures/outage_params_test.yaml``.
+
+    They used to describe the table zap shipped; the table is CH3 policy now and
+    lives in the brain repo, so this pins them to the fixture instead of letting
+    them silently disagree with it.
+    """
+    from zap.reliability.outages import load_outage_params
+
+    params = load_outage_params(tiny_params_path())
+    assert params.carriers["CCGT"].forced_outage_rate == CCGT_FOR
+    assert params.carriers["CCGT"].unit_size_mw == CCGT_UNIT_MW
+    assert params.carriers["battery"].unit_size_mw == BATTERY_UNIT_MW
 
 #: The sampler's defaults, which ``LoadOptions`` carries.
 SCHEME = "slot-v1"
@@ -66,7 +89,7 @@ def _row_spec(dataset: Path, row_name: str):
     from zap.reliability.keys import row_specs
     from zap.reliability.outages import load_outage_params, read_static_tables
 
-    params = load_outage_params()
+    params = load_outage_params(tiny_params_path())
     specs = row_specs(read_static_tables(dataset), params)
     return next(s for s in specs if s.name == row_name), params
 
@@ -163,6 +186,8 @@ def _load(dataset: Path, **kwargs):
         LoadOptions(
             years=kwargs.pop("years", YEARS),
             window=kwargs.pop("window", HourWindow(0, N_HOURS)),
+            # zap ships no parameter table; every draw/UCAP path needs the caller's.
+            outage_params_path=kwargs.pop("outage_params_path", str(tiny_params_path())),
             **kwargs,
         ),
     )
@@ -431,7 +456,7 @@ def test_meta_outages_counts_both_components(dataset, draw):
     system = _load(dataset, outage_draw=draw)
     info = system.meta["outages"]
 
-    params = load_outage_params()
+    params = load_outage_params(tiny_params_path())
     static = read_static_tables(dataset)
     specs = row_specs(static, params)
     caps: dict[str, float] = {}
@@ -779,7 +804,12 @@ def test_real_z4_design_draws_from_the_pool():
     if root is None:
         pytest.skip("data/ca2040_z4 is not present")
 
-    options = {"years": (2020,), "window": HourWindow(0, 24), "export_mode": "drop"}
+    options = {
+        "years": (2020,),
+        "window": HourWindow(0, 24),
+        "export_mode": "drop",
+        "outage_params_path": str(tiny_params_path()),
+    }
     base = load_system(root, LoadOptions(outage_draw=0, **options))
     gen = base.index.get(base.devices, "Generator")
     capacity = np.asarray(gen.nominal_capacity, dtype=float).reshape(-1)
@@ -787,7 +817,7 @@ def test_real_z4_design_draws_from_the_pool():
     from zap.reliability.keys import row_specs
     from zap.reliability.outages import load_outage_params, read_static_tables, row_availability
 
-    params = load_outage_params()
+    params = load_outage_params(tiny_params_path())
     specs = {s.name: s for s in row_specs(read_static_tables(root), params)}
     names = [str(n) for n in base.index.names["Generator"]]
     zero_pooled = [i for i, n in enumerate(names) if capacity[i] == 0.0 and n in specs]

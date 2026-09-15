@@ -86,9 +86,9 @@ MAX_PARQUET_READ_BYTES = 4 * 1024**3
 #: Carriers treated as variable renewables (used for the curtailment metric).
 VRE_CARRIERS = frozenset({"solar", "onwind", "offwind_floating"})
 
-#: Fallback thermal-carrier list, used for ``SystemIndex.thermal_mask`` when
-#: ``zap.reliability.outages`` (WP2) is not importable.  Kept in sync with
-#: ``zap/reliability/outage_params.yaml``.
+#: Thermal-carrier list used for ``SystemIndex.thermal_mask``.  zap ships no
+#: parameter table any more (the numbers are CH3 policy), so this is the list,
+#: not a fallback: kept in sync by hand with ``ch3/ra/configs/outage_params.yaml``.
 DEFAULT_THERMAL_CARRIERS = frozenset(
     {
         "CCGT",
@@ -533,6 +533,11 @@ class LoadOptions:
     clip_scale_to_one: bool = True
     ucap_derate: bool = False
     outage_draw: Optional[int] = None
+    #: Path to the caller's outage parameter table.  zap ships none: the numbers
+    #: are CH3 policy and live at ``ch3/ra/configs/outage_params.yaml``.
+    #: **Required whenever** ``outage_draw is not None`` **or** ``ucap_derate``;
+    #: ignored otherwise.
+    outage_params_path: Optional[str] = None
     #: Unit-key scheme of the forced-outage sampler (``zap.reliability.keys.SCHEMES``).
     #: Carried on the run card and refused on mismatch: draws are only
     #: *statistically* equivalent across schemes, never bit-reproducible.
@@ -555,6 +560,13 @@ class LoadOptions:
     #: Provenance only: the ``design_id`` the capacities came from.
     design_id: Optional[str] = None
     link_losses: bool = True
+    #: MW cap on the **sum** of hourly delivered flow over every
+    #: ``carrier == "imports"`` link -- the simultaneous-import interface limit
+    #: (import-limit spec, 2026-09-14).  ``None`` = no cap, and the system built
+    #: is then bit-identical to the one built before the axis existed.  It counts
+    #: all flow on those links, i.e. the real plant PyPSA-USA places behind the
+    #: import buses *plus* ``unspecified_imports``.
+    import_limit_mw: Optional[float] = None
     #: Retired by the minimal unit-commitment device (2026-09-14).  Kept for key
     #: stability and now inert; ``False`` is a ``ValueError`` pointing at
     #: :attr:`commitment`.
@@ -577,7 +589,9 @@ class LoadOptions:
     #: Storage boundary condition of a block. ``"fixed"`` pins start and end at
     #: ``storage_init_soc`` / ``storage_final_soc``; ``"cyclic_free"`` only ties
     #: them together (``energy[0] == energy[T]``) and ignores both levels.
-    storage_soc_mode: Literal["fixed", "cyclic_free"] = "cyclic_free"  # default by decision 2026-09-09
+    storage_soc_mode: Literal["fixed", "cyclic_free"] = (
+        "cyclic_free"  # default by decision 2026-09-09
+    )
     #: A constant MW of **firm load** added to demand in every hour of the window,
     #: split across load buses pro-rata to each bus's window-peak demand
     #: (accreditation spec D15).  This is the denominator direction of a marginal
@@ -879,13 +893,14 @@ def apply_design_capacity(
 
 
 def _thermal_carriers() -> frozenset[str]:
-    """Carriers covered by the outage pool (WP2), with a static fallback."""
-    try:  # pragma: no cover - depends on WP2 landing
-        from zap.reliability.outages import load_outage_params
+    """Carriers covered by the outage pool (WP2).
 
-        return frozenset(load_outage_params().carriers)
-    except Exception:
-        return DEFAULT_THERMAL_CARRIERS
+    Reads no parameter table: zap has none, and the caller's table is a
+    per-load-options argument, while ``thermal_mask`` is a property of the
+    carrier names alone.  :data:`DEFAULT_THERMAL_CARRIERS` is kept in sync with
+    ``ch3/ra/configs/outage_params.yaml`` by hand.
+    """
+    return DEFAULT_THERMAL_CARRIERS
 
 
 def _terminals(series: pd.Series, bus_index: dict[str, int], what: str) -> np.ndarray:
@@ -952,18 +967,48 @@ def _dense_from_store(
 # ===========================================================================
 
 
-def _ucap_factors(dataset_dir: Path, component: str, rows: pd.Index) -> tuple[np.ndarray, str]:
-    """UCAP derate per source row (1.0 when the row is absent), plus the csv sha256."""
+def _ucap_factors(
+    dataset_dir: Path,
+    component: str,
+    rows: pd.Index,
+    expect_digest: Optional[str] = None,
+) -> tuple[np.ndarray, str]:
+    """UCAP derate per source row (1.0 when the row is absent), plus the csv sha256.
+
+    ``expect_digest`` is the caller's ``OutageParams.draw_digest()[:12]``.  A
+    ``ucap.csv`` sampled under a *different* parameter table is a silently wrong
+    derate -- the numbers look plausible and nothing else in the run says which
+    table they came from -- so a mismatch (or a file predating the provenance
+    columns) is a hard error asking for a regeneration (spec D7).  ``None``
+    skips the check.
+    """
     path = Path(dataset_dir) / UCAP_NAME
     if not path.exists():
         raise FileNotFoundError(
             f"ucap_derate=True but {path} does not exist. Build it with "
-            f"`python -m zap.reliability.outages ucap --dataset-dir {dataset_dir}`."
+            f"`ra build-store --dataset {dataset_dir} --ucap --years ... --draws ...`."
         )
     table = pd.read_csv(path)
     for required in ("component", "row"):
         if required not in table.columns:
             raise ValueError(f"{path} has no '{required}' column")
+
+    if expect_digest is not None:
+        if "params_digest" not in table.columns:
+            raise ValueError(
+                f"{path} predates the outage-parameter provenance columns "
+                f"(`params_digest`, `params_version`), so it cannot be shown to match "
+                f"the loaded parameter table (digest {expect_digest}). Regenerate it: "
+                f"`ra build-store --dataset {dataset_dir} --ucap --years ... --draws ...`."
+            )
+        found = sorted({str(d) for d in table["params_digest"].dropna().unique()})
+        if found != [str(expect_digest)]:
+            raise ValueError(
+                f"{path} was sampled under outage parameters {found}, but the loaded "
+                f"table has digest {expect_digest}: the derate would be wrong. "
+                f"Regenerate it: `ra build-store --dataset {dataset_dir} --ucap "
+                f"--years ... --draws ...`."
+            )
 
     column = next((c for c in UCAP_COLUMN_PREFERENCE if c in table.columns), None)
     if column is None:
@@ -983,9 +1028,8 @@ def _ucap_factors(dataset_dir: Path, component: str, rows: pd.Index) -> tuple[np
     return np.where(np.isnan(values), 1.0, values), sha256_file(path)
 
 
-
-def _outage_row_specs(static: dict[str, pd.DataFrame]):
-    """``(row specs, params)`` of the dataset's pooled rows, cached per dataset.
+def _outage_row_specs(static: dict[str, pd.DataFrame], params_path: str):
+    """``(row specs, params)`` of the dataset's pooled rows.
 
     The specs are structural -- component, carrier, bus and the per-group ordinal
     -- so they are a property of the static tables alone and never of a design,
@@ -996,7 +1040,7 @@ def _outage_row_specs(static: dict[str, pd.DataFrame]):
     from zap.reliability.keys import row_specs
     from zap.reliability.outages import load_outage_params
 
-    params = load_outage_params()
+    params = load_outage_params(params_path)
     return row_specs(static, params), params
 
 
@@ -1019,7 +1063,14 @@ def _outage_availability(
     """
     from zap.reliability.outages import row_availability, slot_count, unit_cache_info
 
-    specs, params = _outage_row_specs(static)
+    if options.outage_params_path is None:
+        raise ValueError(
+            "outage_draw is set but LoadOptions.outage_params_path is None: zap ships "
+            "no outage parameter table. Pass the caller's table -- CH3 runs use "
+            "`ch3/ra/configs/outage_params.yaml` (`ch3.ra.paths.outage_params_path()`), "
+            "zap's own tests `zap/tests/fixtures/outage_params_test.yaml`."
+        )
+    specs, params = _outage_row_specs(static, options.outage_params_path)
     by_component = [s for s in specs if s.component == component]
     known = {s.name: s for s in by_component}
     wanted = [known[r] for r in rows if r in known]
@@ -1048,13 +1099,11 @@ def _outage_availability(
         "scheme": str(options.outage_scheme),
         "base_seed": int(options.outage_seed),
         "params_sha256": params.sha256,
+        "params_digest": params.draw_digest()[:12],
         "params_version": int(params.version),
         "params_reviewed": bool(params.reviewed),
         "n_units": int(
-            sum(
-                slot_count(caps[s.name], params.carriers[s.carrier].unit_size_mw)
-                for s in wanted
-            )
+            sum(slot_count(caps[s.name], params.carriers[s.carrier].unit_size_mw) for s in wanted)
         ),
         "cache": unit_cache_info(),
         # Which component this snapshot counted, so a merged record can say so.
@@ -1082,7 +1131,13 @@ def merge_outage_info(*infos: Optional[dict]) -> Optional[dict]:
     present = [dict(i) for i in infos if i]
     if not present:
         return None
-    identity_keys = ("scheme", "base_seed", "params_sha256", "params_version")
+    identity_keys = (
+        "scheme",
+        "base_seed",
+        "params_sha256",
+        "params_digest",
+        "params_version",
+    )
     first = present[0]
     for other in present[1:]:
         for key in identity_keys:
@@ -1109,9 +1164,7 @@ def merge_outage_info(*infos: Optional[dict]) -> Optional[dict]:
 # ===========================================================================
 
 
-def commitment_fields(
-    gens: pd.DataFrame, file_p_nom: np.ndarray
-) -> dict[str, np.ndarray]:
+def commitment_fields(gens: pd.DataFrame, file_p_nom: np.ndarray) -> dict[str, np.ndarray]:
     """``committable`` / ``min_power_fraction`` / ``start_up_cost_per_mw`` (spec 3).
 
     ``k_g = start_up_cost_g / p_nom_file_g`` in **$ per MW started**, from the
@@ -1335,6 +1388,35 @@ def _build_links(
     if np.any(eff <= 0):
         raise ValueError("Links with non-positive efficiency")
 
+    # The aggregate interface limit (import-limit spec 3.2), resolved before any
+    # timeseries is read so that an unenforceable cap fails on the config, not
+    # after a store pull.
+    group_kwargs: dict[str, Any] = {}
+    if options.import_limit_mw is not None:
+        cap = float(options.import_limit_mw)
+        mask = links["carrier"].to_numpy().astype(str) == IMPORT_LINK_CARRIER
+        if not mask.any():
+            raise ValueError(
+                f"import_limit_mw={cap} was asked for but static/links.csv has no row with "
+                f"carrier == {IMPORT_LINK_CARRIER!r}: there is nothing to cap "
+                "(import-limit spec D7)"
+            )
+        interface_mw = float(links["p_nom"].to_numpy(dtype=np.float64)[mask].sum())
+        if cap >= interface_mw:
+            logger.warning(
+                "import_limit_mw=%.6g is at or above the %d import link(s)' total p_nom "
+                "(%.6g MW), so the cap cannot bind: legal as a sensitivity point, but this "
+                "system is the uncapped one.",
+                cap,
+                int(mask.sum()),
+                interface_mw,
+            )
+        group_kwargs = {
+            "group": np.where(mask, 0, -1).astype(int),
+            "group_limit": np.array([cap], dtype=np.float64),
+            "group_name": np.array([IMPORT_LINK_CARRIER], dtype=object),
+        }
+
     # PyPSA charges marginal_cost on p0; zap prices power[1] = efficiency * flow,
     # so the per-unit cost of the sink-end injection is marginal_cost / efficiency.
     cost = (
@@ -1351,6 +1433,7 @@ def _build_links(
     )
 
     p_nom = links["p_nom"].to_numpy(dtype=np.float64)
+
     return DirectedLine(
         num_nodes=len(bus_index),
         name=links.index,
@@ -1364,7 +1447,15 @@ def _build_links(
         capital_cost=links["capital_cost"].to_numpy(dtype=np.float64),
         min_nominal_capacity=p_nom.copy(),
         max_nominal_capacity=p_nom.copy(),
+        **group_kwargs,
     )
+
+
+def import_link_capacity_mw(static: dict[str, pd.DataFrame]) -> float:
+    """Total ``p_nom`` of the ``carrier == "imports"`` links, in MW."""
+    links = static["links"]
+    mask = links["carrier"].to_numpy().astype(str) == IMPORT_LINK_CARRIER
+    return float(links["p_nom"].to_numpy(dtype=np.float64)[mask].sum())
 
 
 def _storage_supports_availability() -> bool:
@@ -1461,6 +1552,10 @@ def _build_export_sinks(
 
 
 IMPORT_BUS_SUFFIX = "_imports"
+
+#: ``static/links.csv`` carrier of the links that cross the state interface.
+#: The rows :attr:`LoadOptions.import_limit_mw` caps as one group.
+IMPORT_LINK_CARRIER = "imports"
 
 
 def import_bus_mask(bus: Sequence[str]) -> np.ndarray:
@@ -1763,9 +1858,26 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
     ucap_sha: Optional[str] = None
     outage_attrs: Optional[dict] = None
 
+    params_digest: Optional[str] = None
+
     if options.ucap_derate:
-        gen_ucap, ucap_sha = _ucap_factors(dataset_dir, "Generator", static["generators"].index)
-        storage_ucap, _ = _ucap_factors(dataset_dir, "StorageUnit", static["storage_units"].index)
+        if options.outage_params_path is None:
+            raise ValueError(
+                "ucap_derate=True but LoadOptions.outage_params_path is None: zap ships "
+                "no outage parameter table, and without it a stale `ucap.csv` cannot be "
+                "detected. Pass the caller's table -- CH3 runs use "
+                "`ch3/ra/configs/outage_params.yaml` "
+                "(`ch3.ra.paths.outage_params_path()`)."
+            )
+        from zap.reliability.outages import load_outage_params
+
+        params_digest = load_outage_params(options.outage_params_path).draw_digest()[:12]
+        gen_ucap, ucap_sha = _ucap_factors(
+            dataset_dir, "Generator", static["generators"].index, params_digest
+        )
+        storage_ucap, _ = _ucap_factors(
+            dataset_dir, "StorageUnit", static["storage_units"].index, params_digest
+        )
     elif options.outage_draw is not None:
         # The capacities handed to `_outage_availability` are the *designed*
         # ones (`static` is post-design): every row is derated over the slots
@@ -1793,6 +1905,7 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         # generator call's info reported 640 of 1,138 slots on z4 draw 3
         # (verifier, 2026-09-12).
         outage_attrs = merge_outage_info(gen_outage_attrs, storage_outage_attrs)
+        params_digest = (outage_attrs or {}).get("params_digest")
 
     # ---- Demand scaling (D9) ---------------------------------------------
     # As-built capacities on purpose: the peak-available denominator (and hence
@@ -1904,6 +2017,13 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         # is identical across the designs scored on one scenario.
         "peaks_at": "as_built",
         "link_losses": bool(options.link_losses),
+        # The simultaneous-import interface limit and what it is a limit on.
+        # `peak_available_*_incl_imports_mw` above ignores it and is therefore an
+        # overstatement whenever a cap is set (import-limit spec D8).
+        "import_limit_mw": (
+            None if options.import_limit_mw is None else float(options.import_limit_mw)
+        ),
+        "import_link_capacity_mw": import_link_capacity_mw(static),
         "storage_soc_mode": str(options.storage_soc_mode),
         "commitment": str(options.commitment),
         "commitment_mode": str(options.commitment_mode),
@@ -1913,6 +2033,9 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "cost_unit": float(options.cost_unit),
         "weather_store_attrs": store.attrs,
         "ucap_csv_sha256": ucap_sha,
+        # 12-hex `OutageParams.draw_digest()` of the parameter table the derate or
+        # the draws were taken under; None when the system carries neither.
+        "outage_params_digest": params_digest,
         # `{scheme, base_seed, params_sha256, n_units, cache}` -- the forty bytes
         # that replaced `outages.zarr` as the canonical artefact (spec D2/D3.1).
         # None when the system carries no draw.
