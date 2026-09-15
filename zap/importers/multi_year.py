@@ -13,6 +13,7 @@ from zap.devices.injector import Generator, Load
 from zap.devices.storage_unit import StorageUnit
 from zap.devices.transporter import DirectedLine
 from zap.layer import DispatchLayer
+from zap.network import PARAMETRIZABLE_ATTRS as _PARAMETRIZABLE_ATTRS
 from zap.planning import PlanningProblem, StochasticPlanningProblem
 from zap.planning.constraints import BudgetConstraintSet
 
@@ -36,6 +37,14 @@ TIME_VARYING_ATTRS = {
     # ACLine: ["susceptance", "nominal_capacity"],
     # DCLine: ["nominal_capacity"],
 }
+
+
+#: Re-exported beside :data:`TIME_VARYING_ATTRS`, which is the registry it is
+#: most easily confused with.  It is *defined* in :mod:`zap.network`, next to its
+#: only consumer (``PowerNetwork.build_dispatch(..., parametrize=...)``), because
+#: this module pulls in pypsa and the dispatch path must not.  See that
+#: definition for why ``StorageUnit.initial_soc`` belongs there and not here.
+PARAMETRIZABLE_ATTRS = _PARAMETRIZABLE_ATTRS
 
 
 def concatenate_time_varying_attrs(

@@ -1,4 +1,6 @@
+import copy
 import itertools
+import logging
 import torch
 import time  # noqa
 import cvxpy as cp
@@ -6,14 +8,57 @@ import numpy as np
 import scipy.sparse as sp
 
 from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import repeat
 from functools import cached_property
 from collections.abc import Sequence
 
-from zap.devices.abstract import AbstractDevice
+from zap.devices.abstract import AbstractDevice, make_dynamic
 from zap.devices.ground import Ground
+from zap.devices.injector import Generator, Load
+from zap.devices.storage_unit import StorageUnit
+from zap.devices.transporter import DirectedLine
 from zap.util import torchify, torch_sparse, grad_or_zero, expand_params
+
+logger = logging.getLogger(__name__)
+
+#: Key of a parametrised device attribute: ``(index in the device list, attribute name)``.
+ParamKey = tuple[int, str]
+
+#: Attributes that may become ``cp.Parameter``s in a retained dispatch problem
+#: (``PowerNetwork.build_dispatch(..., parametrize=...)``), per device type.
+#: :func:`parametrize_devices` **refuses** anything not listed here.
+#:
+#: This is deliberately *not*
+#: :data:`zap.importers.multi_year.TIME_VARYING_ATTRS`, which re-exports this
+#: dict beside it.  That registry answers "which attributes carry one column per
+#: hour, so that concatenating weather years concatenates them too", and
+#: ``concatenate_time_varying_attrs`` filters its entries by exactly that shape
+#: test.  ``StorageUnit.initial_soc`` is ``(N, 1)`` -- one state-of-charge seed
+#: per row, constant over the block -- so it does not belong there, but it is
+#: precisely the quantity a rolling horizon has to change between windows.
+#: Hence a second registry whose question is "which attributes change from one
+#: window to the next".  It lives here, next to its only consumer, because
+#: ``multi_year`` pulls in pypsa and ``build_dispatch`` must not.
+#:
+#: Only attributes that enter the constraints multiplied by *constants* may be
+#: listed: a product of two parameters is not DPP.  In particular capacities
+#: (the design) must stay constants, which they are in evaluation.
+#:
+#: The entries are individually parametrisable but **not freely combinable** on
+#: one device.  ``Generator.min_power`` is ``0 * dynamic_capacity`` and
+#: ``Load.min_power`` is ``-load``, and ``AbstractInjector.operation_cost``
+#: multiplies ``min_power`` by ``linear_cost``; so parametrising an injector's
+#: ``linear_cost`` *and* its capacity/load attribute in the same problem is a
+#: parameter-times-parameter product and :class:`DispatchProblem` refuses it.
+#: The rolling-horizon set -- ``Load.load``, ``Generator.dynamic_capacity``,
+#: ``StorageUnit.power_availability``, ``StorageUnit.initial_soc`` -- is DPP.
+PARAMETRIZABLE_ATTRS: dict[type, list[str]] = {
+    Generator: ["dynamic_capacity", "linear_cost"],
+    Load: ["load"],
+    StorageUnit: ["power_availability", "initial_soc"],
+    DirectedLine: ["max_power", "min_power", "linear_cost"],
+}
 
 
 @dataclass
@@ -28,6 +73,21 @@ class DispatchOutcome(Sequence):
     global_angle: object
     problem: object = None
     ground: object = None
+
+    # --- Per-solve snapshot -------------------------------------------------
+    # `problem` is the live `cp.Problem`, and a *retained* problem
+    # (`DispatchProblem`) is re-solved in place, so `problem.value`,
+    # `problem.status` and `problem.solver_stats` are overwritten by the next
+    # solve and are NOT properties of this outcome.  These fields snapshot them
+    # at the moment this outcome was produced; read them, not `problem.*`,
+    # whenever an outcome outlives its solve.  ADMM outcomes leave them None.
+    # They are keyword-only extras: `__len__` stays 8, so `vectorize`, `shape`,
+    # `blocks`, `package` and `torchify` are unaffected.
+    objective: object = None
+    status: object = None
+    solver_stats: object = None
+    n_variables: object = None
+    n_constraints: object = None
 
     def __getitem__(self, i):
         match i:
@@ -233,6 +293,257 @@ class DispatchOutcome(Sequence):
 
         # Recursive case
         return [self._package(vec, blk, shp) for blk, shp in zip(blocks, shapes)]
+
+
+def parametrize_devices(
+    devices: list[AbstractDevice],
+    parametrize: dict[int, list[str]],
+) -> tuple[list[AbstractDevice], dict[ParamKey, cp.Parameter]]:
+    """Shallow-copy the named devices and swap the named attributes for ``cp.Parameter``.
+
+    Mirrors :meth:`AbstractDevice.torchify`: devices are plain objects with a
+    ``__dict__`` (``attrs`` classes here are built with ``slots=False``), so a
+    shallow copy plus ``setattr`` leaves the caller's devices untouched while the
+    modelling code -- which reads the attributes through ``parameterize`` and
+    combines them with ``la.multiply`` -- is not changed at all.  A
+    ``cp.Parameter`` has ``.shape``, so the ``time_horizon`` properties and
+    ``make_dynamic`` keep working on it.
+
+    The parameter takes a **copy** of the attribute's current value, so a problem
+    built with ``parametrize`` and never given new values is the same problem as
+    one built without it, and a later in-place edit of the caller's device
+    (``device.load[:] = ...``) cannot silently change the retained problem: the
+    only way in is :meth:`DispatchProblem.set_parameters`.
+
+    Only the attributes in :data:`PARAMETRIZABLE_ATTRS` may be named; anything
+    else is refused, because the registry is where the DPP reasoning lives.
+
+    Returns the new device list and ``{(device index, attribute): Parameter}``.
+    """
+    new_devices = list(devices)
+    parameters: dict[ParamKey, cp.Parameter] = {}
+
+    for index, attrs in parametrize.items():
+        i = int(index)
+        if not (0 <= i < len(new_devices)):
+            raise IndexError(
+                f"parametrize names device {i}, but the device list has "
+                f"{len(new_devices)} entries"
+            )
+        device = copy.copy(new_devices[i])
+        allowed = PARAMETRIZABLE_ATTRS.get(type(device))
+        if allowed is None:
+            raise ValueError(
+                f"{type(device).__name__} (device {i}) has no entry in "
+                f"PARAMETRIZABLE_ATTRS, so nothing on it may become a cp.Parameter. "
+                f"Registered device types: {sorted(c.__name__ for c in PARAMETRIZABLE_ATTRS)}."
+            )
+        for attr in attrs:
+            if attr not in allowed:
+                raise ValueError(
+                    f"{type(device).__name__}.{attr} is not in PARAMETRIZABLE_ATTRS "
+                    f"(which allows {allowed} on this device). Add it there, with the "
+                    "DPP argument for why it is safe, before parametrising it."
+                )
+            current = getattr(device, attr, None)
+            if current is None:
+                raise ValueError(
+                    f"cannot parametrise {type(device).__name__}.{attr}: it is None on "
+                    "this device, so there is no shape to build a cp.Parameter from"
+                )
+            if isinstance(current, cp.Parameter):
+                raise ValueError(
+                    f"{type(device).__name__}.{attr} is already a cp.Parameter; "
+                    "parametrise each attribute once"
+                )
+            # `copy=True`: `np.asarray` on a float64 array returns the caller's own
+            # buffer, and `make_dynamic` only reshapes, so without this the
+            # parameter would alias the device's array in both directions.
+            value = make_dynamic(np.array(current, dtype=float, copy=True))
+            param = cp.Parameter(value.shape, name=f"{type(device).__name__}[{i}].{attr}")
+            param.value = value
+            setattr(device, attr, param)
+            parameters[(i, attr)] = param
+        new_devices[i] = device
+
+    return new_devices, parameters
+
+
+@dataclass
+class DispatchProblem:
+    """A built dispatch problem that can be re-solved on new data.
+
+    ``devices`` are the (possibly parametrised) device copies the problem was
+    built from, **without** the ground device, which is carried separately in
+    ``ground`` exactly as :class:`DispatchOutcome` carries it.
+
+    When ``parameters`` is non-empty the problem must be DPP, otherwise cvxpy
+    silently re-canonicalises on every solve (it prepends ``EvalParams`` and
+    warns *once*), which would make a retained problem slower than rebuilding
+    while looking like a win.  The constructor therefore checks it.
+    """
+
+    network: "PowerNetwork"
+    devices: list[AbstractDevice]
+    time_horizon: int
+    problem: cp.Problem
+    data: dict
+    ground: Optional[Ground] = None
+    parameters: dict[ParamKey, cp.Parameter] = field(default_factory=dict)
+
+    #: Parameters that do not appear in the problem, so writing them is a no-op.
+    #: The obvious case is ``StorageUnit.initial_soc`` under
+    #: ``soc_mode: cyclic_free``, where the opening level is not pinned at all.
+    unused_parameters: tuple = field(default=(), init=False)
+
+    #: ``(n_variables, n_constraints)``, counted lazily once: the problem's size
+    #: is fixed at build time and does not move when parameters change.
+    _size: object = field(default=None, init=False, repr=False)
+
+    def __post_init__(self):
+        if not self.parameters:
+            return
+
+        if not self.problem.is_dpp():
+            raise ValueError(
+                "the parametrised dispatch problem is not DPP-compliant, so cvxpy would "
+                "re-canonicalise it on every solve (warning once, then silently) and the "
+                "parametrisation would be a pessimisation. The usual cause is a product "
+                "of two parameters -- e.g. parametrising a capacity *and* an availability "
+                "on the same device, which meet in `multiply(capacity, availability)`. "
+                "Pre-multiply such a pair in numpy and pass it as a single parameter. "
+                f"Parametrised here: {sorted(self.parameters)}."
+            )
+
+        declared = {id(p) for p in self.problem.parameters()}
+        self.unused_parameters = tuple(
+            sorted(k for k, p in self.parameters.items() if id(p) not in declared)
+        )
+        if self.unused_parameters:
+            logger.warning(
+                "parametrised attributes that do not appear in the dispatch problem, so "
+                "set_parameters on them changes nothing: %s",
+                list(self.unused_parameters),
+            )
+
+    def is_dpp(self) -> bool:
+        return bool(self.problem.is_dpp())
+
+    @property
+    def size(self) -> tuple[int, int]:
+        """``(scalar variables, scalar constraint entries)`` of the built problem."""
+        if self._size is None:
+            self._size = (
+                int(sum(int(np.prod(v.shape)) for v in self.problem.variables())),
+                int(sum(int(np.prod(c.shape)) for c in self.problem.constraints)),
+            )
+        return self._size
+
+    def set_parameters(self, values: dict[ParamKey, np.ndarray]) -> None:
+        """Write new values into the parameters named by ``(device index, attribute)``.
+
+        Shapes must match the parameter exactly, with one exception: a 1-D
+        ``(N,)`` array is accepted for an ``(N, 1)`` parameter, which is the
+        reshape ``make_dynamic`` performs at construction.  Nothing else is
+        broadcast -- a ``(N,)`` row vector silently tiled across an ``(N, T)``
+        parameter is a plausible typo with no visible symptom.
+
+        The value is **copied**, so the caller may reuse or mutate its array.
+        """
+        for key, value in values.items():
+            param_key = (int(key[0]), str(key[1]))
+            param = self.parameters.get(param_key)
+            if param is None:
+                raise KeyError(
+                    f"{param_key} is not a parameter of this dispatch problem; "
+                    f"it holds {sorted(self.parameters)}"
+                )
+            array = np.array(value, dtype=float, copy=True)
+            shape = tuple(param.shape)
+            if array.shape != shape:
+                promotable = (
+                    array.ndim == 1
+                    and len(shape) == 2
+                    and shape[1] == 1
+                    and array.shape[0] == shape[0]
+                )
+                if not promotable:
+                    raise ValueError(
+                        f"parameter {param_key} has shape {shape}; got {array.shape}. "
+                        "Shapes must match exactly (a 1-D (N,) array is accepted only for "
+                        "an (N, 1) parameter); values are never broadcast over time."
+                    )
+                array = array.reshape(shape)
+            param.value = array
+
+    def solve(
+        self,
+        *,
+        solver=cp.ECOS,
+        solver_kwargs={},
+        warm_start: bool = False,
+    ) -> DispatchOutcome:
+        """Solve the problem as it currently stands and package the outcome.
+
+        ``warm_start`` defaults to **False**, unlike cvxpy's own default.  On a
+        *retained* problem cvxpy's HiGHS interface crash-starts the solver from
+        the previous solution (``highs_conif.py`` ``setSolution``), which was
+        measured at 30-40x *slower* than a cold solve on a 48 h dispatch LP.
+        ``PowerNetwork.dispatch`` builds a fresh problem every call and so never
+        had a cache to warm start from; keeping the default off preserves its
+        behaviour and protects every re-solve.
+
+        The returned outcome carries a **snapshot** of ``problem.value``,
+        ``problem.status``, ``problem.solver_stats`` and the problem's size,
+        because the next :meth:`solve` overwrites all of them on the shared
+        ``cp.Problem``.
+        """
+        kwargs = dict(solver_kwargs or {})
+        warm_start = bool(kwargs.pop("warm_start", warm_start))
+
+        problem = self.problem
+        problem.solve(solver=solver, warm_start=warm_start, **kwargs)
+        assert problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE], (
+            f"CVXPY solver failed with status: {problem.status}. "
+            f"Objective value: {problem.value}"
+        )
+
+        data = self.data
+        power_balance = data["power_balance"]
+        phase_consistency = data["phase_consistency"]
+        local_equalities = data["local_equalities"]
+        local_inequalities = data["local_inequalities"]
+
+        # Evaluate variables
+        power = nested_evaluate(data["power"])
+        angle = nested_evaluate(data["angle"])
+        global_angle = nested_evaluate(data["global_angle"])
+        local_variables = nested_evaluate(data["local_variables"])
+
+        n_variables, n_constraints = self.size
+        return DispatchOutcome(
+            global_angle=global_angle,
+            power=power,
+            angle=angle,
+            local_variables=local_variables,
+            prices=None if isinstance(power_balance, bool) else -power_balance.dual_value,
+            phase_duals=[
+                [pci.dual_value for pci in pc] if len(pc) > 0 else None for pc in phase_consistency
+            ],
+            local_equality_duals=[[lci.dual_value for lci in lc] for lc in local_equalities],
+            local_inequality_duals=[[lci.dual_value for lci in lc] for lc in local_inequalities],
+            problem=problem,
+            ground=self.ground,
+            # Snapshot: `problem` is shared with every other outcome of this
+            # object and its `.value` / `.status` / `.solver_stats` move on the
+            # next solve.  cvxpy builds a fresh `SolverStats` per solve, so
+            # holding the reference is enough for that one.
+            objective=None if problem.value is None else float(problem.value),
+            status=problem.status,
+            solver_stats=problem.solver_stats,
+            n_variables=n_variables,
+            n_constraints=n_constraints,
+        )
 
 
 @dataclass
@@ -441,6 +752,96 @@ class PowerNetwork:
 
         return costs, constraints, data
 
+    def build_dispatch(
+        self,
+        devices: list[AbstractDevice],
+        time_horizon=None,
+        *,
+        parameters=None,
+        add_ground=True,
+        dual=False,
+        parametrize: Optional[dict[int, list[str]]] = None,
+        num_contingencies=0,
+        contingency_device: Optional[int] = None,
+        contingency_mask=None,
+    ) -> DispatchProblem:
+        """Model the dispatch problem without solving it.
+
+        This is :meth:`dispatch`'s body up to and including ``cp.Problem(...)``;
+        :meth:`DispatchProblem.solve` is the rest.  ``parametrize`` maps a device
+        index to the attribute names that become ``cp.Parameter``s, so the
+        problem can be re-solved on new data without re-canonicalising -- see
+        :func:`parametrize_devices`.
+
+        ``parameters`` is unrelated: it is zap's existing per-device override of
+        differentiable attributes (the planning path), and must **never** be
+        combined with ``parametrize`` -- there a capacity is a ``cp.Variable``
+        and a ``cp.Parameter`` multiplying it would sit in a place we also
+        differentiate.
+        """
+        if parametrize:
+            if parameters is not None:
+                raise ValueError(
+                    "`parametrize` (cvxpy Parameters for re-solving) cannot be combined "
+                    "with `parameters` (the differentiable planning overrides): the "
+                    "planning path multiplies these attributes by capacity Variables."
+                )
+            devices, cp_parameters = parametrize_devices(list(devices), parametrize)
+        else:
+            devices, cp_parameters = list(devices), {}
+
+        # Compute time horizon automatically
+        if time_horizon is None:
+            time_horizon = max([d.time_horizon for d in devices])
+
+        parameters = expand_params(parameters, devices)
+
+        # Add ground if necessary
+        ground = None
+        model_devices = devices
+        if add_ground:
+            ground = Ground(num_nodes=self.num_nodes, terminal=np.array([0]))
+            model_devices = devices + [ground]
+            parameters = parameters + [{}]
+
+        # Type checks
+        assert all([d.num_nodes == self.num_nodes for d in model_devices])
+        assert time_horizon > 0
+        assert all([d.time_horizon in [0, time_horizon] for d in model_devices])
+        if num_contingencies > 0:
+            assert contingency_device is not None
+            assert contingency_mask.shape == (
+                num_contingencies,
+                model_devices[contingency_device].num_devices,
+            )
+
+        if num_contingencies > 0:
+            costs, constraints, data = self.model_contingency_problem(
+                model_devices,
+                time_horizon,
+                parameters=parameters,
+                contingency_device=contingency_device,
+                contingency_mask=contingency_mask,
+            )
+        else:
+            costs, constraints, data = self.model_dispatch_problem(
+                model_devices, time_horizon, parameters=parameters, dual=dual
+            )
+
+        # Formulate the cvxpy problem
+        objective = cp.Minimize(cp.sum(costs))
+        problem = cp.Problem(objective, constraints)
+
+        return DispatchProblem(
+            network=self,
+            devices=devices,
+            time_horizon=time_horizon,
+            problem=problem,
+            data=data,
+            ground=ground,
+            parameters=cp_parameters,
+        )
+
     def dispatch(
         self,
         devices: list[AbstractDevice],
@@ -455,88 +856,16 @@ class PowerNetwork:
         contingency_device: Optional[int] = None,
         contingency_mask=None,
     ) -> DispatchOutcome:
-        # Compute time horizon automatically
-        if time_horizon is None:
-            time_horizon = max([d.time_horizon for d in devices])
-
-        parameters = expand_params(parameters, devices)
-
-        # Add ground if necessary
-        ground = None
-        if add_ground:
-            ground = Ground(num_nodes=self.num_nodes, terminal=np.array([0]))
-            devices = devices + [ground]
-            parameters = parameters + [{}]
-
-        # Type checks
-        assert all([d.num_nodes == self.num_nodes for d in devices])
-        assert time_horizon > 0
-        assert all([d.time_horizon in [0, time_horizon] for d in devices])
-        if num_contingencies > 0:
-            assert contingency_device is not None
-            assert contingency_mask.shape == (
-                num_contingencies,
-                devices[contingency_device].num_devices,
-            )
-
-        if num_contingencies > 0:
-            costs, constraints, data = self.model_contingency_problem(
-                devices,
-                time_horizon,
-                parameters=parameters,
-                contingency_device=contingency_device,
-                contingency_mask=contingency_mask,
-            )
-        else:
-            costs, constraints, data = self.model_dispatch_problem(
-                devices, time_horizon, parameters=parameters, dual=dual
-            )
-
-        # Unpack data
-        power, angle, local_variables = (
-            data["power"],
-            data["angle"],
-            data["local_variables"],
-        )
-        global_angle = data["global_angle"]
-        power_balance, phase_consistency = (
-            data["power_balance"],
-            data["phase_consistency"],
-        )
-        local_equalities, local_inequalities = (
-            data["local_equalities"],
-            data["local_inequalities"],
-        )
-
-        # Formulate and solve cvxpy problem
-        objective = cp.Minimize(cp.sum(costs))
-        problem = cp.Problem(objective, constraints)
-        problem.solve(solver=solver, **solver_kwargs)
-        assert problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE], (
-            f"CVXPY solver failed with status: {problem.status}. "
-            f"Objective value: {problem.value}"
-        )
-
-        # Evaluate variables
-        power = nested_evaluate(power)
-        angle = nested_evaluate(angle)
-        global_angle = nested_evaluate(global_angle)
-        local_variables = nested_evaluate(local_variables)
-
-        return DispatchOutcome(
-            global_angle=global_angle,
-            power=power,
-            angle=angle,
-            local_variables=local_variables,
-            prices=None if isinstance(power_balance, bool) else -power_balance.dual_value,
-            phase_duals=[
-                [pci.dual_value for pci in pc] if len(pc) > 0 else None for pc in phase_consistency
-            ],
-            local_equality_duals=[[lci.dual_value for lci in lc] for lc in local_equalities],
-            local_inequality_duals=[[lci.dual_value for lci in lc] for lc in local_inequalities],
-            problem=problem,
-            ground=ground,
-        )
+        return self.build_dispatch(
+            devices,
+            time_horizon,
+            parameters=parameters,
+            add_ground=add_ground,
+            dual=dual,
+            num_contingencies=num_contingencies,
+            contingency_device=contingency_device,
+            contingency_mask=contingency_mask,
+        ).solve(solver=solver, solver_kwargs=solver_kwargs)
 
     def kkt(self, devices, result, parameters=None, la=np):
         parameters = expand_params(parameters, devices)

@@ -42,7 +42,7 @@ class StorageUnit(AbstractDevice):
         The ADMM prox caches ``ymin``/``ymax`` behind ``self.has_changed``; any
         later mutation of ``power_availability`` MUST set ``has_changed = True``
         or ADMM will silently return a feasible-but-wrong dispatch.
-    soc_mode : {"fixed", "cyclic_free"}
+    soc_mode : {"fixed", "cyclic_free", "rolling"}
         Boundary condition on the state of charge of a block.
 
         * ``"fixed"`` (default, the historical behaviour) pins both endpoints:
@@ -53,16 +53,45 @@ class StorageUnit(AbstractDevice):
           stored, and still used to initialize the ADMM prox iterate, but they
           constrain nothing).  The level stays inside ``[0, E]`` through the
           existing inequality constraints.
+        * ``"rolling"`` is the rolling-horizon window boundary condition.  Only
+          the *opening* level is pinned, ``energy[:, 0] == initial_soc * E``
+          (the seed carried over from the previous window); ``final_soc`` is
+          ignored.  The closing level is instead bounded below by the level at
+          the commit boundary through the terminal rule
+          ``energy[:, T] >= energy[:, soc_anchor_index]`` -- "the advisory tail
+          must not end below where the committed hours left it".  The rule is
+          parameter-free and feasible by construction (the tail can always do
+          nothing), so it can never make a window infeasible or itself cause
+          shed, and it never constrains the committed hours.
+
+          ``"rolling"`` is **dispatch-only**: the implicit-differentiation path
+          (``_equality_matrices`` / ``_inequality_matrices``) and the ADMM prox
+          raise ``NotImplementedError``, and it is incompatible with the
+          windowed-SoC ADMM layout (``num_soc_windows > 1``).
 
         A plain attribute, not a per-device array: the whole fleet shares one
         mode.  It is set at construction and survives ``sample_time``,
         ``torchify`` and ``scale_power``.  The ADMM prox rebuilds its cached
         data when it changes, but the cvx path reads it on every call.
+    soc_anchor_index : int
+        Index of the commit boundary inside the window, used only by
+        ``soc_mode = "rolling"``.  Default 0, which degrades the terminal rule to
+        the more conservative ``energy[:, T] >= energy[:, 0]``.  A rolling
+        evaluator with a 24 h step and a 48 h look-ahead sets it to 24.  Must
+        satisfy ``0 <= soc_anchor_index <= T``.  Like ``soc_mode`` it is a plain
+        attribute shared by the whole fleet and survives ``sample_time``,
+        ``torchify`` and ``scale_power``.
     """
 
     #: Class-level default so that subclasses which build their state by hand
     #: (``zap.devices.dual.store.DualBattery``) still answer ``soc_mode``.
     soc_mode: str = "fixed"
+
+    #: Class-level default, mirroring :attr:`soc_mode`.
+    soc_anchor_index: int = 0
+
+    #: The boundary conditions ``soc_mode`` accepts.
+    SOC_MODES = ("fixed", "cyclic_free", "rolling")
 
     def __init__(
         self,
@@ -82,7 +111,8 @@ class StorageUnit(AbstractDevice):
         min_power_capacity=None,
         max_power_capacity=None,
         power_availability: Optional[NDArray] = None,
-        soc_mode: Literal["fixed", "cyclic_free"] = "fixed",
+        soc_mode: Literal["fixed", "cyclic_free", "rolling"] = "fixed",
+        soc_anchor_index: int = 0,
     ):
         if linear_cost is None:
             linear_cost = np.zeros(power_capacity.shape)
@@ -102,8 +132,15 @@ class StorageUnit(AbstractDevice):
         if power_availability is None:
             power_availability = np.ones(power_capacity.shape)
 
-        if soc_mode not in ("fixed", "cyclic_free"):
-            raise ValueError(f"soc_mode must be 'fixed' or 'cyclic_free', got {soc_mode!r}")
+        if soc_mode not in self.SOC_MODES:
+            raise ValueError(f"soc_mode must be one of {self.SOC_MODES}, got {soc_mode!r}")
+
+        if isinstance(soc_anchor_index, bool) or not isinstance(
+            soc_anchor_index, (int, np.integer)
+        ):
+            raise ValueError(f"soc_anchor_index must be an integer, got {soc_anchor_index!r}")
+        if int(soc_anchor_index) < 0:
+            raise ValueError(f"soc_anchor_index must be non-negative, got {int(soc_anchor_index)}")
 
         self.num_nodes = num_nodes
         self.name = name
@@ -121,6 +158,7 @@ class StorageUnit(AbstractDevice):
         self.max_power_capacity = make_dynamic(max_power_capacity)
         self.power_availability = make_dynamic(power_availability)
         self.soc_mode = str(soc_mode)
+        self.soc_anchor_index = int(soc_anchor_index)
 
         self.has_changed = True
         self.rho = -1.0
@@ -195,6 +233,7 @@ class StorageUnit(AbstractDevice):
         # `energy` is wider than the LP layout and the recursion has to be
         # evaluated per window. The cvxpy path always hits `num_windows == 1`.
         num_windows = self.num_soc_windows(state.energy.shape[1], T)
+        self._reject_rolling_in_windows(num_windows)
         if num_windows > 1:
             return self._windowed_equality_constraints(
                 power, state, energy_capacity, initial_soc, final_soc, T, num_windows, la
@@ -214,6 +253,14 @@ class StorageUnit(AbstractDevice):
             # Free cyclic boundary: the block starts wherever it ends. Both pins
             # are dropped, so `initial_soc` / `final_soc` are ignored here.
             constraints.append(state.energy[:, 0:1] - state.energy[:, T : (T + 1)])
+        elif self.soc_mode == "rolling":
+            # Rolling-horizon window: only the opening level is pinned, to the
+            # seed carried over from the previous window. `final_soc` is ignored;
+            # the closing level is bounded below by the terminal rule in
+            # `inequality_constraints`. Deliberately three blocks, like
+            # `cyclic_free`, so a caller that skips residuals[0] and sums the rest
+            # (ch3 `dispatch.admm_storage_residual_stats`) stays correct.
+            constraints.append(state.energy[:, 0:1] - la.multiply(initial_soc, energy_capacity))
         else:
             constraints.append(state.energy[:, 0:1] - la.multiply(initial_soc, energy_capacity))
             constraints.append(
@@ -221,6 +268,29 @@ class StorageUnit(AbstractDevice):
             )
 
         return constraints
+
+    def _reject_rolling_in_windows(self, num_windows: int) -> None:
+        """``soc_mode = "rolling"`` is incompatible with the windowed ADMM layout.
+
+        A windowed prox makes every window its own boundary-condition problem
+        (`battery_window`), which is a different model from the rolling-horizon
+        chain: the rolling window has one opening pin for the whole horizon and
+        one terminal rule tying its end to the commit boundary.  Silently applying
+        either to the other would return a feasible-but-wrong dispatch.
+        """
+        if num_windows > 1 and self.soc_mode == "rolling":
+            raise NotImplementedError(
+                "soc_mode='rolling' is incompatible with the windowed SoC layout "
+                f"(num_soc_windows={num_windows}); the rolling-horizon evaluator solves "
+                "one window per LP and must not be combined with `battery_window`"
+            )
+
+    def _rolling_anchor_index(self, time_horizon: int) -> int:
+        """Validated ``soc_anchor_index`` for a window of ``time_horizon`` hours."""
+        k = int(getattr(self, "soc_anchor_index", 0))
+        if not (0 <= k <= time_horizon):
+            raise ValueError(f"soc_anchor_index must lie in [0, T] for T = {time_horizon}, got {k}")
+        return k
 
     @staticmethod
     def num_soc_windows(energy_width: int, time_horizon: int) -> int:
@@ -318,7 +388,7 @@ class StorageUnit(AbstractDevice):
         energy_capacity = la.multiply(power_capacity, self.duration)
         p_eff = self._effective_power(power_capacity, la=la)
 
-        return [
+        constraints = [
             -state.energy,
             state.energy - energy_capacity,
             -state.charge,
@@ -326,6 +396,17 @@ class StorageUnit(AbstractDevice):
             -state.discharge,
             state.discharge - p_eff,
         ]
+
+        if self.soc_mode == "rolling":
+            # Terminal rule, APPENDED as block 6 and never inserted: blocks 1 / 3 / 5
+            # are the SoC-upper, charge-upper and discharge-upper multipliers that
+            # ch3 `accreditation.py` reads by index, so their positions are frozen.
+            T = power[0].shape[1]
+            self._reject_rolling_in_windows(self.num_soc_windows(state.energy.shape[1], T))
+            k = self._rolling_anchor_index(T)
+            constraints.append(state.energy[:, k : (k + 1)] - state.energy[:, T : (T + 1)])
+
+        return constraints
 
     def operation_cost(
         self,
@@ -385,9 +466,24 @@ class StorageUnit(AbstractDevice):
 
         return sp.coo_matrix((values, (rows, cols)), shape=shape)
 
+    #: Message of the dispatch-only gate on ``soc_mode = "rolling"``.
+    _ROLLING_DIFF_GATE = (
+        "soc_mode='rolling' is dispatch-only: the rolling-horizon boundary condition "
+        "has no KKT rows in the implicit-differentiation path, and the planner never "
+        "reaches it (a planning config is refused before this point). An untested KKT "
+        "row is worse than an explicit refusal; see WP-R0b of the rolling-horizon "
+        "evaluator spec."
+    )
+
+    def _reject_rolling_in_differentiation(self) -> None:
+        if self.soc_mode == "rolling":
+            raise NotImplementedError(self._ROLLING_DIFF_GATE)
+
     def _equality_matrices(
         self, equalities, power_capacity=None, initial_soc=None, final_soc=None, la=np
     ):
+        self._reject_rolling_in_differentiation()
+
         # Dimensions
         size = equalities[0].power[0].shape[1]
         time_horizon = int(size / self.num_devices)
@@ -423,6 +519,8 @@ class StorageUnit(AbstractDevice):
     def _inequality_matrices(
         self, inequalities, power_capacity=None, initial_soc=None, final_soc=None, la=np
     ):
+        self._reject_rolling_in_differentiation()
+
         size = inequalities[0].power[0].shape[1]
         e_size = inequalities[0].local_variables[0].shape[0]
 
@@ -502,6 +600,15 @@ class StorageUnit(AbstractDevice):
         inner_iterations=25,
         inner_atol=1e-6,
     ):
+        if getattr(self, "soc_mode", "fixed") == "rolling":
+            # WP-R2 augments the prox with the terminal-rule slack; until then the
+            # prox would silently fall through to the `fixed` branch (both endpoints
+            # pinned in ymin/ymax), which is a different model.
+            raise NotImplementedError(
+                "soc_mode='rolling' is not supported by the ADMM prox yet (WP-R2); "
+                "use the LP dispatch path for rolling-horizon windows"
+            )
+
         inner_weight = rho_power * inner_weight
 
         power_capacity = self.parameterize(power_capacity=power_capacity)
