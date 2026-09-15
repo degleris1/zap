@@ -347,12 +347,41 @@ class TestRollingGates(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             device.inequality_constraints(power, None, windowed, la=np)
 
-    def test_admm_prox_refuses_rolling(self):
+    def test_admm_prox_refuses_a_real_terminal_inequality(self):
+        """WP-R2: the prox carries the *price*, never the inequality.
+
+        ``soc_anchor_index`` of 0 (``window_nondecreasing``) or of the step
+        (``tail_nondecreasing``) puts ``energy[:, k] <= energy[:, T]`` on the
+        prox, which is neither one of its equality rows nor an elementwise box.
+        """
         device = toy_storage("rolling").torchify(machine="cpu", dtype=torch.float64)
         z = torch.zeros((device.num_devices, T), dtype=torch.float64)
         with self.assertRaises(NotImplementedError) as ctx:
             device.admm_prox_update(1.0, 1.0, [z], None, inner_iterations=2)
-        self.assertIn("WP-R2", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("no ADMM prox", message)
+        self.assertIn("terminal_value", message)
+
+    def test_admm_prox_accepts_the_two_rules_it_can_carry(self):
+        """A terminal *value*, and the trivial anchor of `terminal_rule: free`."""
+        priced = toy_storage(
+            "rolling", soc_terminal_value=np.array([[7.0], [3.0]])
+        ).torchify(machine="cpu", dtype=torch.float64)
+        free = toy_storage("rolling", soc_anchor_index=T).torchify(
+            machine="cpu", dtype=torch.float64
+        )
+        z = torch.zeros((2, T), dtype=torch.float64)
+        for device in (priced, free):
+            power, _angle, state = device.admm_prox_update(
+                1.0, 1.0, [z], None, inner_iterations=50
+            )
+            self.assertEqual(tuple(power[0].shape), (2, T))
+            self.assertEqual(tuple(state.energy.shape), (2, T + 1))
+            # The opening pin is a box on the projected iterate, so it is exact:
+            # `initial_soc` 0.4 of a 10 MW x 3 h row is 12 MWh.
+            np.testing.assert_allclose(state.energy[:, 0].numpy(), 12.0, atol=1e-9)
+            # ... and the closing level is *not* pinned to `final_soc` (18 MWh).
+            self.assertGreater(float(np.max(np.abs(state.energy[:, T].numpy() - 18.0))), 1e-6)
 
 
 # =====

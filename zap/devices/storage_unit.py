@@ -71,9 +71,15 @@ class StorageUnit(AbstractDevice):
           and ``cyclic_free``.
 
           ``"rolling"`` is **dispatch-only**: the implicit-differentiation path
-          (``_equality_matrices`` / ``_inequality_matrices``) and the ADMM prox
-          raise ``NotImplementedError``, and it is incompatible with the
-          windowed-SoC ADMM layout (``num_soc_windows > 1``).
+          (``_equality_matrices`` / ``_inequality_matrices``) raises
+          ``NotImplementedError``, and it is incompatible with the windowed-SoC
+          ADMM layout (``num_soc_windows > 1``).  The ADMM prox supports it
+          (WP-R2) whenever the terminal *inequality* is absent or trivial --
+          i.e. with a ``soc_terminal_value``, or with
+          ``soc_anchor_index == T`` -- and raises ``NotImplementedError``
+          otherwise, because ``energy[:, k] <= energy[:, T]`` for ``k < T`` is
+          neither a linear equality row of the prox's ``C`` matrix nor an
+          elementwise box and has no closed-form projection.
     soc_terminal_value : Optional[NDArray]
         Marginal value of energy still stored at the *end* of the window, in
         $/MWh, of shape ``(N,)`` or ``(N, 1)`` -- one price per row per window,
@@ -95,7 +101,10 @@ class StorageUnit(AbstractDevice):
         A plain attribute, not a per-device array: the whole fleet shares one
         mode.  It is set at construction and survives ``sample_time``,
         ``torchify`` and ``scale_power``.  The ADMM prox rebuilds its cached
-        data when it changes, but the cvx path reads it on every call.
+        data when it changes (it enters :meth:`_prox_data_key`, the cache key
+        beside ``has_changed``, and **not** the ADMM warm-start fingerprint,
+        which deliberately excludes device parameter *values*), but the cvx path
+        reads it on every call.
     soc_anchor_index : int
         Index of the commit boundary inside the window, used only by
         ``soc_mode = "rolling"``.  Default 0, which degrades the terminal rule to
@@ -318,6 +327,78 @@ class StorageUnit(AbstractDevice):
                 f"(num_soc_windows={num_windows}); the rolling-horizon evaluator solves "
                 "one window per LP and must not be combined with `battery_window`"
             )
+
+    def _reject_rolling_prox(self, time_horizon: int, num_scenarios: int) -> None:
+        """Gate ``soc_mode = "rolling"`` at the ADMM prox (WP-R2).
+
+        The prox supports the rolling window in the two shapes the rolling-horizon
+        evaluator's criterion and its ``free`` sensitivity produce:
+
+        * a ``soc_terminal_value`` -- a linear coefficient on the last energy slot
+          of ``b_vector``, which is exactly the slot the cvx ``operation_cost``
+          prices.  No constraint is added, so nothing else about the prox changes;
+        * no terminal value **and** ``soc_anchor_index == T`` -- the terminal rule
+          degenerates to ``energy[:, T] <= energy[:, T]``, a trivially satisfied row
+          that constrains nothing, so the prox is the ``fixed``-shaped problem with
+          the closing pin dropped.
+
+        The three *named sensitivities* with a real anchor (``k < T``:
+        ``tail_nondecreasing``, ``window_nondecreasing``) are refused.
+        ``energy[:, k] <= energy[:, T]`` is neither a linear equality row of ``C``
+        nor an elementwise box -- projecting onto ``box ∩ {s_T − s_k ≥ 0}`` has no
+        closed form -- so carrying it would need the ``3T + 2`` slack augmentation
+        of the spec's section 6.  That augmentation touches nine sites including
+        the jitted inner iteration and the cached Schur complement and serves no
+        published result (every ADMM row of the evaluator is the criterion), so it
+        is deliberately not built: an explicit refusal beats an untested prox that
+        would otherwise silently solve the *unconstrained* window.
+        """
+        if getattr(self, "soc_mode", "fixed") != "rolling":
+            return
+        if num_scenarios > 1:
+            self._reject_rolling_in_windows(num_scenarios)
+        if getattr(self, "soc_terminal_value", None) is not None:
+            return
+        k = self._rolling_anchor_index(time_horizon)
+        if k != time_horizon:
+            raise NotImplementedError(
+                "soc_mode='rolling' with the terminal inequality "
+                f"energy[:, {k}] <= energy[:, {time_horizon}] has no ADMM prox: the row is "
+                "neither an equality of the prox's SoC matrix nor an elementwise box, so "
+                "there is no closed-form projection (rolling-horizon spec section 6). Use "
+                "terminal_rule: terminal_value (the criterion, a linear price on stored "
+                "energy) or terminal_rule: free with an LP window solver for the "
+                "tail_nondecreasing / window_nondecreasing sensitivities."
+            )
+
+    def _prox_data_key(self):
+        """Cache key of the ADMM prox's fixed data, beside ``has_changed``.
+
+        ``temp_data`` holds the box bounds and the linear cost ``b``, and ``schur``
+        the factorisation of the SoC equality rows; ``soc_mode`` changes both,
+        ``soc_anchor_index`` selects which terminal shape is legal at all, and
+        ``soc_terminal_value`` is a coefficient *inside* ``b``.  A caller that
+        rewrites the price without setting ``has_changed`` would otherwise get the
+        previous window's price silently (the rolling loop does set it, but the
+        cache must not depend on that).
+
+        Deliberately **not** part of :class:`zap.admm.basic_solver.ADMMLayout`,
+        which fingerprints a warm start and excludes device parameter values on
+        purpose -- it is precisely because the price changes window to window that
+        window *k*'s state must still seed window *k+1*.
+        """
+        terminal = getattr(self, "soc_terminal_value", None)
+        if terminal is None:
+            fingerprint = None
+        elif torch.is_tensor(terminal):
+            fingerprint = tuple(terminal.detach().reshape(-1).tolist())
+        else:
+            fingerprint = tuple(np.asarray(terminal, dtype=float).reshape(-1).tolist())
+        return (
+            getattr(self, "soc_mode", "fixed"),
+            int(getattr(self, "soc_anchor_index", 0)),
+            fingerprint,
+        )
 
     def _rolling_anchor_index(self, time_horizon: int) -> int:
         """Validated ``soc_anchor_index`` for a window of ``time_horizon`` hours."""
@@ -649,15 +730,6 @@ class StorageUnit(AbstractDevice):
         inner_iterations=25,
         inner_atol=1e-6,
     ):
-        if getattr(self, "soc_mode", "fixed") == "rolling":
-            # WP-R2 augments the prox with the terminal-rule slack; until then the
-            # prox would silently fall through to the `fixed` branch (both endpoints
-            # pinned in ymin/ymax), which is a different model.
-            raise NotImplementedError(
-                "soc_mode='rolling' is not supported by the ADMM prox yet (WP-R2); "
-                "use the LP dispatch path for rolling-horizon windows"
-            )
-
         inner_weight = rho_power * inner_weight
 
         power_capacity = self.parameterize(power_capacity=power_capacity)
@@ -673,6 +745,8 @@ class StorageUnit(AbstractDevice):
         assert angle is None
         assert full_time_horizon % T == 0
 
+        self._reject_rolling_prox(T, num_scenarios)
+
         # Fixed data - constant between solves
         # Update: not constant if rho or inner_weight changes
         # So we update this once per solve
@@ -684,7 +758,8 @@ class StorageUnit(AbstractDevice):
         # complement (the prox constraint matrix gains a row), so a mode change
         # must invalidate both, exactly like `has_changed`.
         mode = getattr(self, "soc_mode", "fixed")
-        rebuild = self.has_changed or getattr(self, "_prox_soc_mode", None) != mode
+        prox_key = self._prox_data_key()
+        rebuild = self.has_changed or getattr(self, "_prox_soc_mode", None) != prox_key
 
         if rebuild:
             # print("Changing battery data.")
@@ -727,7 +802,7 @@ class StorageUnit(AbstractDevice):
             # _K = K_matrix(self, T, rho_power, inner_weight, machine)
             # self.K_inv = torch.linalg.inv(_K)
 
-        self._prox_soc_mode = mode
+        self._prox_soc_mode = prox_key
         self.has_changed = False
 
         # schur = self.schur
@@ -809,6 +884,16 @@ def b_vector(device: StorageUnit, T, num_scenarios=1, machine=None, dtype=None):
     sits on the ``x[T:2T]`` block -- one coefficient *per unit* (and per hour when
     ``linear_cost`` is time-varying), not row 0's coefficient for the whole fleet.
 
+    Under ``soc_mode = "rolling"`` with a ``soc_terminal_value`` it also carries
+    the rolling-horizon terminal value: ``operation_cost`` *subtracts*
+    ``soc_terminal_value * energy[:, T]``, whose prox coordinate is the last
+    energy slot ``x[3T]``, so the same coefficient is subtracted there (WP-R2).
+    That is the whole of the terminal rule in the prox -- a linear coefficient, no
+    new equality row, no new box, so ``A_matrix``, ``_hessian``, ``get_ymin_ymax``
+    and the Schur complement are untouched.  Both coefficients are in the scaled
+    system's money units: ``scale_costs`` divides them and ``scale_power`` leaves
+    them alone.
+
     Returns
     -------
     torch.Tensor of shape ``(N, S, 3T + 1, 1)`` with ``S == 1`` for a static cost
@@ -833,6 +918,14 @@ def b_vector(device: StorageUnit, T, num_scenarios=1, machine=None, dtype=None):
 
     b = torch.zeros((N, S, 3 * T + 1, 1), device=machine, dtype=dtype)
     b[:, :, T : (2 * T), 0] = alpha.to(dtype=dtype)
+
+    terminal = getattr(device, "soc_terminal_value", None)
+    if getattr(device, "soc_mode", "fixed") == "rolling" and terminal is not None:
+        if not torch.is_tensor(terminal):
+            terminal = torch.as_tensor(np.asarray(terminal, dtype=float))
+        # `- sum(pi * energy[:, T])`, the minus of `operation_cost`: holding
+        # energy past the horizon is worth `pi` per MWh, so it *lowers* the cost.
+        b[:, :, 3 * T, 0] -= terminal.to(device=b.device, dtype=dtype).reshape(N, 1)
     return b
 
 
@@ -847,7 +940,9 @@ def C_matrix(device: StorageUnit, T, machine=None, dtype=None):
     In ``soc_mode == "cyclic_free"`` one further row ``s_0 - s_T == 0`` is
     appended, which is how the free cyclic boundary condition enters the prox:
     the endpoints are no longer pinned in ``ymin`` / ``ymax``, only tied to each
-    other here.
+    other here.  ``soc_mode == "rolling"`` adds **no** row: its opening pin is a
+    box in ``get_ymin_ymax`` and its terminal value a coefficient in
+    :func:`b_vector`, so it has the same ``T`` rows as ``"fixed"``.
 
     Returns
     -------
@@ -1023,10 +1118,14 @@ def get_ymin_ymax(
     pmax_t : torch.Tensor
         Charge/discharge power bound of shape ``(N, num_scenarios * T)``. Callers
         broadcast a static ``(N, 1)`` bound before calling.
-    soc_mode : {"fixed", "cyclic_free"}
+    soc_mode : {"fixed", "cyclic_free", "rolling"}
         ``"fixed"`` pins the first and last energy slot to ``gamma1`` / ``gammaT``.
         ``"cyclic_free"`` leaves both free in ``[0, smax]``; the cyclic condition
         ``s_0 == s_T`` is imposed by the extra row of :func:`C_matrix` instead.
+        ``"rolling"`` pins the **opening** slot only -- the seed the previous
+        rolling window handed over -- and leaves the closing slot free in
+        ``[0, smax]``, where the terminal value in :func:`b_vector` prices it
+        (WP-R2).  An unrecognised mode is treated as ``"fixed"``, as before.
 
     Returns
     -------
@@ -1044,6 +1143,7 @@ def get_ymin_ymax(
     if soc_mode != "cyclic_free":
         ymin[:, :, 2 * T] = gamma1[:, 0:1]
         ymax[:, :, 2 * T] = gamma1[:, 0:1]
+    if soc_mode not in ("cyclic_free", "rolling"):
         ymin[:, :, -1] = gammaT[:, 0:1]
         ymax[:, :, -1] = gammaT[:, 0:1]
 

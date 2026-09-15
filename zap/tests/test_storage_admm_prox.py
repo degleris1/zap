@@ -7,7 +7,11 @@ used row 0's parameters for the whole fleet, and returned the unclipped inner
 iterate. Every test here fails on the pre-fix code.
 """
 
+import importlib.util
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 import cvxpy as cp
 import numpy as np
@@ -19,6 +23,9 @@ from zap.devices import StorageUnit
 from zap.devices.storage_unit import StorageUnitVariable
 
 torch.set_default_dtype(torch.float64)
+
+#: Path of the zap checkout, for the ``git show HEAD:`` baseline below.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def heterogeneous_battery(N=5, seed=0):
@@ -354,6 +361,297 @@ class TestADMMvsLP(unittest.TestCase):
         imbalance = float(torch.max(torch.abs(state.num_terminals * state.avg_power)).item())
         peak_load = float(np.max(np.asarray(devices[1].load)))
         self.assertLess(imbalance, 1e-4 * peak_load)
+
+
+# =====
+# WP-R2: the rolling-horizon window in the ADMM prox
+# =====
+
+
+def rolling_battery(T, *, terminal_value=None, anchor=None, N=5, seed=0):
+    """:func:`heterogeneous_battery` on ``soc_mode = "rolling"``.
+
+    ``anchor`` defaults to ``T``, which is what ch3's ``LPWindowSolver.anchor_index``
+    returns under both ADMM-legal terminal rules (``terminal_value`` and ``free``).
+    """
+    device = heterogeneous_battery(N=N, seed=seed)
+    device.soc_mode = "rolling"
+    device.soc_anchor_index = T if anchor is None else int(anchor)
+    if terminal_value is not None:
+        device.soc_terminal_value = np.broadcast_to(
+            np.asarray(terminal_value, dtype=float), (device.num_devices,)
+        ).reshape(-1, 1)
+    return device
+
+
+def energy_capacity(device) -> np.ndarray:
+    return np.asarray(device.power_capacity).reshape(-1) * np.asarray(device.duration).reshape(-1)
+
+
+def _head_storage_unit_module():
+    """``zap/devices/storage_unit.py`` at git HEAD, imported under its own name.
+
+    The prox returns arrays rather than a scalar objective, so the ``fixed`` /
+    ``cyclic_free`` regression is stated as **bit identity** against the pre-WP-R2
+    source instead of as captured numbers (the WP-R0b tests captured numbers
+    because they compared an LP objective).  ``None`` when this is not a git
+    checkout, in which case the caller skips.
+    """
+    try:
+        blob = subprocess.run(
+            ["git", "show", "HEAD:zap/devices/storage_unit.py"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):  # pragma: no cover - no checkout
+        return None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "head_storage_unit.py"
+        path.write_bytes(blob)
+        spec = importlib.util.spec_from_file_location("zap_head_storage_unit", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    return module
+
+
+class TestRollingProx(unittest.TestCase):
+    """Spec test 6: the rolling prox solves the same window the LP does."""
+
+    def setUp(self):
+        self.T = 12
+        self.rho = 1.0
+        rng = np.random.default_rng(7)
+        pmax = np.asarray(heterogeneous_battery().power_capacity).reshape(-1, 1)
+        self.z = rng.uniform(-1.0, 1.0, (5, self.T)) * pmax
+
+    def test_prox_matches_cvxpy_with_a_terminal_value(self):
+        device = rolling_battery(self.T, terminal_value=[0.0, 4.0, 12.0, 2.0, 30.0])
+        p_exact, e_exact, _, _ = exact_prox(device, self.z, self.rho)
+        p_admm, state = run_prox(device, self.z, self.rho, inner_iterations=4000)
+
+        tol = 1e-3 * float(np.max(device.power_capacity))
+        self.assertLess(float(np.max(np.abs(p_admm - p_exact))), tol)
+        self.assertLess(float(np.max(np.abs(np.asarray(state.energy) - e_exact))), tol)
+
+    def test_prox_matches_cvxpy_with_the_free_rule(self):
+        """No terminal value, anchor at ``T``: the rule is trivial and legal."""
+        device = rolling_battery(self.T)
+        blocks = device.inequality_constraints(
+            [self.z], None, _numeric_state(device, self.T), la=np
+        )
+        self.assertEqual(len(blocks), 7)  # block 6 is the trivial row
+        p_exact, _, _, _ = exact_prox(device, self.z, self.rho)
+        p_admm, _ = run_prox(device, self.z, self.rho, inner_iterations=4000)
+
+        tol = 1e-3 * float(np.max(device.power_capacity))
+        self.assertLess(float(np.max(np.abs(p_admm - p_exact))), tol)
+
+    def test_the_opening_is_pinned_and_the_closing_is_free(self):
+        device = rolling_battery(self.T, terminal_value=5.0)
+        _, state = run_prox(device, self.z, self.rho, inner_iterations=4000)
+        energy = np.asarray(state.energy)
+        emax = energy_capacity(device)
+
+        opening = np.asarray(device.initial_soc).reshape(-1) * emax
+        np.testing.assert_allclose(energy[:, 0], opening, atol=1e-9)
+        closing = np.asarray(device.final_soc).reshape(-1) * emax
+        self.assertGreater(float(np.max(np.abs(energy[:, -1] - closing))), 1e-3)
+        self.assertTrue(np.all(energy >= -1e-9))
+        self.assertTrue(np.all(energy <= emax.reshape(-1, 1) + 1e-9))
+
+    def test_a_higher_terminal_value_ends_the_window_fuller(self):
+        cheap = rolling_battery(self.T, terminal_value=0.0)
+        rich = rolling_battery(self.T, terminal_value=500.0)
+
+        _, state_cheap = run_prox(cheap, self.z, self.rho, inner_iterations=4000)
+        _, state_rich = run_prox(rich, self.z, self.rho, inner_iterations=4000)
+
+        self.assertGreater(
+            float(np.sum(np.asarray(state_rich.energy)[:, -1])),
+            float(np.sum(np.asarray(state_cheap.energy)[:, -1])) + 1e-3,
+        )
+
+    def test_changing_only_the_terminal_value_changes_the_prox(self):
+        """The cached prox data has to notice a price change, not just `has_changed`."""
+        device = rolling_battery(self.T, terminal_value=0.0).torchify(
+            machine="cpu", dtype=torch.float64
+        )
+        zt = torch.tensor(self.z, dtype=torch.float64)
+        kwargs = dict(inner_iterations=2000, inner_over_relaxation=1.8)
+
+        _, _, first = device.admm_prox_update(self.rho, self.rho, [zt], None, **kwargs)
+        first_energy = np.asarray(first.energy).copy()
+
+        # Deliberately *without* setting `has_changed`: the cache key must carry
+        # `soc_terminal_value` itself (spec section 6, "two cache hazards").
+        device.soc_terminal_value = torch.full_like(device.soc_terminal_value, 500.0)
+        _, _, second = device.admm_prox_update(self.rho, self.rho, [zt], None, **kwargs)
+
+        self.assertGreater(
+            float(np.sum(np.asarray(second.energy)[:, -1]) - np.sum(first_energy[:, -1])), 1e-3
+        )
+
+    def test_a_real_terminal_inequality_is_refused(self):
+        device = rolling_battery(self.T, anchor=self.T // 2).torchify(
+            machine="cpu", dtype=torch.float64
+        )
+        zt = torch.zeros((device.num_devices, self.T), dtype=torch.float64)
+        with self.assertRaises(NotImplementedError) as ctx:
+            device.admm_prox_update(1.0, 1.0, [zt], None, inner_iterations=2)
+        message = str(ctx.exception)
+        self.assertIn("terminal_value", message)
+        self.assertIn("no ADMM prox", message)
+
+    def test_a_terminal_value_makes_the_anchor_irrelevant(self):
+        """With a price there is no inequality at all, so any anchor is legal."""
+        device = rolling_battery(self.T, anchor=0, terminal_value=3.0)
+        p_exact, _, _, _ = exact_prox(device, self.z, self.rho)
+        p_admm, _ = run_prox(device, self.z, self.rho, inner_iterations=4000)
+        tol = 1e-3 * float(np.max(device.power_capacity))
+        self.assertLess(float(np.max(np.abs(p_admm - p_exact))), tol)
+
+
+def _numeric_state(device, T):
+    N = device.num_devices
+    return StorageUnitVariable(np.zeros((N, T + 1)), np.zeros((N, T)), np.zeros((N, T)))
+
+
+class TestExistingProxModesUnchanged(unittest.TestCase):
+    """`fixed` and `cyclic_free` prox outputs are bit-identical to pre-WP-R2 zap."""
+
+    def setUp(self):
+        self.head = _head_storage_unit_module()
+        if self.head is None:  # pragma: no cover - no git checkout
+            self.skipTest("cannot read zap/devices/storage_unit.py from git HEAD")
+        self.T = 12
+        rng = np.random.default_rng(7)
+        pmax = np.asarray(heterogeneous_battery().power_capacity).reshape(-1, 1)
+        self.z = rng.uniform(-1.0, 1.0, (5, self.T)) * pmax
+
+    def head_battery(self, soc_mode):
+        rng = np.random.default_rng(0)
+        N = 5
+        return self.head.StorageUnit(
+            num_nodes=1,
+            name=np.array([f"b{i}" for i in range(N)]),
+            terminal=np.zeros(N, dtype=int),
+            power_capacity=np.array([10.0, 25.0, 7.5, 100.0, 3.0]),
+            duration=np.array([4.0, 2.0, 8.0, 1.5, 6.0]),
+            charge_efficiency=np.array([0.95, 0.88, 1.0, 0.92, 0.80]),
+            discharge_efficiency=np.array([0.85, 0.99, 0.90, 1.0, 0.75]),
+            linear_cost=np.array([1.5, 0.0, 3.0, 0.25, 10.0]),
+            initial_soc=rng.uniform(0.3, 0.7, N),
+            final_soc=rng.uniform(0.3, 0.7, N),
+            soc_mode=soc_mode,
+        )
+
+    def test_prox_output_is_bit_identical(self):
+        for soc_mode in ("fixed", "cyclic_free"):
+            with self.subTest(soc_mode=soc_mode):
+                now = heterogeneous_battery()
+                now.soc_mode = soc_mode
+                before = self.head_battery(soc_mode)
+
+                zt = torch.tensor(self.z, dtype=torch.float64)
+                power_now, _, state_now = now.torchify(
+                    machine="cpu", dtype=torch.float64
+                ).admm_prox_update(
+                    1.0, 1.0, [zt], None, inner_iterations=50, inner_over_relaxation=1.8
+                )
+                power_before, _, state_before = before.torchify(
+                    machine="cpu", dtype=torch.float64
+                ).admm_prox_update(
+                    1.0, 1.0, [zt], None, inner_iterations=50, inner_over_relaxation=1.8
+                )
+
+                self.assertTrue(torch.equal(power_now[0], power_before[0]))
+                for a, b in zip(state_now, state_before, strict=True):
+                    self.assertTrue(torch.equal(a, b))
+
+
+class TestRollingADMMvsLP(unittest.TestCase):
+    """Spec tests 6 / 15 on the zap side: one rolling window, LP vs ADMM."""
+
+    def rolling_system(self, terminal_value):
+        net, devices, T = small_system()
+        battery = devices[-1]
+        battery.soc_mode = "rolling"
+        battery.soc_anchor_index = T
+        battery.initial_soc = np.array([[0.25], [0.75]])
+        battery.soc_terminal_value = np.array([[float(terminal_value)], [float(terminal_value)]])
+        return net, devices, T
+
+    def test_admm_matches_the_lp_within_the_gates(self):
+        net, devices, T = self.rolling_system(terminal_value=40.0)
+
+        lp = net.dispatch(devices, time_horizon=T, solver=cp.HIGHS, add_ground=False)
+
+        torch_devices = [d.torchify(machine="cpu", dtype=torch.float64) for d in devices]
+        solver = ADMMSolver(
+            machine="cpu",
+            dtype=torch.float64,
+            num_iterations=20000,
+            rho_power=1.0,
+            adaptive_rho=False,
+            battery_inner_iterations=1000,
+            battery_inner_over_relaxation=1.8,
+            atol=1e-10,
+            rtol=1e-10,
+            verbose=0,
+        )
+        state, _ = solver.solve(net, torch_devices, T)
+
+        admm_cost = float(state.objective)
+        lp_cost = float(lp.problem.value)
+        self.assertLess(abs(admm_cost - lp_cost) / abs(lp_cost), 1e-3)
+
+        # The two gates the ch3 window solver applies, on the toy's own scale.
+        imbalance = float(torch.max(torch.abs(state.num_terminals * state.avg_power)).item())
+        peak_load = float(np.max(np.asarray(devices[1].load)))
+        self.assertLess(imbalance, 1e-4 * peak_load)
+
+        outcome = state.as_outcome()
+        energy = np.asarray(outcome.local_variables[-1].energy, dtype=float)
+        charge = np.asarray(outcome.local_variables[-1].charge, dtype=float)
+        discharge = np.asarray(outcome.local_variables[-1].discharge, dtype=float)
+        beta = np.asarray(devices[-1].charge_efficiency).reshape(-1, 1)
+        eta = np.asarray(devices[-1].discharge_efficiency).reshape(-1, 1)
+        residual = energy[:, 1:] - (energy[:, :-1] + beta * charge - discharge / eta)
+        self.assertLess(float(np.max(np.abs(residual))), 1e-4)
+
+        # The opening pin holds exactly (it is a box on the projected iterate).
+        emax = energy_capacity(devices[-1])
+        opening = np.asarray(devices[-1].initial_soc).reshape(-1) * emax
+        np.testing.assert_allclose(energy[:, 0], opening, atol=1e-9)
+
+        # ... and the closing level agrees with the LP's, which is what the
+        # terminal value is there to steer.
+        lp_energy = np.asarray(lp.local_variables[-1][0], dtype=float)
+        self.assertLess(float(np.max(np.abs(energy[:, -1] - lp_energy[:, -1]))), 1e-2 * emax.max())
+
+    def test_the_terminal_value_moves_the_admm_solution_too(self):
+        closing = []
+        for value in (0.0, 400.0):
+            net, devices, T = self.rolling_system(terminal_value=value)
+            torch_devices = [d.torchify(machine="cpu", dtype=torch.float64) for d in devices]
+            solver = ADMMSolver(
+                machine="cpu",
+                dtype=torch.float64,
+                num_iterations=5000,
+                rho_power=1.0,
+                adaptive_rho=False,
+                battery_inner_iterations=500,
+                battery_inner_over_relaxation=1.8,
+                atol=1e-8,
+                rtol=1e-8,
+                verbose=0,
+            )
+            state, _ = solver.solve(net, torch_devices, T)
+            energy = np.asarray(state.as_outcome().local_variables[-1].energy, dtype=float)
+            closing.append(float(np.sum(energy[:, -1])))
+        self.assertGreater(closing[1], closing[0] + 1.0)
 
 
 if __name__ == "__main__":
