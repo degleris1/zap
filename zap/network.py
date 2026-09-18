@@ -64,7 +64,15 @@ PARAMETRIZABLE_ATTRS: dict[type, list[str]] = {
     Generator: ["dynamic_capacity", "linear_cost"],
     Load: ["load"],
     StorageUnit: ["power_availability", "initial_soc", "soc_terminal_value"],
-    DirectedLine: ["max_power", "min_power", "linear_cost"],
+    # ``group_limit`` is parameter-affine: it appears exactly once, as an
+    # additive right-hand side in ``matmul(group_matrix, power[1]) -
+    # group_limit``, against a constant ``group_matrix`` and a Variable.  It
+    # never meets another Parameter, so the retained problem stays DPP
+    # (import-limit profile spec 3.2).  ch3 parametrises it only when it is
+    # genuinely hourly -- a flat ``(G, 1)`` cap stays a constant, so the
+    # scalar-cap path is byte-identical to the one that produced every
+    # recorded capped number (profile spec P7).
+    DirectedLine: ["max_power", "min_power", "linear_cost", "group_limit"],
 }
 
 

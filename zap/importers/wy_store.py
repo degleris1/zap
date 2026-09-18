@@ -522,6 +522,144 @@ class HourWindow:
         return slice(int(self.start), int(self.stop))
 
 
+# ===========================================================================
+# The hour-of-day import-limit profile (import-limit profile spec 3.3)
+# ===========================================================================
+
+#: Hours of a non-leap model year, month by month.  The CA2040 exports stamp
+#: their timesteps ``2040-01-01 00:00 ... 2040-12-31 23:00`` but carry **8760**
+#: rows with a 28-day February, even though 2040 is a leap year, so a month
+#: mapping must use this synthetic calendar and never ``pd.date_range("2040-")``.
+NON_LEAP_MONTH_HOURS: tuple[int, ...] = (
+    744, 672, 744, 720, 744, 720, 744, 744, 720, 744, 720, 744,
+)
+
+#: UTC -> local offset of the CA2040 hour grid, in hours.  Fixed PDT, the same
+#: offset ``ch3.ra.persist.LOCAL_DAY_START_UTC_HOUR`` uses for ``lole_days`` and
+#: the shipped window ``[7, 8743)`` uses for its local-midnight block starts.
+DEFAULT_LOCAL_OFFSET_HOURS = 7
+
+
+def local_hour_of_day(hour, local_offset_hours: int = DEFAULT_LOCAL_OFFSET_HOURS) -> np.ndarray:
+    """0-based local hour of day of an absolute in-year UTC hour: ``(h - off) % 24``.
+
+    ``0`` is 00:00-01:00 local.  Hour-ENDING ``HE k`` of the CPUC tables is local
+    hour index ``k - 1`` (``HE17`` = 16:00-17:00 local = index 16).
+    """
+    return np.mod(np.asarray(hour, dtype=np.int64) - int(local_offset_hours), 24)
+
+
+def local_month(
+    hour,
+    local_offset_hours: int = DEFAULT_LOCAL_OFFSET_HOURS,
+    hours_per_year: int = 8760,
+) -> np.ndarray:
+    """1-12 local calendar month of an absolute in-year UTC hour.
+
+    Wraps, so hours ``0 .. off-1`` (which are the previous local year) read as
+    December.  Only the non-leap calendar of :data:`NON_LEAP_MONTH_HOURS` is
+    supported; anything else is refused rather than silently misaligned.
+    """
+    total = int(sum(NON_LEAP_MONTH_HOURS))
+    if int(hours_per_year) != total:
+        raise ValueError(
+            f"local_month needs a {total}-hour non-leap year (NON_LEAP_MONTH_HOURS), "
+            f"got hours_per_year={hours_per_year}: the month boundaries would be wrong"
+        )
+    local = np.mod(np.asarray(hour, dtype=np.int64) - int(local_offset_hours), total)
+    edges = np.cumsum(np.asarray(NON_LEAP_MONTH_HOURS, dtype=np.int64))
+    return (np.searchsorted(edges, local, side="right") + 1).astype(int)
+
+
+def hourly_import_limit(
+    *,
+    base_mw: float,
+    profile_mw: Optional[Sequence[float]],
+    months: Optional[Sequence[int]],
+    years: Sequence[int],
+    window: "HourWindow",
+    hours_per_year: int,
+    local_offset_hours: int = DEFAULT_LOCAL_OFFSET_HOURS,
+) -> np.ndarray:
+    """The MW cap on the import group, expanded onto the loaded hour grid.
+
+    ``profile_mw is None`` returns the 1-D ``(1,)`` base cap -- the flat case,
+    which the caller passes straight through so that ``DirectedLine`` keeps a
+    ``(G, 1)`` limit and the system is byte-identical to the pre-profile one.
+
+    Otherwise the 24 values are indexed by **local hour of day** and tiled over
+    ``years`` in ``options.years`` order, which is the year-major layout
+    ``load_system`` builds and ``ch3.ra.dispatch.block_time_periods`` indexes:
+    the returned array is ``(1, len(window) * len(years))``.
+
+    ``months`` restricts the profile to those local calendar months; every other
+    hour gets ``base_mw``.  ``months is None`` (the shipped default) needs no
+    calendar at all, which is what lets a 48 h test fixture use the profile.
+    """
+    base = float(base_mw)
+    if not np.isfinite(base) or base <= 0:
+        raise ValueError(f"import limit base_mw must be finite and > 0, got {base_mw!r}")
+    if profile_mw is None:
+        return np.array([base], dtype=np.float64)
+
+    profile = np.asarray(profile_mw, dtype=np.float64).reshape(-1)
+    if profile.size != 24:
+        raise ValueError(
+            "the import-limit profile is indexed by local hour of day and must have "
+            f"exactly 24 entries, got {profile.size}"
+        )
+    if not np.all(np.isfinite(profile)) or np.any(profile <= 0):
+        raise ValueError(
+            f"every import-limit profile entry must be finite and > 0, got {profile.tolist()}"
+        )
+    if np.any(profile > base):
+        raise ValueError(
+            f"the import-limit profile exceeds its base cap of {base} MW in hour(s) "
+            f"{np.flatnonzero(profile > base).tolist()}: base_mw is the loosest hour"
+        )
+
+    year_list = tuple(int(y) for y in years)
+    if not year_list:
+        raise ValueError("hourly_import_limit needs at least one weather year")
+
+    hours = np.arange(int(window.start), int(window.stop), dtype=np.int64)
+    if hours.size == 0:
+        raise ValueError(f"hourly_import_limit got an empty window {window}")
+    limit = profile[local_hour_of_day(hours, local_offset_hours)]
+
+    if months is not None:
+        wanted = np.asarray(sorted({int(m) for m in months}), dtype=np.int64)
+        if wanted.size == 0:
+            raise ValueError("hourly_import_limit got an empty month list; use None for all")
+        if np.any(wanted < 1) or np.any(wanted > 12):
+            raise ValueError(f"import-limit months must lie in 1..12, got {wanted.tolist()}")
+        inside = np.isin(local_month(hours, local_offset_hours, hours_per_year), wanted)
+        limit = np.where(inside, limit, base)
+
+    return np.tile(limit, len(year_list))[None, :].astype(np.float64)
+
+
+def import_limit_array(options: "LoadOptions", hours_per_year: int) -> Optional[np.ndarray]:
+    """:func:`hourly_import_limit` for a :class:`LoadOptions`, or ``None`` uncapped."""
+    if options.import_limit_mw is None:
+        if options.import_limit_profile_mw is not None:
+            raise ValueError(
+                "LoadOptions.import_limit_profile_mw is set but import_limit_mw is None: "
+                "a profile is a shape on a base cap, and without the cap no group is "
+                "built at all, so the profile would be silently ignored"
+            )
+        return None
+    return hourly_import_limit(
+        base_mw=float(options.import_limit_mw),
+        profile_mw=options.import_limit_profile_mw,
+        months=options.import_limit_months,
+        years=options.years,
+        window=options.window,
+        hours_per_year=int(hours_per_year),
+        local_offset_hours=int(options.import_limit_local_offset_hours),
+    )
+
+
 @dataclass(frozen=True)
 class LoadOptions:
     years: tuple[int, ...] = (2020,)
@@ -567,6 +705,22 @@ class LoadOptions:
     #: all flow on those links, i.e. the real plant PyPSA-USA places behind the
     #: import buses *plus* ``unspecified_imports``.
     import_limit_mw: Optional[float] = None
+    #: The **hour-of-day shape** of that cap: 24 MW values indexed by local hour
+    #: of day (``0`` = 00:00-01:00 local), the CPUC/SERVM simultaneous-import
+    #: profile (import-limit profile spec P2/P5).  ``None`` = a flat cap, and the
+    #: device then keeps a ``(G, 1)`` limit exactly as before the axis existed.
+    #: zap receives **numbers, never a policy name**: the named table is CH3
+    #: policy, like ``outage_params.yaml``.  A frozen dataclass, so this must be
+    #: a tuple.
+    import_limit_profile_mw: Optional[tuple[float, ...]] = None
+    #: Local calendar months the profile applies in; every other hour gets
+    #: :attr:`import_limit_mw`.  ``None`` = every month (the shipped default),
+    #: which needs no calendar at all.
+    import_limit_months: Optional[tuple[int, ...]] = None
+    #: UTC -> local offset used by both of the above.  Fixed PDT; ch3 passes
+    #: ``ch3.ra.persist.LOCAL_DAY_START_UTC_HOUR`` so that the profile's local
+    #: midnight and ``lole_days``' local midnight can never drift apart.
+    import_limit_local_offset_hours: int = DEFAULT_LOCAL_OFFSET_HOURS
     #: Retired by the minimal unit-commitment device (2026-09-14).  Kept for key
     #: stability and now inert; ``False`` is a ``ValueError`` pointing at
     #: :attr:`commitment`.
@@ -1411,9 +1565,12 @@ def _build_links(
                 int(mask.sum()),
                 interface_mw,
             )
+        # `(1,)` when there is no profile -- the flat case, bit-identical to the
+        # pre-profile device -- and `(1, len(window) * len(years))` when there is
+        # (import-limit profile spec 3.3).
         group_kwargs = {
             "group": np.where(mask, 0, -1).astype(int),
-            "group_limit": np.array([cap], dtype=np.float64),
+            "group_limit": import_limit_array(options, int(store.hours_per_year)),
             "group_name": np.array([IMPORT_LINK_CARRIER], dtype=object),
         }
 
@@ -1849,6 +2006,12 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         )
     n_hours = len(window) * len(years)
 
+    # The tightest hour of the import cap in *this* window, in MW, resolved here
+    # (before `scale_power` divides the device's copy by `power_unit`) so that
+    # the card and `meta` are always MW-denominated.  `None` when uncapped.
+    _import_limit = import_limit_array(options, int(store.hours_per_year))
+    import_limit_mw_min = None if _import_limit is None else float(np.min(_import_limit))
+
     buses = static["buses"].index
     bus_index = {b: i for i, b in enumerate(buses)}
 
@@ -2023,6 +2186,23 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "import_limit_mw": (
             None if options.import_limit_mw is None else float(options.import_limit_mw)
         ),
+        # The hour-of-day shape of that cap and the months it applies in
+        # (import-limit profile spec 3.3).  `import_limit_mw_min` is the
+        # tightest hour actually present in *this* window -- the one number a
+        # card reader wants, and equal to `import_limit_mw` when there is no
+        # profile.
+        "import_limit_profile_mw": (
+            None
+            if options.import_limit_profile_mw is None
+            else [float(v) for v in options.import_limit_profile_mw]
+        ),
+        "import_limit_months": (
+            None
+            if options.import_limit_months is None
+            else [int(m) for m in options.import_limit_months]
+        ),
+        "import_limit_local_offset_hours": int(options.import_limit_local_offset_hours),
+        "import_limit_mw_min": import_limit_mw_min,
         "import_link_capacity_mw": import_link_capacity_mw(static),
         "storage_soc_mode": str(options.storage_soc_mode),
         "commitment": str(options.commitment),

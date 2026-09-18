@@ -1,3 +1,4 @@
+import cvxpy as cp
 import numpy as np
 import scipy.sparse as sp
 import torch
@@ -36,7 +37,14 @@ class DirectedLine(Transporter):
     #: limit needs no new device code; ``wy_store`` builds exactly one, from
     #: ``carrier == "imports"``.
     group: Optional[NDArray] = None  # (N,) int; -1 = ungrouped
-    group_limit: Optional[NDArray] = None  # (G,) or (G, 1) MW
+    #: ``(G,)``, ``(G, 1)`` or ``(G, T)`` MW.  A ``(G, T)`` limit is the
+    #: **hour-of-day import profile** (import-limit profile spec P1, 2026-09-17)
+    #: and lives on the *same hour grid* as this device's ``min_power`` /
+    #: ``max_power`` / ``linear_cost``; :meth:`sample_time` slices it alongside
+    #: them.  It is a right-hand side only: ``_inequality_matrices`` builds the
+    #: family-2 Jacobian from :attr:`group_matrix` alone, so an hourly limit
+    #: changes no differentiation code.
+    group_limit: Optional[NDArray] = None  # (G,), (G, 1) or (G, T) MW
     group_name: Optional[NDArray] = None  # (G,) str; provenance / reporting only
     #: ``(G, N)`` 0/1 incidence, built in ``__post_init__``.  A dense float
     #: ndarray **field**, not a ``cached_property``, so that ``torchify`` finds it
@@ -74,9 +82,22 @@ class DirectedLine(Transporter):
                 f"DirectedLine.group has {group.size} entries but the device has "
                 f"{self.num_devices} rows"
             )
-        limit = np.asarray(self.group_limit, dtype=np.float64).reshape(-1)
-        num_groups = limit.size
-        if num_groups == 0:
+        # ``(G,)``, ``(G, 1)`` and ``(G, T)`` are all legal; only the first
+        # dimension is the group count.  A flat cap is widened to ``(G, 1)`` so
+        # that everything downstream -- the constraint, ``scale_power``,
+        # ``sample_time`` -- sees one shape family (profile spec P1).  ``T`` is
+        # unknown at construction, so a wrong-width limit cannot be validated
+        # here; it surfaces as a cvxpy broadcast error at solve time.
+        limit = np.asarray(self.group_limit, dtype=np.float64)
+        if limit.ndim == 1:
+            limit = limit[:, None]
+        elif limit.ndim != 2:
+            raise ValueError(
+                "DirectedLine.group_limit must be (G,), (G, 1) or (G, T), got shape "
+                f"{limit.shape}"
+            )
+        num_groups = limit.shape[0]
+        if limit.size == 0:
             raise ValueError("DirectedLine.group_limit is empty")
         if np.any(group < -1) or np.any(group >= num_groups):
             raise ValueError(
@@ -101,21 +122,26 @@ class DirectedLine(Transporter):
         # A group whose must-flow already exceeds its cap is infeasible by
         # construction, which surfaces as an unbounded VOLL bill or an
         # `infeasible` solver status hours later. Refuse it here instead.
-        must_flow = matrix @ (
-            np.asarray(self.min_power, dtype=np.float64).reshape(-1)
-            * np.asarray(self.nominal_capacity, dtype=np.float64).reshape(-1)
-        )
-        bad = np.flatnonzero(must_flow > limit)
+        # `min_power` may itself be hourly, so reduce both sides to one number
+        # per group: the group's **largest** must-flow against its **tightest**
+        # hour.  For the flat case (one value each) that is exactly the test
+        # this has always been; with hourly data it is conservative, which is
+        # the right direction for a "this is infeasible by construction" guard.
+        min_power = np.atleast_2d(np.asarray(self.min_power, dtype=np.float64))
+        capacity = np.asarray(self.nominal_capacity, dtype=np.float64).reshape(-1, 1)
+        must_flow = (matrix @ (min_power * capacity)).max(axis=1)
+        tightest = limit.min(axis=1)
+        bad = np.flatnonzero(must_flow > tightest)
         if bad.size:
             raise ValueError(
                 "DirectedLine group(s) "
-                f"{[(int(g), float(must_flow[g]), float(limit[g])) for g in bad]} have a "
+                f"{[(int(g), float(must_flow[g]), float(tightest[g])) for g in bad]} have a "
                 "minimum flow above their group_limit (group, min flow MW, limit MW): "
                 "the constraint is infeasible by construction"
             )
 
         self.group = group
-        self.group_limit = make_dynamic(limit)  # (G, 1)
+        self.group_limit = make_dynamic(limit)  # already 2-D; the call is symmetry
         self.group_matrix = matrix
         if self.group_name is not None:
             names = np.asarray(self.group_name).reshape(-1)
@@ -125,6 +151,29 @@ class DirectedLine(Transporter):
                     f"{num_groups} group(s)"
                 )
             self.group_name = names
+
+    def sample_time(self, time_periods, original_time_horizon):
+        """``Transporter.sample_time`` plus the hourly group limit.
+
+        ``Transporter`` slices exactly ``min_power`` / ``max_power`` /
+        ``linear_cost``; a ``(G, T)`` :attr:`group_limit` is on the same grid and
+        must be sliced with them, or a block solve would meet a full-window cap
+        (import-limit profile spec 3.1).  ``Transporter.time_horizon`` is a
+        hard-coded ``0``, so nothing else would catch the omission -- only
+        cvxpy's broadcast, at solve time.  A ``(G, 1)`` limit is left alone, the
+        same ``shape[1] > 1`` rule the inherited method uses.
+        """
+        dev = super().sample_time(time_periods, original_time_horizon)
+        limit = dev.group_limit
+        if limit is not None and len(np.shape(limit)) > 1 and np.shape(limit)[1] > 1:
+            if isinstance(limit, cp.Parameter):
+                raise ValueError(
+                    "DirectedLine.group_limit is a cp.Parameter and cannot be sliced by "
+                    "sample_time: parametrise the device *after* sampling the window, "
+                    "which is what ch3.ra.dispatch's retained-problem path does."
+                )
+            dev.group_limit = limit[:, time_periods]
+        return dev
 
     @property
     def is_ac(self):
