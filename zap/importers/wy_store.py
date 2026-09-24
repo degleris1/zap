@@ -717,6 +717,14 @@ class LoadOptions:
     #: :attr:`import_limit_mw`.  ``None`` = every month (the shipped default),
     #: which needs no calendar at all.
     import_limit_months: Optional[tuple[int, ...]] = None
+    #: Carriers kept on import buses (bus name ends in ``_imports``).  ``None``
+    #: keeps every row -- the historical system, bit-identical devices.  A tuple
+    #: holds every *other* generator / storage row on an import bus at zero
+    #: capacity (rows kept, order unchanged, like a lifetime retirement), and a
+    #: design cannot put capacity back on them.  zap receives carrier names,
+    #: never a policy name (the ``unspecified_only`` label is CH3 policy).
+    #: See :func:`apply_import_bus_rule`.
+    import_bus_keep_carriers: Optional[tuple[str, ...]] = None
     #: UTC -> local offset used by both of the above.  Fixed PDT; ch3 passes
     #: ``ch3.ra.persist.LOCAL_DAY_START_UTC_HOUR`` so that the profile's local
     #: midnight and ``lole_days``' local midnight can never drift apart.
@@ -1720,6 +1728,131 @@ def import_bus_mask(bus: Sequence[str]) -> np.ndarray:
     return np.array([str(b).endswith(IMPORT_BUS_SUFFIX) for b in bus], dtype=bool)
 
 
+# ===========================================================================
+# Import-bus resources (issue #35)
+# ===========================================================================
+
+#: Tables the import-bus rule acts on (links, loads and stores are never touched).
+IMPORT_BUS_RULE_TABLES = {"Generator": "generators", "StorageUnit": "storage_units"}
+
+
+def _normalized_keep_carriers(
+    keep_carriers: Optional[Sequence[str]],
+) -> Optional[tuple[str, ...]]:
+    """``None`` stays ``None``; anything else becomes a non-empty tuple of str."""
+    if keep_carriers is None:
+        return None
+    if isinstance(keep_carriers, str):
+        raise TypeError(
+            f"import_bus_keep_carriers must be a sequence of carrier names, not the string "
+            f"{keep_carriers!r}"
+        )
+    keep = tuple(str(c) for c in keep_carriers)
+    if not keep:
+        raise ValueError(
+            "import_bus_keep_carriers is an empty tuple, which would remove every row on "
+            "every import bus (the generic imports included). Pass None to keep every row."
+        )
+    return keep
+
+
+def import_bus_removed_mask(
+    df: pd.DataFrame, keep_carriers: Optional[Sequence[str]]
+) -> np.ndarray:
+    """Rows on an import bus whose carrier is not in ``keep_carriers``; all-False for None.
+
+    ``df`` is a static generator or storage table (it needs ``bus`` and
+    ``carrier`` columns).  An empty ``keep_carriers`` is a ``ValueError``, as in
+    :func:`apply_import_bus_rule`.
+    """
+    keep = _normalized_keep_carriers(keep_carriers)
+    n = len(df)
+    if keep is None or n == 0:
+        return np.zeros(n, dtype=bool)
+    on_import = import_bus_mask(df["bus"].to_numpy())
+    if "carrier" in df.columns:
+        carrier = df["carrier"].astype(str).to_numpy()
+    else:  # pragma: no cover - every CH3 export carries a carrier column
+        carrier = np.full(n, "", dtype=object)
+    return on_import & ~np.isin(carrier, list(keep))
+
+
+def apply_import_bus_rule(
+    static: dict[str, pd.DataFrame], keep_carriers: Optional[Sequence[str]]
+) -> tuple[dict[str, pd.DataFrame], dict]:
+    """Zero ``p_nom`` of every row an import bus is not allowed to keep.
+
+    The rule of issue #35 (Kamran, 2026-09-23): an import bus carries only the
+    carriers in ``keep_carriers`` -- for CH3, the generic ``unspecified_imports``
+    -- and every other generator / storage row there is held at zero capacity.
+    Rows are *kept* (order, names and count unchanged), exactly like a lifetime
+    retirement (:func:`apply_retirements`), so outage-pool slot keys,
+    :class:`SystemIndex`, ``design.json`` and the accreditation tables stay
+    aligned.  ``keep_carriers is None`` touches nothing.
+
+    Returns ``(static, summary)`` where ``static`` holds copies of the touched
+    tables and ``summary`` is ``{"keep_carriers", "removed_rows",
+    "removed_capacity_mw", "removed_capacity_mw_by_carrier", "removed_names"}``
+    keyed by component, mirroring :func:`apply_retirements`.
+    ``removed_capacity_mw`` is the capacity *this call* zeroed: post-lifetime on
+    the scenario pass, the design's MW on the design pass.  ``removed_rows`` and
+    ``removed_names`` count every masked row, including those already at 0.
+
+    Raises ``ValueError`` for an empty tuple, or for a kept carrier present on
+    no import bus in any of :data:`IMPORT_BUS_RULE_TABLES` (a typo guard: a
+    misspelt ``unspecified_imports`` would otherwise remove every import).
+    """
+    keep = _normalized_keep_carriers(keep_carriers)
+    out = dict(static)
+    summary: dict[str, Any] = {
+        "keep_carriers": None if keep is None else list(keep),
+        "removed_rows": {},
+        "removed_capacity_mw": {},
+        "removed_capacity_mw_by_carrier": {},
+        "removed_names": {},
+    }
+    if keep is not None:
+        present: set[str] = set()
+        for key in IMPORT_BUS_RULE_TABLES.values():
+            df = static.get(key)
+            if df is None or len(df) == 0 or "carrier" not in df.columns:
+                continue
+            on_import = import_bus_mask(df["bus"].to_numpy())
+            present.update(str(c) for c in df["carrier"].to_numpy()[on_import])
+        missing = sorted(set(keep) - present)
+        if missing:
+            raise ValueError(
+                f"import_bus_keep_carriers names carrier(s) {missing} that sit on no import "
+                f"bus (carriers present on import buses: {sorted(present)}); refusing a rule "
+                "that would remove every import-bus row"
+            )
+
+    for component, key in IMPORT_BUS_RULE_TABLES.items():
+        df = static.get(key)
+        if df is None:
+            continue
+        mask = import_bus_removed_mask(df, keep)
+        capacity = df["p_nom"].to_numpy(dtype=np.float64)
+        by_carrier: dict[str, float] = {}
+        if mask.any():
+            if "carrier" in df.columns:
+                grouped = (
+                    pd.Series(capacity[mask], index=df["carrier"].astype(str).to_numpy()[mask])
+                    .groupby(level=0)
+                    .sum()
+                    .sort_values(ascending=False)
+                )
+                by_carrier = {str(k): float(v) for k, v in grouped.items()}
+            df = df.copy()
+            df.loc[mask, "p_nom"] = 0.0
+            out[key] = df
+        summary["removed_rows"][component] = int(mask.sum())
+        summary["removed_capacity_mw"][component] = float(capacity[mask].sum())
+        summary["removed_capacity_mw_by_carrier"][component] = by_carrier
+        summary["removed_names"][component] = [str(n) for n in df.index[mask]]
+    return out, summary
+
+
 def available_capacity(
     system: Optional["LoadedSystem"] = None,
     *,
@@ -1896,10 +2029,13 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
     """Build a ``zap`` system from a dataset directory and its weather store.
 
     Order of the capacity rules, which matters (WP-E1): the lifetime
-    retirements are applied first, then ``options.design_capacity`` overwrites
-    ``p_nom``, and only then are the outage draw / UCAP factors looked up.  So a
-    design is never patched onto a system that was already derated at as-built
-    capacity -- the loaded system *is* the designed system.
+    retirements are applied first, then the import-bus rule
+    (``options.import_bus_keep_carriers``, issue #35), then
+    ``options.design_capacity`` overwrites ``p_nom`` and the import-bus rule is
+    enforced again (a design cannot put capacity back on a removed row), and
+    only then are the outage draw / UCAP factors looked up.  So a design is
+    never patched onto a system that was already derated at as-built capacity
+    -- the loaded system *is* the designed system.
     """
     dataset_dir = Path(dataset_dir)
     options = options if options is not None else LoadOptions()
@@ -1975,6 +2111,23 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
             "Lifetimes (model_year=%s from %s): no rows retired.", model_year, model_year_source
         )
 
+    # ---- Import-bus resources (issue #35) --------------------------------
+    # After the lifetime rule and *before* the `as_built` snapshot, so the
+    # scenario the demand-scaling denominators, the outage pool and the UCAP
+    # lookup see is the ruled one.  `None` touches nothing.
+    keep_carriers = options.import_bus_keep_carriers
+    static, import_bus = apply_import_bus_rule(static, keep_carriers)
+    if keep_carriers is not None:
+        logger.info(
+            "Import-bus rule (keep %s): %d generator rows / %.1f MW and %d storage rows / "
+            "%.1f MW held at 0 (MW zeroed after the lifetime rule).",
+            list(keep_carriers),
+            import_bus["removed_rows"].get("Generator", 0),
+            import_bus["removed_capacity_mw"].get("Generator", 0.0),
+            import_bus["removed_rows"].get("StorageUnit", 0),
+            import_bus["removed_capacity_mw"].get("StorageUnit", 0.0),
+        )
+
     # ---- Design capacities (WP-E1) ---------------------------------------
     # The design is imposed on the static tables *here*, after the lifetime rule
     # and before the outage / UCAP lookup below, so every availability
@@ -1984,6 +2137,20 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
     # not move from one design to the next.
     as_built = static
     static, design_summary = apply_design_capacity(static, options.design_capacity)
+    # Re-enforce the import-bus rule: a design (an older `design.json`, or one
+    # planned under the other setting) cannot put capacity back on a removed
+    # row.  zap does not refuse -- the policy gate is the caller's preflight --
+    # but it says so and records the MW.
+    static, import_bus_design = apply_import_bus_rule(static, keep_carriers)
+    design_mw_removed = import_bus_design["removed_capacity_mw"]
+    if any(v > 0.0 for v in design_mw_removed.values()):
+        logger.warning(
+            "Design %s puts capacity on import-bus rows the rule removes (keep %s); "
+            "held at 0: %s MW.",
+            options.design_id or "<unnamed>",
+            list(keep_carriers or ()),
+            {k: round(v, 3) for k, v in design_mw_removed.items() if v > 0.0},
+        )
     if design_summary["applied"]:
         logger.info(
             "Design %s applied to the static tables (%s).",
@@ -2171,6 +2338,11 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         "retired_capacity_mw": retirements["retired_capacity_mw"],
         "retired_capacity_mw_by_carrier": retirements["retired_capacity_mw_by_carrier"],
         "retired_names": retirements["retired_names"],
+        # The import-bus rule (issue #35): always present, zero counts when
+        # `import_bus_keep_carriers is None`.  `removed_capacity_mw` is what the
+        # scenario pass zeroed (post-lifetime); `design_mw_removed` is what the
+        # re-enforcement after the design zeroed.
+        "import_bus_resources": {**import_bus, "design_mw_removed": design_mw_removed},
         "design_id": options.design_id,
         "design_capacity_applied": bool(design_summary["applied"]),
         "design_capacity_digest": design_summary["digest"],

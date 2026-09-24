@@ -78,6 +78,21 @@ TINY_STORAGE = [
     ("z2 PHS", "z2", "PHS", 20.0, 8.0, 0.90, 0.90, 0.0, 1970, np.inf),
 ]
 
+#: Real plant on the import bus, written only with ``extra_import_rows=True``
+#: (import-bus resources spec, issue #35): the shape of the out-of-state plant
+#: PyPSA-USA places at ``p13_imports`` / ``p28_imports``.  Appended *after* the
+#: rows above, so every existing index and number is unchanged when the flag is
+#: off.  The CCGT is ``p_nom_extendable`` so the expansion guard is exercised.
+#: Same tuple layout as :data:`TINY_GENERATORS` / :data:`TINY_STORAGE`.
+TINY_EXTRA_IMPORT_GENERATORS = [
+    ("z1_imports CCGT", "z1_imports", "CCGT", 40.0, 25.0, 0.50, 29000.0, 1.0, False, 2030, 30.0),
+]
+TINY_EXTRA_IMPORT_STORAGE = [
+    ("z1_imports battery", "z1_imports", "battery", 10.0, 2.0, 0.95, 0.95, 27491.0, 2035, 20.0),
+]
+#: The extendable rows among the extras.
+TINY_EXTRA_IMPORT_EXTENDABLE = frozenset({"z1_imports CCGT"})
+
 TINY_BUSES = ["z1", "z2", "z1_imports", "z1_exports"]
 
 #: ``(x, y)`` per bus, in the same order as :data:`TINY_BUSES`.
@@ -157,9 +172,24 @@ def _timeseries_frame(
 
 
 def write_tiny_dataset(
-    root: Path, *, n_hours: int = 48, years: Sequence[int] = (2020, 2021)
+    root: Path,
+    *,
+    n_hours: int = 48,
+    years: Sequence[int] = (2020, 2021),
+    extra_import_rows: bool = False,
 ) -> Path:
-    """Write a synthetic dataset with the same shape as a pypsa-usa export."""
+    """Write a synthetic dataset with the same shape as a pypsa-usa export.
+
+    ``extra_import_rows`` appends one CCGT generator (extendable) and one battery
+    on ``z1_imports`` (:data:`TINY_EXTRA_IMPORT_GENERATORS`,
+    :data:`TINY_EXTRA_IMPORT_STORAGE`): the rows the import-bus rule removes.
+    Off by default, so no existing tiny-fixture number moves.
+    """
+    generator_rows = list(TINY_GENERATORS)
+    storage_rows = list(TINY_STORAGE)
+    if extra_import_rows:
+        generator_rows += TINY_EXTRA_IMPORT_GENERATORS
+        storage_rows += TINY_EXTRA_IMPORT_STORAGE
     root = Path(root)
     static = root / "static"
     ts = root / "timeseries"
@@ -186,7 +216,7 @@ def write_tiny_dataset(
                 "bus": bus,
                 "carrier": carrier,
                 "p_nom": p_nom,
-                "p_nom_extendable": False,
+                "p_nom_extendable": name in TINY_EXTRA_IMPORT_EXTENDABLE,
                 "p_min_pu": 0.0,
                 "p_max_pu": p_max_pu,
                 "e_sum_min": -np.inf,
@@ -212,7 +242,7 @@ def write_tiny_dataset(
                 _,
                 build_year,
                 lifetime,
-            ) in TINY_GENERATORS
+            ) in generator_rows
         ]
     ).set_index("name")
     gens.to_csv(static / "generators.csv")
@@ -277,7 +307,7 @@ def write_tiny_dataset(
                 cc,
                 build_year,
                 lifetime,
-            ) in TINY_STORAGE
+            ) in storage_rows
         ]
     ).set_index("name").to_csv(static / "storage_units.csv")
 
@@ -308,7 +338,7 @@ def write_tiny_dataset(
         ]
     ).set_index("name").to_csv(static / "carriers.csv")
 
-    gen_cols = [g[0] for g in TINY_GENERATORS if g[8]]
+    gen_cols = [g[0] for g in generator_rows if g[8]]
     _timeseries_frame(gen_cols, generator_profile, years, n_hours).to_parquet(
         ts / "generators_t_p_max_pu.parquet"
     )
