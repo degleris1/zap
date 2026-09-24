@@ -32,6 +32,9 @@ class AbstractPlanningProblem:
         self.layer = layer
         self.lower_bounds = lower_bounds
         self.upper_bounds = upper_bounds
+        #: Per-entry expansion factors installed for exactly one batch by
+        #: :meth:`set_batch_expansion`; ``None`` means the ratio weights.
+        self._batch_expansion = None
 
         if self.lower_bounds is None:
             self.lower_bounds = {
@@ -125,6 +128,28 @@ class AbstractPlanningProblem:
     def num_subproblems(self):
         return 1
 
+    def set_batch_expansion(self, batch, expansion) -> None:
+        """Install per-entry expansion factors for exactly this batch (None clears).
+
+        The expansion ``e_b`` multiplies the population weight ``w_b`` of each
+        batch entry, so the applied weight is ``e_b * w_b`` -- the
+        Horvitz-Thompson weight ``w_b / pi_b`` when ``e_b = 1 / pi_b`` is the
+        inverse inclusion probability of the sampling design that chose the
+        batch.  It applies **only** to a batch equal to ``batch`` (same indices,
+        same order): a full pass, or any other batch, gets today's weights, so a
+        stale expansion can never leak into a checkpoint or a final pass.
+        """
+        if expansion is None:
+            self._batch_expansion = None
+            return
+        indices = tuple(int(b) for b in batch)
+        values = np.asarray(expansion, dtype=float).reshape(-1)
+        if values.size != len(indices):
+            raise ValueError(
+                f"expansion has {values.size} entries for a batch of {len(indices)}"
+            )
+        self._batch_expansion = (indices, values)
+
     def __call__(self, **kwargs):
         return self.forward(**kwargs)
 
@@ -178,6 +203,7 @@ class AbstractPlanningProblem:
         tol_stationarity=None,
         stationarity_scale=None,
         grad_history_every=0,
+        batch_sampler=None,
     ):
         """Run the descent loop.
 
@@ -230,6 +256,20 @@ class AbstractPlanningProblem:
 
         ``grad_history_every`` (0 = off) is the sampling period of the
         ``grad_sampled`` / ``opt_moments`` trackers.
+
+        ``batch_sampler(iteration: int, state: dict) -> (list[int], np.ndarray | None)``
+        lets the caller choose each iteration's batch.  It is called with the
+        parameters the batch is about to be solved at: for iteration 0 after
+        ``initialize_parameters`` (and after the optional ``init_full_loss``
+        pass), and for iteration ``i >= 1`` after the step and the projection --
+        so a caller can prepare the batch's subproblems at exactly that state.
+        It returns sorted, distinct subproblem indices and optional per-entry
+        expansion factors (installed with :meth:`set_batch_expansion`; ``None``
+        keeps the ratio weights).  When it is given, ``batch_strategy`` and
+        ``batch_size`` are ignored, and ``peak_net_load_k`` must be ``None``
+        (``ValueError``).  The returned batch is stamped on ``self.batch``
+        exactly as the built-in strategies do.  Without it every code path is
+        unchanged.
         """
         if algorithm is None:
             algorithm = GradientDescent()
@@ -256,6 +296,12 @@ class AbstractPlanningProblem:
 
         assert all([t in TRACKER_MAPS for t in trackers])
 
+        if batch_sampler is not None and peak_net_load_k is not None:
+            raise ValueError(
+                "batch_sampler and peak_net_load_k are exclusive: a caller-chosen batch "
+                "has no peak-net-load fill"
+            )
+
         # If peak_net_load_k is set, batch_strategy controls fill behavior
         if peak_net_load_k is not None:
             _peak_fill_strategy = batch_strategy  # "sequential", "random", "none"
@@ -281,7 +327,9 @@ class AbstractPlanningProblem:
         self.stop_reason = "num_iterations"
 
         # Peak net load initialization
-        if batch_strategy == "peak_net_load":
+        if batch_sampler is not None:
+            batch = None  # chosen below, after the optional full pass
+        elif batch_strategy == "peak_net_load":
             assert peak_net_load_k is not None, (
                 "peak_net_load_k must be set when batch_strategy='peak_net_load'"
             )
@@ -319,6 +367,9 @@ class AbstractPlanningProblem:
         # TODO - We evaluate the full loss twice :/
         if init_full_loss:
             self.forward(**state)
+
+        if batch_sampler is not None:
+            batch = self._sample_batch(batch_sampler, 0, state)
 
         # Initialize loop
         self.iteration = 0
@@ -383,7 +434,9 @@ class AbstractPlanningProblem:
                 torch.cuda.empty_cache()
 
             # Update batch and loss
-            if batch_strategy == "sequential":
+            if batch_sampler is not None:
+                batch = self._sample_batch(batch_sampler, self.iteration, state)
+            elif batch_strategy == "sequential":
                 batch = get_next_batch(batch, batch_size, self.num_subproblems)
             elif batch_strategy == "random":
                 batch = sorted(_batch_rng.choice(
@@ -467,6 +520,23 @@ class AbstractPlanningProblem:
             iteration_hook(self.iteration, state, history, True)
 
         return state, history
+
+    def _sample_batch(self, batch_sampler, iteration: int, state: dict) -> list[int]:
+        """Ask the caller's sampler for a batch, check it, install its expansion."""
+        batch, expansion = batch_sampler(int(iteration), state)
+        batch = [int(b) for b in batch]
+        if not batch:
+            raise ValueError("batch_sampler returned an empty batch")
+        if batch != sorted(set(batch)):
+            raise ValueError(
+                f"batch_sampler must return sorted, distinct subproblem indices; got {batch}"
+            )
+        if batch[0] < 0 or batch[-1] >= self.num_subproblems:
+            raise ValueError(
+                f"batch_sampler returned indices outside [0, {self.num_subproblems}): {batch}"
+            )
+        self.set_batch_expansion(batch, expansion)
+        return batch
 
     def initialize_parameters(self, initial_state):
         if initial_state is None:
@@ -598,6 +668,7 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
 
         self.subproblems = new_subproblems
         self.weights = new_weights
+        self._batch_expansion = None
         #: Per-subproblem forward/backward timing prints are gated on this;
         #: ``AbstractPlanningProblem.solve`` sets it from its ``verbosity`` kwarg.
         self.verbosity = 0
@@ -762,6 +833,9 @@ class StochasticPlanningProblem(AbstractPlanningProblem):
         return self._get_batch_weights(list(self.batch if batch is None else batch))
 
     def _get_batch_weights(self, batch):
+        expansion = getattr(self, "_batch_expansion", None)
+        if expansion is not None and tuple(int(b) for b in batch) == expansion[0]:
+            return expansion[1] * np.asarray(self.weights, dtype=float)[list(batch)]
         total_batch_weight = sum([self.weights[b] for b in batch])
         total_weight = sum(self.weights)
         return (total_weight / total_batch_weight) * np.array(self.weights)[batch]
