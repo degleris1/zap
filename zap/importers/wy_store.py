@@ -18,7 +18,9 @@ datasets (``data/ca2040_z4``, ``data/ca2040_county``).  It has two halves:
 
 Key modelling decisions implemented here (see ``memory/plans/2026-09-08-phase1-spec.md``):
 
-* D2 -- device order is ``[Generator, Load, DirectedLine, StorageUnit, ExportSink]``.
+* D2 -- device order is ``[Generator, Load, DirectedLine, StorageUnit, ExportSink]``,
+  followed by ``[PerfectGenerator, PerfectLink]`` only when
+  ``LoadOptions.perfect_capacity_mw > 0`` (perfect-capacity hub spec, 2026-09-23).
 * D3 -- load shedding is ``Load.linear_cost = voll``; no slack device is added.
 * D4 -- ``zap.devices.store.Store`` is not used; export stores become ``Injector`` sinks.
 * D5 -- links become ``DirectedLine`` (directional, signed linear cost, efficiency).
@@ -52,6 +54,13 @@ import zarr
 
 from zap.devices.abstract import AbstractDevice
 from zap.devices.injector import Generator, Injector, Load
+from zap.devices.perfect_capacity import (
+    PERFECT_CARRIER,
+    PERFECT_HUB_BUS,
+    PERFECT_LINK_HEADROOM,
+    perfect_capacity_devices,
+    perfect_load_nodes,
+)
 from zap.devices.storage_unit import StorageUnit
 from zap.network import PowerNetwork
 
@@ -761,6 +770,12 @@ class LoadOptions:
     #: of extra firm demand".  It is applied *after* demand scaling, so it is an
     #: absolute MW increment and not a fraction of anything.
     firm_load_mw: float = 0.0
+    #: Perfect capacity (MW) at a hub bus appended after every dataset bus, joined to
+    #: every load bus by a lossless, zero-cost, one-way link rated
+    #: PERFECT_LINK_HEADROOM * P (perfect-capacity hub spec, 2026-09-23).  0.0 = no
+    #: hub node and no device: the system is bit-identical to one built before the
+    #: field existed.  Never outaged, never a design row, never a planning parameter.
+    perfect_capacity_mw: float = 0.0
     dtype: str = "float64"
 
 
@@ -2062,6 +2077,12 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         raise ValueError(f"Unknown export_mode {options.export_mode!r}")
     if options.dtype != "float64":
         raise NotImplementedError("Only float64 systems are supported in phase 1")
+    perfect_mw = float(options.perfect_capacity_mw)
+    if not np.isfinite(perfect_mw) or perfect_mw < 0.0:
+        raise ValueError(
+            f"LoadOptions.perfect_capacity_mw must be finite and >= 0 MW, got "
+            f"{options.perfect_capacity_mw!r} (a firm-load increment is `firm_load_mw`)"
+        )
 
     store = WeatherStore.open(dataset_dir)
     static = _read_static(dataset_dir)
@@ -2182,6 +2203,21 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
     buses = static["buses"].index
     bus_index = {b: i for i, b in enumerate(buses)}
 
+    # ---- Perfect-capacity hub node (perfect-capacity hub spec 4.2) --------
+    # The hub is appended as the *last* node and entered in `bus_index` before
+    # any `_build_*` call, so every device's `num_nodes = len(bus_index)` is
+    # n + 1; no static table references it, so every existing terminal is
+    # unchanged.  P = 0 adds nothing at all.
+    hub_node: int | None = None
+    if perfect_mw > 0.0:
+        if PERFECT_HUB_BUS in bus_index:
+            raise ValueError(
+                f"static/buses.csv has a bus named {PERFECT_HUB_BUS!r}, the name reserved for "
+                "the perfect-capacity hub; rename it or build with perfect_capacity_mw = 0"
+            )
+        hub_node = len(buses)
+        bus_index[PERFECT_HUB_BUS] = hub_node
+
     # ---- Reliability heuristics ------------------------------------------
     gen_ucap = storage_ucap = None
     gen_outage = storage_outage = None
@@ -2266,12 +2302,56 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
             "for evaluation, or cap the sink by the built e_nom before trusting export revenue."
         )
 
+    # ---- Perfect-capacity hub devices (spec 4.2 steps 2-3) --------------
+    # The load nodes come from the built load profile: after demand scaling and
+    # the firm-load increment (a positive increment never changes the support of
+    # f_n).  The two devices go *after* ExportSink, so no existing
+    # `device_index` value moves.
+    perfect_gen = perfect_link = None
+    perfect_info: dict | None = None
+    hub_labels: dict[str, tuple] = {}
+    if hub_node is not None:
+        node_names = np.empty(len(bus_index), dtype=object)
+        for bus_name, i in bus_index.items():
+            node_names[i] = bus_name
+        load_nodes = perfect_load_nodes(load.load, load.terminal, len(bus_index))
+        load_buses = [str(node_names[i]) for i in load_nodes]
+        perfect_gen, perfect_link = perfect_capacity_devices(
+            num_nodes=len(bus_index),
+            hub_node=hub_node,
+            load_nodes=load_nodes,
+            capacity_mw=perfect_mw,
+            load_bus_names=load_buses,
+        )
+        hub_labels = {
+            "PerfectGenerator": (
+                pd.Index(list(perfect_gen.name)),
+                np.array([PERFECT_CARRIER], dtype=object),
+                np.array([PERFECT_HUB_BUS], dtype=object),
+            ),
+            "PerfectLink": (
+                pd.Index(list(perfect_link.name)),
+                np.full(len(load_buses), PERFECT_CARRIER, dtype=object),
+                np.array(load_buses, dtype=object),
+            ),
+        }
+        perfect_info = {
+            "hub_node": int(hub_node),
+            "hub_bus": PERFECT_HUB_BUS,
+            "load_buses": load_buses,
+            "load_nodes": [int(i) for i in load_nodes],
+            "link_headroom": float(PERFECT_LINK_HEADROOM),
+            "link_mw": float(PERFECT_LINK_HEADROOM * perfect_mw),
+        }
+
     ordered = [
         ("Generator", generator),
         ("Load", load),
         ("DirectedLine", line),
         ("StorageUnit", storage),
         ("ExportSink", sink),
+        ("PerfectGenerator", perfect_gen),
+        ("PerfectLink", perfect_link),
     ]
 
     devices: list[AbstractDevice] = []
@@ -2289,6 +2369,9 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         index.device_index[key] = len(devices)
         devices.append(dev)
 
+        if key in hub_labels:
+            index.names[key], index.carrier[key], index.bus[key] = hub_labels[key]
+            continue
         table = static[key_to_static[key]]
         if key == "ExportSink":
             table = table[table["carrier"] == "exports"]
@@ -2307,7 +2390,8 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         dev.scale_costs(options.cost_unit)
         dev.scale_power(options.power_unit)
 
-    network = PowerNetwork(len(buses))
+    # `len(bus_index)`, not `len(buses)`: the hub, when present, is the last node.
+    network = PowerNetwork(len(bus_index))
 
     meta = {
         "dataset": dataset_dir.name,
@@ -2326,6 +2410,11 @@ def load_system(dataset_dir: Path, options: Optional[LoadOptions] = None) -> Loa
         # pro-rata to window peak (accreditation spec D15). 0.0 on every ordinary
         # run; non-zero only on an ELCC probe.
         "firm_load_mw": float(options.firm_load_mw),
+        # Perfect capacity at the hub (perfect-capacity hub spec 4.2): always
+        # present; `perfect_capacity` is None at P = 0, else the hub's node, the
+        # load buses its links reach, and the link rating in MW.
+        "perfect_capacity_mw": perfect_mw,
+        "perfect_capacity": perfect_info,
         "voll": float(options.voll),
         "ucap_derate": bool(options.ucap_derate),
         "outage_draw": options.outage_draw,
